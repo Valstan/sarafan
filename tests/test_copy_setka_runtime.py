@@ -90,10 +90,12 @@ class _WorkTable:
 
 
 class _Region:
-    def __init__(self, code, vk_group_id):
+    def __init__(self, code, vk_group_id, *, id=None, parent_region_id=None):
         self.code = code
         self.vk_group_id = vk_group_id
         self.is_active = True
+        self.id = id
+        self.parent_region_id = parent_region_id
 
 
 def _patch_copy_setka_deps(stack, *, parse_tokens, wall_by_token, publisher):
@@ -311,3 +313,152 @@ async def test_copy_setka_gives_up_after_max_tries(monkeypatch):
     assert out["posts_published"] == 0
     assert wt.hash == []  # backstop сработал — pending снят
     assert wt.lip == ["-167381590_999"]  # пост закрыт, новые не блокируются
+
+
+# ---------------------------------------------------------------------------
+# Слово-маршрут: «Киров»/«Казань» сужают рассылку до области (заказ 2026-09-28)
+# ---------------------------------------------------------------------------
+
+
+def _scope_tree():
+    """kirov_obl(mi, vp) + tatarstan_obl(elabuga) — как в проде."""
+    return [
+        _Region("kirov_obl", -1001, id=1, parent_region_id=None),
+        _Region("mi", -1002, id=2, parent_region_id=1),
+        _Region("vp", -1003, id=3, parent_region_id=1),
+        _Region("tatarstan_obl", -1004, id=4, parent_region_id=None),
+        _Region("elabuga", -1005, id=5, parent_region_id=4),
+    ]
+
+
+def test_scope_kirov_is_oblast_plus_its_raions():
+    from modules.copy_setka_network import resolve_scope_codes
+
+    assert resolve_scope_codes("Новости Кировской области", _scope_tree()) == {
+        "kirov_obl",
+        "mi",
+        "vp",
+    }
+
+
+def test_scope_kazan_case_insensitive():
+    from modules.copy_setka_network import resolve_scope_codes
+
+    assert resolve_scope_codes("КАЗАНЬ зовёт", _scope_tree()) == {"tatarstan_obl", "elabuga"}
+
+
+def test_scope_both_or_neither_means_whole_network():
+    from modules.copy_setka_network import resolve_scope_codes
+
+    tree = _scope_tree()
+    assert resolve_scope_codes("Киров и Казань вместе", tree) is None
+    assert resolve_scope_codes("просто новость", tree) is None
+
+
+def test_scope_missing_root_returns_empty():
+    from modules.copy_setka_network import resolve_scope_codes
+
+    tree = [r for r in _scope_tree() if r.code != "kirov_obl"]
+    assert resolve_scope_codes("Киров", tree) == set()
+
+
+async def test_copy_setka_kirov_post_goes_only_to_kirov(monkeypatch):
+    """Пост со словом «Киров» — только область и её районы, Татарстан не трогаем."""
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock
+
+    from modules.copy_setka_network import execute_copy_setka_network
+
+    post = {"owner_id": -167381590, "id": 555, "date": 999_990, "text": "новость Киров"}
+    publisher = AsyncMock()
+    publisher.publish_bulletin.return_value = {"success": True, "url": "https://vk.com/wall-1_1"}
+
+    with ExitStack() as stack:
+        _patch_copy_setka_deps(
+            stack,
+            parse_tokens={"VALSTAN": "TOK_MEMBER"},
+            wall_by_token={"TOK_MEMBER": [post]},
+            publisher=publisher,
+        )
+        out = await execute_copy_setka_network(_FakeSession([[_WorkTable()], _scope_tree()]))
+
+    assert out["success"] is True
+    assert out["posts_published"] == 3
+    assert out["scope"] == ["kirov_obl", "mi", "vp"]
+    sent_gids = {c.kwargs["group_id"] for c in publisher.publish_bulletin.await_args_list}
+    assert sent_gids == {-1001, -1002, -1003}
+
+
+async def test_copy_setka_repost_kazan_reposts_only_tatarstan(monkeypatch):
+    """«репост» и слово-маршрут ортогональны: репост оригинала, но только Татарстан."""
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock
+
+    from modules.copy_setka_network import execute_copy_setka_network
+
+    post = {
+        "owner_id": -167381590,
+        "id": 556,
+        "date": 999_990,
+        "text": "репост Казань",
+        "copy_history": [{"owner_id": -200, "id": 7}],
+    }
+    publisher = AsyncMock()
+    publisher.publish_repost.return_value = {"success": True, "url": "https://vk.com/wall-1_1"}
+
+    with ExitStack() as stack:
+        _patch_copy_setka_deps(
+            stack,
+            parse_tokens={"VALSTAN": "TOK_MEMBER"},
+            wall_by_token={"TOK_MEMBER": [post]},
+            publisher=publisher,
+        )
+        out = await execute_copy_setka_network(_FakeSession([[_WorkTable()], _scope_tree()]))
+
+    assert out["mode"] == "wall.repost"
+    assert out["scope"] == ["elabuga", "tatarstan_obl"]
+    sent_gids = {c.kwargs["group_id"] for c in publisher.publish_repost.await_args_list}
+    assert sent_gids == {-1004, -1005}
+    publisher.publish_bulletin.assert_not_called()
+
+
+async def test_copy_setka_scope_pending_completes_within_scope(monkeypatch):
+    """Pending со скоупом: добор идёт только внутри области, чужую не трогаем."""
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock
+
+    from modules.copy_setka_network import execute_copy_setka_network
+
+    post = {"owner_id": -167381590, "id": 557, "date": 999_990, "text": "Киров"}
+    wt = _WorkTable()
+    MI = -1002
+
+    pub1 = AsyncMock()
+    pub1.publish_bulletin.side_effect = _bulletin_side_effect({MI})
+    with ExitStack() as stack:
+        _patch_copy_setka_deps(
+            stack,
+            parse_tokens={"VALSTAN": "TOK_MEMBER"},
+            wall_by_token={"TOK_MEMBER": [post]},
+            publisher=pub1,
+        )
+        out1 = await execute_copy_setka_network(_FakeSession([[wt], _scope_tree()]))
+
+    assert out1["complete"] is False
+    assert out1["missing"] == ["mi"]
+    assert wt.hash["done"] == ["kirov_obl", "vp"]
+
+    pub2 = AsyncMock()
+    pub2.publish_bulletin.side_effect = _bulletin_side_effect(set())
+    with ExitStack() as stack:
+        _patch_copy_setka_deps(
+            stack,
+            parse_tokens={"VALSTAN": "TOK_MEMBER"},
+            wall_by_token={"TOK_MEMBER": [post]},
+            publisher=pub2,
+        )
+        out2 = await execute_copy_setka_network(_FakeSession([[wt], _scope_tree()]))
+
+    assert out2["complete"] is True
+    assert out2["posts_published"] == 1
+    assert wt.hash == []
