@@ -114,18 +114,19 @@ def test_broken_redis_degrades_to_skip_not_to_fallback():
 # ───────── алёрт ─────────
 
 
-def test_alert_text_names_region_theme_and_what_to_check():
+def test_alert_text_is_system_wide_and_says_what_to_check():
     text = selection.format_alert(mode=selection.MODE_SKIP_WAVE, region_code="mi", theme="novost")
-    assert "mi" in text and "novost" in text
     assert "DeepSeek" in text
-    assert "не опубликована" in text
+    assert "не публикуются" in text
+    # Проблема не в этом регионе — регион и тема в телефон не едут.
+    assert "mi" not in text and "novost" not in text
 
 
 def test_fallback_alert_warns_about_spam():
     text = selection.format_alert(mode=selection.MODE_FALLBACK, region_code="mi", theme="novost")
     assert "алгоритм" in text.lower()
     assert "спам" in text.lower()
-    assert "НЕ досылается" in text
+    assert "НЕ досылаются" in text
 
 
 def test_alert_needs_telegram_config():
@@ -139,9 +140,10 @@ def test_alert_needs_telegram_config():
     assert status == "skipped:no-telegram-config"
 
 
-def test_alert_cooldown_is_per_region_not_per_theme(monkeypatch):
-    """Фильтр встаёт сразу для всех тем; письмо на каждую волну каждой темы —
-    способ научить владельца не читать эти алёрты."""
+def test_alert_cooldown_is_system_wide_not_per_region(monkeypatch):
+    """Фильтр встаёт сразу для всей сети; письмо от каждого региона —
+    способ научить владельца не читать эти алёрты (заказ 2026-09-28:
+    напоминание раз в час, общесистемно)."""
     r = FakeRedis()
     sent = []
 
@@ -173,8 +175,17 @@ def test_alert_cooldown_is_per_region_not_per_theme(monkeypatch):
         chat_id="42",
         redis_client=r,
     )
+    third = selection.maybe_alert(
+        mode=selection.MODE_FALLBACK,
+        region_code="ur",
+        theme="novost",
+        telegram_token="t",
+        chat_id="42",
+        redis_client=r,
+    )
     assert first == "alert-sent"
     assert second == "skipped:cooldown"
+    assert third == "skipped:cooldown"
     assert len(sent) == 1
 
 
