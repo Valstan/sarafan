@@ -2236,7 +2236,11 @@ app.conf.beat_schedule = {
         "task": "tasks.celery_app.prune_gateway_requests",
         "schedule": crontab(minute=40, hour=3),
         "options": {
-            "expires": 3600,
+            # expires 6 ч, а не 1 ч: на одном ядре ночной затор волн регулярно
+            # превышает час, и с expires=3600 таска молча протухала в очереди
+            # (все четыре prune не исполнялись с 05.09.2026 — найдено 28.09).
+            # Таски идемпотентны и длятся сантисекунды, залеживание безопасно.
+            "expires": 21600,
             "catchup": False,
         },
     },
@@ -2245,7 +2249,9 @@ app.conf.beat_schedule = {
         "task": "tasks.celery_app.prune_collected_post_audit",
         "schedule": crontab(minute=45, hour=3),
         "options": {
-            "expires": 3600,
+            # См. комментарий у prune-gateway-requests-daily: expires обязан
+            # переживать ночной затор, иначе ретеншн молча не работает.
+            "expires": 21600,
             "catchup": False,
         },
     },
@@ -2254,7 +2260,8 @@ app.conf.beat_schedule = {
         "task": "tasks.celery_app.prune_skipped_duplicates",
         "schedule": crontab(minute=48, hour=3),
         "options": {
-            "expires": 3600,
+            # См. комментарий у prune-gateway-requests-daily.
+            "expires": 21600,
             "catchup": False,
         },
     },
@@ -2263,7 +2270,8 @@ app.conf.beat_schedule = {
         "task": "tasks.celery_app.prune_published_posts",
         "schedule": crontab(minute=47, hour=3),
         "options": {
-            "expires": 3600,
+            # См. комментарий у prune-gateway-requests-daily.
+            "expires": 21600,
             "catchup": False,
         },
     },
