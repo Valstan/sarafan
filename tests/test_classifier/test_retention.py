@@ -36,6 +36,27 @@ def test_prune_task_and_beat_registered():
     assert entry["task"] == "tasks.celery_app.prune_collected_post_audit"
 
 
+def test_prune_expires_survives_night_backlog():
+    """expires обязан переживать ночной затор волн на одном ядре.
+
+    С expires=3600 все четыре ночных prune молча протухали в очереди с
+    05.09.2026 (найдено 28.09: beat слал, worker не исполнял, строк старше
+    порога копилось). 6 ч покрывают затор, до следующего суточного тика
+    далеко — залеживание безопасно (таски идемпотентны, длятся сантисекунды).
+    """
+    from tasks.celery_app import app
+
+    for name in (
+        "prune-gateway-requests-daily",
+        "prune-collected-post-audit-daily",
+        "prune-published-posts-daily",
+        "prune-skipped-duplicates-daily",
+    ):
+        entry = app.conf.beat_schedule[name]
+        assert entry["options"]["expires"] >= 6 * 3600, name
+        assert entry["options"]["catchup"] is False, name
+
+
 @pytest.mark.asyncio
 async def test_prune_deletes_only_stale_rows(db_session):
     """Срез ретеншна удаляет строки старше порога, свежие оставляет."""
