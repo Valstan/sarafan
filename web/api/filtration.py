@@ -43,11 +43,52 @@ class FiltrationPutBody(BaseModel):
 
 
 def _normalize_bulletin_filters(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Слитый блок для ПОКАЗА (GET, превью): дефолты кода + записанное.
+
+    Показывать надо эффективные значения — оператор видит то, что реально
+    работает. Для ЗАПИСИ эта функция не годится: она же и замораживала дефолт
+    (P178) — см. _sparse_bulletin_filters.
+    """
     if not data or not isinstance(data, dict):
         return empty_bulletin_filters_template()
     defaults = {**DEFAULT_PIPELINE, **(data.get("defaults") or {})}
     by_topic = data.get("by_topic") if isinstance(data.get("by_topic"), dict) else {}
     return {"defaults": defaults, "by_topic": by_topic}
+
+
+def _values_equal(a: Any, b: Any) -> bool:
+    """Равны ли значения для целей диффа. Числа сравниваем как числа:
+    записанное `1` и дефолт `1.0` — одно и то же, замораживать нечего.
+    Мусор («не число») не выбрасываем — effective уронит его в дефолт сам,
+    а молча выкидывать ввод оператора нельзя.
+    """
+    try:
+        return float(a) == float(b)
+    except (TypeError, ValueError):
+        return a == b
+
+
+def _sparse_bulletin_filters(data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """Разрежённый блок для ЗАПИСИ (PUT): только отличия от DEFAULT_PIPELINE.
+
+    Лекарство от P178: раньше сюда писался весь слитый блок, и дефолт кода,
+    бывший актуальным на момент сохранения, становился личной настройкой
+    района — правка дефолта до него молча не доезжала. Теперь равное дефолту
+    не пишется вовсе: район следует коду, пока оператор не отличится
+    по-настоящему. Неизвестные коду ключи и мусор храним как есть.
+    """
+    if not data or not isinstance(data, dict):
+        return {"defaults": {}, "by_topic": {}}
+    incoming = data.get("defaults") or {}
+    if not isinstance(incoming, dict):
+        incoming = {}
+    sparse = {
+        k: v
+        for k, v in incoming.items()
+        if not (k in DEFAULT_PIPELINE and _values_equal(v, DEFAULT_PIPELINE[k]))
+    }
+    by_topic = data.get("by_topic") if isinstance(data.get("by_topic"), dict) else {}
+    return {"defaults": sparse, "by_topic": by_topic}
 
 
 def _normalize_localities(raw: Optional[List[str]]) -> List[str]:
@@ -164,7 +205,9 @@ async def put_filtration(
         raise HTTPException(status_code=404, detail="RegionConfig not found")
 
     if payload.bulletin_filters is not None:
-        cfg.bulletin_filters = _normalize_bulletin_filters(payload.bulletin_filters)
+        # Пишем разреженно (только отличия от дефолта, P178): слитый блок
+        # здесь же и замораживал дефолт. Показ (GET) по-прежнему слитый.
+        cfg.bulletin_filters = _sparse_bulletin_filters(payload.bulletin_filters)
 
     if payload.black_id is not None:
         cfg.black_id = payload.black_id
