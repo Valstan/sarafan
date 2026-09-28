@@ -154,3 +154,16 @@ def test_real_allowlist_has_portal_publish_key_from_its_own_room():
     автопубликация отзывается одним ``DELETE`` на grant, не разрывая доставку.
     """
     assert sg.GRANT_ALLOWLIST["VMALMYZHE_PUBLISH_KEY"] == frozenset({"vmalmyzhe"})
+
+
+def test_real_allowlist_has_sabantuy_from_its_own_room():
+    """D-093: ключ приёмника Сабантуя принимаем только из комнаты ``sabantuymalmyzh``.
+
+    Ключа публикации Сабантуй не выдавал — в allowlist только ingest-имя,
+    доставка идёт черновиком.
+    """
+    assert sg.GRANT_ALLOWLIST["SABANTUY_INGEST_KEY"] == frozenset({"sabantuymalmyzh"})
+    assert sg.decide({"aliasKey": "SABANTUY_INGEST_KEY", "sourceSlug": "sabantuymalmyzh"}) == (
+        "accept"
+    )
+    assert sg.decide({"aliasKey": "SABANTUY_INGEST_KEY", "sourceSlug": "evil"}) == "skip_source"

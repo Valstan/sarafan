@@ -47,6 +47,10 @@ log = logging.getLogger(__name__)
 GRANT_ALLOWLIST: Dict[str, frozenset] = {
     "KAZANSKAYA_INGEST_KEY": frozenset({"kazanskayamalmyzh"}),
     "VMALMYZHE_PUBLISH_KEY": frozenset({"vmalmyzhe"}),
+    # Третий приёмник конвейера (mandate brain 2026-09-22, D-093): ключ сайта
+    # Сабантуя, выдача sabantuymalmyzh → setka под именем SABANTUY_INGEST_KEY.
+    # Ключа публикации Сабантуй не выдавал — доставка только черновиком.
+    "SABANTUY_INGEST_KEY": frozenset({"sabantuymalmyzh"}),
 }
 
 _TIMEOUT_SEC = 10
