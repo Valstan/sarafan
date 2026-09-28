@@ -173,3 +173,58 @@ class TestPublishKey:
         site = cc.get_site("kazanskaya")
         assert "publish_key_env" not in site
         assert cc.wants_publish(site) is False
+
+
+class TestSabantuy:
+    """Третий приёмник (mandate brain 2026-09-22, D-093): сайт Сабантуя."""
+
+    def test_site_is_described_but_not_active_by_default(self):
+        site = cc.get_site("sabantuy")
+        assert site is not None
+        assert cc.get_active_sites() == []
+
+    def test_ingest_key_is_receiver_side_name(self):
+        assert cc.get_site("sabantuy")["key_env"] == "SABANTUY_INGEST_KEY"
+
+    def test_single_news_section(self):
+        """У приёмника одна рубрика — news (письмо 22.09)."""
+        assert cc.get_site("sabantuy")["sections"] == ("news",)
+
+    def test_source_is_the_district_feed_filtered_by_topic(self):
+        site = cc.get_site("sabantuy")
+        assert site["source_region"] == "mi"
+        assert not site.get("source_owner_ids")
+        assert site["source_keywords"]
+
+    def test_keywords_catch_inflections(self):
+        """Совпадение — подстрока без морфологии: «сабантуй» не ловит
+        «сабантуя», поэтому формы перечислены явно."""
+        from modules.conveyor import source as source_mod
+
+        words = cc.get_site("sabantuy")["source_keywords"]
+        for text in (
+            "Сабантуй в Малмыже",
+            "программа сабантуя",
+            "готовимся к сабантую",
+            "сабантуем довольны",
+            "на сабантуе",
+            "сабантуи районов",
+            "сабантуйский праздник",
+        ):
+            assert source_mod.matches_keywords(text, words), text
+        assert not source_mod.matches_keywords("ярмарка казанская", words)
+
+    def test_kazanskaya_does_not_catch_sabantuy_either(self):
+        """Разводка владельца действует в обе стороны: ярмарка не забирает
+        Сабантуй, Сабантуй не забирает ярмарку."""
+        from modules.conveyor import source as source_mod
+
+        sab_words = cc.get_site("sabantuy")["source_keywords"]
+        assert not source_mod.matches_keywords("ярмарка казанская карнавал", sab_words)
+
+    def test_no_publish_key_at_all(self, monkeypatch):
+        """Ключа публикации Сабантуй не выдавал — только черновики."""
+        monkeypatch.setenv("SABANTUY_PUBLISH_KEY", "подброшено")
+        site = cc.get_site("sabantuy")
+        assert "publish_key_env" not in site
+        assert cc.wants_publish(site) is False
