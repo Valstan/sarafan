@@ -6,6 +6,11 @@
   уходит VK wall.repost прикреплённого поста (copy_history[0] или attachment type=wall).
 - Иначе — копия содержимого: при repost-цепочке (copy_history) берётся исходный пост
   целиком (текст + вложения); иначе — сам пост. Публикация wall.post по регионам.
+- Ключевые слова маршрутизации (подстрока, без учёта регистра) сужают рассылку
+  до поддерева области: «киров» — сама `kirov_obl` + её районы, «казань» —
+  `tatarstan_obl` + её районы. Нет ключевых слов или есть оба сразу — вся сеть.
+  Слово-маршрут ортогонально «репост»/«копия»: «репост Казань» — это репост
+  оригинала, но только по Татарстану.
 
 За один запуск обрабатывается не больше одного нового поста; wall.get — последние 10;
 история дублей (lip) — не больше 10 идентификаторов.
@@ -33,6 +38,55 @@ PENDING_MAX_TRIES = 4
 
 def _text_has_repost_keyword(text: str) -> bool:
     return "репост" in (text or "").lower()
+
+
+# Слово-маршрут → код области. Подстрока тем же приёмом, что «репост»:
+# «киров» ловит и «Киров», и «Кировская область», и «Кирово-Чепецк» — всё это
+# Кировская область и есть. «Казань» — город, но в сетке это имя Татарстана:
+# так сказал владелец, так и записано.
+SCOPE_KEYWORDS = {
+    "киров": "kirov_obl",
+    "казань": "tatarstan_obl",
+}
+
+
+def resolve_scope_codes(text: str, regions: List[Any]) -> Optional[Set[str]]:
+    """Коды регионов для рассылки по тексту хаб-поста. ``None`` = вся сеть.
+
+    Ровно одно слово-маршрут → область + все её потомки по ``parent_region_id``
+    (сама область входит: у неё своя стена). Ноль или оба сразу → ``None``:
+    оба поддерева вместе и есть вся сеть, а перечислять их кодами значит
+    потерять будущую третью область. Корня нет в списке регионов → пустое
+    множество (вызывающий закроет пост с варнингом, а не заклинит хаб).
+    """
+    body = (text or "").lower()
+    matched = {oblast for word, oblast in SCOPE_KEYWORDS.items() if word in body}
+    if len(matched) != 1:
+        return None
+    (oblast_code,) = sorted(matched)
+    root = None
+    children: Dict[Any, List[Any]] = {}
+    for reg in regions:
+        if reg.code == oblast_code:
+            root = reg
+        pid = getattr(reg, "parent_region_id", None)
+        if pid is not None:
+            children.setdefault(pid, []).append(reg)
+    if root is None:
+        return set()
+    scope = {root.code}
+    root_id = getattr(root, "id", None)
+    if root_id is None:
+        return scope
+    stack = [root_id]
+    while stack:
+        for child in children.pop(stack.pop(), ()):
+            if child.code not in scope:
+                scope.add(child.code)
+                child_id = getattr(child, "id", None)
+                if child_id is not None:
+                    stack.append(child_id)
+    return scope
 
 
 def _mark_post_done(wt: Any, lip: str) -> None:
@@ -192,25 +246,10 @@ async def execute_copy_setka_network(
         oid = p.get("owner_id", source_owner_id)
         posts_by_lip[lip_of_post(int(oid), int(pid))] = p
 
-    # Целевые регионы (все активные, кроме псевдо-региона copy).
-    region_filter = get_copy_setka_target_region_codes()
-    rq = select(Region).where(
-        Region.is_active.is_(True),
-        Region.vk_group_id.isnot(None),
-        Region.code != "copy",
-    )
-    if region_filter:
-        rq = rq.where(Region.code.in_(list(region_filter)))
-
-    regions_result = await session.execute(rq)
-    regions = list(regions_result.scalars().all())
-    if not regions:
-        return {
-            "success": False,
-            "error": "no target regions with vk_group_id",
-            "stats": _empty_stats(),
-        }
-    target_codes = {reg.code for reg in regions}
+    # Целевые регионы спросим позже — когда будет известен текст кандидата:
+    # слово-маршрут («Киров»/«Казань») сужает рассылку до поддерева области.
+    regions: List[Any] = []
+    target_codes: Set[str] = set()
 
     # --- Выбор поста: сперва ДОБИРАЕМ недоставленный (pending) -----------------
     # Пост помечается «разослан» (wt.lip) только когда его получили ВСЕ целевые
@@ -228,33 +267,27 @@ async def execute_copy_setka_network(
         plip = str(pending["lip"])
         pdone = {str(c) for c in (pending.get("done") or [])}
         ptries = int(pending.get("tries") or 0)
-        if target_codes <= pdone:
-            logger.info("copy-setka: pending-пост %s уже доставлен всем — закрываю", plip)
-            _mark_post_done(wt, plip)
+        cand = posts_by_lip.get(plip)
+        if cand is None:
+            cand = await _fetch_post_by_lip(parse_tokens[used_token_name], plip)
+        if cand is None:
+            logger.info(
+                "copy-setka: pending-пост %s недоступен (удалён?) — снимаю pending",
+                plip,
+            )
             wt.hash = []
             await session.commit()
         else:
-            cand = posts_by_lip.get(plip)
-            if cand is None:
-                cand = await _fetch_post_by_lip(parse_tokens[used_token_name], plip)
-            if cand is None:
-                logger.info(
-                    "copy-setka: pending-пост %s недоступен (удалён?) — снимаю pending",
-                    plip,
-                )
-                wt.hash = []
-                await session.commit()
-            else:
-                candidate = cand
-                done_codes = pdone
-                pending_tries = ptries
-                logger.info(
-                    "copy-setka: добор pending-поста %s — осталось %d рег. (попытка %d/%d)",
-                    plip,
-                    len(target_codes - pdone),
-                    ptries + 1,
-                    PENDING_MAX_TRIES,
-                )
+            candidate = cand
+            done_codes = pdone
+            pending_tries = ptries
+            logger.info(
+                "copy-setka: добор pending-поста %s — уже есть у %d рег. (попытка %d/%d)",
+                plip,
+                len(pdone),
+                ptries + 1,
+                PENDING_MAX_TRIES,
+            )
 
     # Нет pending к добору → берём свежий новый пост.
     if candidate is None:
@@ -286,6 +319,71 @@ async def execute_copy_setka_network(
     src_pid = int(candidate["id"])
     src_lip = lip_of_post(src_oid, src_pid)
     body_text = candidate.get("text") or ""
+
+    # Целевые регионы (все активные, кроме псевдо-региона copy) — только
+    # теперь, когда известен текст: слово-маршрут сужает рассылку до области.
+    region_filter = get_copy_setka_target_region_codes()
+    rq = select(Region).where(
+        Region.is_active.is_(True),
+        Region.vk_group_id.isnot(None),
+        Region.code != "copy",
+    )
+    if region_filter:
+        rq = rq.where(Region.code.in_(list(region_filter)))
+
+    regions_result = await session.execute(rq)
+    regions = list(regions_result.scalars().all())
+    if not regions:
+        return {
+            "success": False,
+            "error": "no target regions with vk_group_id",
+            "stats": _empty_stats(),
+        }
+
+    scope_codes = resolve_scope_codes(body_text, regions)
+    if scope_codes is not None:
+        regions = [reg for reg in regions if reg.code in scope_codes]
+        if not regions:
+            logger.warning(
+                "copy-setka: слово-маршрут matched %s, но регионов в скоупе нет "
+                "(пост %s) — закрываю, чтобы не клинить хаб",
+                sorted(scope_codes),
+                src_lip,
+            )
+            _mark_post_done(wt, src_lip)
+            wt.hash = []
+            await session.commit()
+            return {
+                "success": False,
+                "error": "scope matched no regions",
+                "source_lip": src_lip,
+                "scope": sorted(scope_codes),
+                "stats": _empty_stats(),
+            }
+        logger.info(
+            "copy-setka: скоуп %s — шлём в %d регионов: %s",
+            sorted(scope_codes),
+            len(regions),
+            ", ".join(sorted(reg.code for reg in regions)),
+        )
+    target_codes = {reg.code for reg in regions}
+
+    # Pending мог закрыться ещё до сужения (все получившие — внутри скоупа,
+    # скоуп от текста не меняется между тиками): тогда просто закрываем.
+    if done_codes and target_codes <= done_codes:
+        logger.info("copy-setka: pending-пост %s уже доставлен всем — закрываю", src_lip)
+        _mark_post_done(wt, src_lip)
+        wt.hash = []
+        await session.commit()
+        return {
+            "success": True,
+            "message": "pending post already delivered to scope",
+            "posts_published": 0,
+            "source_lip": src_lip,
+            "scope": sorted(scope_codes) if scope_codes is not None else "all",
+            "stats": _empty_stats(),
+        }
+
     use_api_repost = _text_has_repost_keyword(body_text)
 
     msg_suffix = get_copy_setka_repost_message()
@@ -395,6 +493,7 @@ async def execute_copy_setka_network(
         "posts_published": len(newly_done),
         "source_lip": src_lip,
         "mode": "wall.repost" if use_api_repost else "wall.post copy",
+        "scope": sorted(scope_codes) if scope_codes is not None else "all",
         "targets": len(targets_remaining),
         "complete": complete,
         "done_total": len(all_done),
