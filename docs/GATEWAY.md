@@ -1,6 +1,6 @@
 # VK Gateway — ворота доступа в VK для проектов @valstan
 
-SARAFAN (setka) — внутренняя кухня VK: рабочие токены, клиент, smart-routing с
+SARAFAN — внутренняя кухня VK: рабочие токены, клиент, smart-routing с
 cooldown, per-token rate-limiter. **VK-шлюз** (`/api/gateway`) даёт другим
 проектам read-only доступ к VK по HTTP: проект шлёт задачу → SARAFAN исполняет
 её своим токеном (со своего IP, под своим rate-limit) → возвращает JSON.
@@ -19,7 +19,7 @@ VK привязывает user-токен к IP выпуска, и чужой п
 
 | | |
 |---|---|
-| Base URL (внешний) | `https://3931b3fe50ab.vps.myjino.ru` (текущий myjino-хост; при переезде VPS обновить — `config/setka.conf.editable` → `server_name`) |
+| Base URL (внешний) | `https://3931b3fe50ab.vps.myjino.ru` (текущий myjino-хост; при переезде VPS обновить — `config/sarafan.conf.editable` → `server_name`) |
 | Base URL (тот же хост) | `http://127.0.0.1:8000` |
 | Заголовок авторизации | `X-API-Key: <ключ-проекта>` |
 | Ключи | свой на каждый проект; **единый источник — БД `gateway_keys`** (миграция 059); env `GATEWAY_KEY_<PROJECT>` — bootstrap/аварийный fallback |
@@ -29,7 +29,7 @@ VK привязывает user-токен к IP выпуска, и чужой п
 ### Как получить ключ (self-serve, без владельца)
 
 Заявка — письмом через мозг (`mailbox/to-brain/` своего проекта) или напрямую
-AI-сессии SETKA. Выдача — одна команда на хосте setka (рестарт НЕ нужен,
+AI-сессии САРАФАН. Выдача — одна команда на хосте sarafan (рестарт НЕ нужен,
 шлюз читает ключи из БД на каждом запросе):
 
 ```bash
@@ -137,7 +137,7 @@ HTTP-коды: `401` (нет/неверный ключ), `400` (метод вн�
 ## Примеры (curl)
 
 ```bash
-KEY=...   # из /etc/setka/setka.env, GATEWAY_KEY_<PROJECT>
+KEY=...   # из /etc/sarafan/sarafan.env, GATEWAY_KEY_<PROJECT>
 
 # инфо о сообществе
 curl -s -H "X-API-Key: $KEY" \
@@ -180,4 +180,4 @@ SARAFAN), конфиг — env `SARAFAN_GATEWAY_KEY` (+ опц. `SARAFAN_GATEWAY
   конфиг/allowlist `config/gateway.py`. Переиспользует `TokenPolicy`
   (`modules/vk_token_router.py`) и `VKClient` (`modules/vk_monitor/vk_client.py`).
 - Деплой: без миграции БД — добавить `GATEWAY_KEY_<PROJECT>` в
-  `/etc/setka/setka.env` → restart web.
+  `/etc/sarafan/sarafan.env` → restart web.

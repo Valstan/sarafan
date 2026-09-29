@@ -1,10 +1,10 @@
-# 📘 SETKA — Документация для AI-разработчиков
+# 📘 САРАФАН — Документация для AI-разработчиков
 
 ## 🎯 Назначение проекта
 
-**SETKA** — автоматизированная система парсинга, фильтрации, анализа и постинга контента из ВКонтакте для сети региональных новостных пабликов. Включает AI-анализ (DeepSeek, D-024), дедупликацию, агрегацию, планирование публикаций и мониторинг.
+**САРАФАН** — автоматизированная система парсинга, фильтрации, анализа и постинга контента из ВКонтакте для сети региональных новостных пабликов. Включает AI-анализ (DeepSeek, D-024), дедупликацию, агрегацию, планирование публикаций и мониторинг.
 
-**Удалённый продакшен:** только **SSH** на хост SETKA. MCP не использовать для деплоя и отладки SETKA. Подробно: [`REMOTE_ACCESS.md`](REMOTE_ACCESS.md).
+**Удалённый продакшен:** только **SSH** на хост САРАФАН. MCP не использовать для деплоя и отладки САРАФАН. Подробно: [`REMOTE_ACCESS.md`](REMOTE_ACCESS.md).
 
 ---
 
@@ -13,13 +13,13 @@
 ### Структура директорий
 
 ```
-~/SETKA/
+~/САРАФАН/
 ├── main.py                     # FastAPI приложение (lifespan, роуты, middleware)
 ├── celery_app.py               # Точка входа Celery (re-export из tasks/)
 ├── config/                     # Конфигурация
 │   ├── runtime.py              # Runtime config (env vars, секреты НЕ в git!)
 │   ├── celery_config.py        # Celery config
-│   └── setka.conf.editable     # Nginx config template
+│   └── sarafan.conf.editable   # Nginx config template
 ├── database/                   # БД слой
 │   ├── connection.py           # Async SQLAlchemy engine, session
 │   ├── models.py               # SQLAlchemy models (Region, Community, Post, Filter...)
@@ -53,7 +53,7 @@
 ├── logs/                       # Логи приложения (logrotate настроен)
 ├── docs/                       # Документация
 ├── tests/                      # Unit-тесты (pytest)
-└── config/setka.env.example    # Шаблон переменных окружения
+└── config/sarafan.env.example  # Шаблон переменных окружения
 ```
 
 ### Ключевые компоненты
@@ -68,7 +68,7 @@
 | `modules/ai_analyzer/` | Sentiment постов — keyword-based, нейросети здесь нет |
 | `modules/deduplication/` | LIP + media fingerprint дедупликация |
 | `modules/scheduler/` | Smart scheduler для оптимального времени публикаций |
-| `tasks/celery_app.py` | Celery app + beat schedule (27 Postopus тем + SETKA задачи) |
+| `tasks/celery_app.py` | Celery app + beat schedule (27 Postopus тем + САРАФАН задачи) |
 | `database/models.py` | SQLAlchemy модели: Region, Community, Post, Filter, VKToken, PublishSchedule |
 | `config/runtime.py` | Все конфиги из env vars, НИКАКИХ секретов в коде |
 
@@ -103,7 +103,7 @@ Celery Beat → notification_tasks → notifications checkers → Redis → Tele
 ### Пример `.env` (не коммитить!)
 
 ```env
-DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/setka
+DATABASE_URL=postgresql+asyncpg://user:pass@localhost:5432/sarafan
 REDIS_URL=redis://localhost:6379/0
 VK_TOKEN_VALSTAN=vk1.a....
 VK_TOKEN_VITA=vk1.a....
@@ -137,7 +137,7 @@ from config.deepseek import get_api_key  # ключ читается при КА
 ### Структура тестов
 
 ```
-SETKA/
+САРАФАН/
 ├── tests/                          # Unit-тесты (pytest)
 │   ├── conftest.py                 # Фикстуры и моки
 │   ├── test_filters/               # Тесты фильтров
@@ -268,7 +268,7 @@ AI: "Финальное решение: X с обработкой ошибок �
 
 1. **Проверить текущую ветку и статус:**
    ```bash
-   cd ~/SETKA && git status && git branch -a
+   cd ~/САРАФАН && git status && git branch -a
    ```
 
 2. **Синхронизироваться:**
@@ -384,16 +384,16 @@ AI: "Финальное решение: X с обработкой ошибок �
 | Файл | Описание |
 |------|----------|
 | [`START_HERE.md`](START_HERE.md) | Быстрый старт, команды, сервисы |
-| [`REMOTE_ACCESS.md`](REMOTE_ACCESS.md) | Только SSH на хост SETKA |
+| [`REMOTE_ACCESS.md`](REMOTE_ACCESS.md) | Только SSH на хост САРАФАН |
 | [`AI_DEV_GUIDE.md`](AI_DEV_GUIDE.md) | Полное руководство для AI-разработчиков (этот файл) |
 | [`TESTING.md`](TESTING.md) | Тестирование: unit, интеграция, CI/CD |
 | [`adr/`](adr/) | Architectural Decision Records (см. [ADR-0001](adr/0001-archive-dev-history.md) — DEV_HISTORY упразднена 2026-05-24; история — `git log` + `gh pr view`) |
 | [`paths.md`](paths.md) | Архитектура, API endpoints, потоки данных |
 | [`OPERATIONS.md`](OPERATIONS.md) | Эксплуатация, runbook, troubleshooting |
 | [`DEPLOY.md`](DEPLOY.md) | Deployment guide |
-| [`MIGRATION_GUIDE.md`](MIGRATION_GUIDE.md) | Миграция old_postopus → SETKA |
+| [`MIGRATION_GUIDE.md`](MIGRATION_GUIDE.md) | Миграция old_postopus → САРАФАН |
 
 ---
 
-*Документ создан на основе лучших практик Postopus (old_postopus) и адаптирован для SETKA.
+*Документ создан на основе лучших практик Postopus (old_postopus) и адаптирован для САРАФАН.
 При каждой новой сессии начинать с изучения этого документа и синхронизации с git.*

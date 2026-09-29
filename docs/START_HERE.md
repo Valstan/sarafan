@@ -6,7 +6,7 @@
 
 ## Удалённый доступ к продакшену (важно для AI)
 
-**Только SSH** к хосту SETKA (`~/SETKA`): shell, git, systemd, логи, деплой. MCP-серверы в IDE для этого проекта **не используются** (см. **[`REMOTE_ACCESS.md`](REMOTE_ACCESS.md)**).
+**Только SSH** к хосту САРАФАН (`~/САРАФАН`): shell, git, systemd, логи, деплой. MCP-серверы в IDE для этого проекта **не используются** (см. **[`REMOTE_ACCESS.md`](REMOTE_ACCESS.md)**).
 
 ---
 
@@ -15,7 +15,7 @@
 **Перед любой работой AI должен синхронизироваться:**
 
 ```bash
-cd ~/SETKA
+cd ~/САРАФАН
 git status
 git fetch origin
 git pull origin $(git branch --show-current)
@@ -29,9 +29,9 @@ git log --oneline -5
 ## 0) VPS и окружение
 
 - ОС: Ubuntu 24.04.3 LTS
-- Проект: `~/SETKA` (в удалённом шелле разворачивается сам)
+- Проект: `~/САРАФАН` (в удалённом шелле разворачивается сам)
 - Переменные окружения: env-файл приложения на боксе, `600 root:root` — секреты только там, не коммитить
-- Systemd-сервисы: `setka`, `setka-celery-worker`, `setka-celery-beat`, `setka-vk-bot` (демон ВК-бота САРАФАНа)
+- Systemd-сервисы: `sarafan`, `sarafan-celery-worker`, `sarafan-celery-beat`, `sarafan-vk-bot` (демон ВК-бота САРАФАНа)
 - FastAPI слушает `127.0.0.1:8000`, наружу проксирует Nginx
 
 ## 1) Источники истины в коде
@@ -46,7 +46,7 @@ git log --oneline -5
 ## 2) Быстрая проверка живости
 
 ```bash
-systemctl status setka setka-celery-worker setka-celery-beat setka-vk-bot
+systemctl status sarafan sarafan-celery-worker sarafan-celery-beat sarafan-vk-bot
 curl http://127.0.0.1:8000/api/health/
 ```
 
@@ -55,17 +55,17 @@ Swagger: `http://127.0.0.1:8000/docs`
 ## 3) Production: перезапуск сервисов
 
 ```bash
-sudo systemctl restart setka setka-celery-worker setka-celery-beat setka-vk-bot
+sudo systemctl restart sarafan sarafan-celery-worker sarafan-celery-beat sarafan-vk-bot
 ```
 
-Логи: `~/SETKA/logs/` (есть logrotate).
+Логи: `~/САРАФАН/logs/` (есть logrotate).
 
 ## 4) Dev/ручной запуск
 
 FastAPI:
 
 ```bash
-cd ~/SETKA
+cd ~/САРАФАН
 source venv/bin/activate
 python main.py
 ```
@@ -73,7 +73,7 @@ python main.py
 Celery:
 
 ```bash
-cd ~/SETKA
+cd ~/САРАФАН
 source venv/bin/activate
 ./scripts/start_celery.sh
 ```
@@ -89,10 +89,10 @@ source venv/bin/activate
 Если менялись зависимости или окружение:
 
 ```bash
-cd ~/SETKA
+cd ~/САРАФАН
 source venv/bin/activate
 pip install -r requirements.txt
-sudo systemctl restart setka setka-celery-worker setka-celery-beat setka-vk-bot
+sudo systemctl restart sarafan sarafan-celery-worker sarafan-celery-beat sarafan-vk-bot
 ```
 
 Если менялся только код — достаточно перезапуска сервисов.
@@ -103,7 +103,7 @@ sudo systemctl restart setka setka-celery-worker setka-celery-beat setka-vk-bot
 
 ```bash
 # Запуск всех unit-тестов
-cd ~/SETKA
+cd ~/САРАФАН
 source venv/bin/activate
 pytest tests/ -v
 
@@ -149,7 +149,7 @@ pre-commit run --all-files
 
 - UI: `/`, `/regions`, `/posts`, `/communities`, `/notifications`, `/tokens`, `/publisher`, `/monitoring`, `/schedule`
 - Метрики: `/metrics`
-- Nginx: редактировать `config/setka.conf.editable`, применять `scripts/apply_nginx_config.sh`
+- Nginx: редактировать `config/sarafan.conf.editable`, применять `scripts/apply_nginx_config.sh`
 
 ## 9) Чек-лист завершения задачи
 
@@ -165,4 +165,4 @@ pre-commit run --all-files
 
 ---
 
-*Последнее обновление: 2026-04-08*
+*Последнее обновление: 2026-09-29*
