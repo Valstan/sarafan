@@ -1,4 +1,4 @@
-# 🌐 SETKA - Система менеджмента мультимедиа для новостных ресурсов
+# 🌐 САРАФАН - Система менеджмента мультимедиа для новостных ресурсов
 
 **Версия:** 1.0.0-beta  
 **Статус:** ✅ Production-ready (90% готовности)  
@@ -19,7 +19,7 @@
 
 ## 📋 Описание
 
-SETKA - автоматизированная система для управления новостным контентом из социальных сетей (VK, Telegram, WordPress) с AI-анализом для 50 региональных новостных каналов.
+САРАФАН - автоматизированная система для управления новостным контентом из социальных сетей (VK, Telegram, WordPress) с AI-анализом для 50 региональных новостных каналов.
 
 ### Ключевые возможности:
 - 🤖 **AI-анализ контента** (DeepSeek API, D-024; sentiment — keyword-based, без нейросети)
@@ -65,7 +65,7 @@ modules/
 
 ### Активация окружения:
 ```bash
-cd ~/SETKA
+cd ~/САРАФАН
 source venv/bin/activate
 ```
 
@@ -120,8 +120,8 @@ python scripts/test_ai_analyzer.py  # (создать)
 
 ### База данных:
 ```bash
-Database: setka
-User: setka_user
+Database: sarafan
+User: sarafan_user
 Host: localhost:5432
 ```
 
@@ -136,7 +136,7 @@ Host: localhost:5432
 ## 🗂️ Структура проекта
 
 ```
-SETKA/
+САРАФАН/
 ├── main.py              # FastAPI приложение
 ├── config/              # Конфигурация (токены)
 ├── database/            # БД модели и подключение
@@ -182,12 +182,12 @@ SETKA/
 ## 💾 Бэкапы
 
 **Автоматический бэкап:** Ежедневно в 3:00 AM  
-**Расположение:** `~/SETKA/backup/`  
+**Расположение:** `~/САРАФАН/backup/`  
 **Хранение:** Последние 7 бэкапов
 
 Ручной бэкап:
 ```bash
-~/SETKA/scripts/backup_database.sh
+~/САРАФАН/scripts/backup_database.sh
 ```
 
 ---
@@ -196,7 +196,7 @@ SETKA/
 
 **Health checks:** Каждые 5 минут  
 **Telegram алерты:** При ошибках и предупреждениях  
-**Логи:** `~/SETKA/logs/`
+**Логи:** `~/САРАФАН/logs/`
 
 ---
 
@@ -222,13 +222,13 @@ Ops/runbook:
 
 ```bash
 # Проверить статус БД
-sudo -u postgres psql -d setka -c "\dt"
+sudo -u postgres psql -d sarafan -c "\dt"
 
 # Просмотреть регионы
-sudo -u postgres psql -d setka -c "SELECT code, name FROM regions;"
+sudo -u postgres psql -d sarafan -c "SELECT code, name FROM regions;"
 
 # Просмотреть посты
-sudo -u postgres psql -d setka -c "SELECT COUNT(*) FROM posts;"
+sudo -u postgres psql -d sarafan -c "SELECT COUNT(*) FROM posts;"
 
 # Логи приложения (uvicorn stdout/stderr + Python logging — systemd
 # редиректит туда же)

@@ -1,9 +1,9 @@
-# Ops / эксплуатация SETKA
+# Ops / эксплуатация САРАФАН
 
 ## 1) Быстрый запуск и проверка
 
 ```bash
-cd ~/SETKA
+cd ~/САРАФАН
 source venv/bin/activate
 python main.py
 ```
@@ -20,19 +20,19 @@ Swagger: `http://127.0.0.1:8000/docs`
 
 Сервисы:
 
-- `setka`
-- `setka-celery-worker`
-- `setka-celery-beat`
-- `setka-vk-bot` — демон ВК-бота САРАФАНа (Bots Long Poll, `scripts/vk_bot_daemon.py`;
+- `sarafan`
+- `sarafan-celery-worker`
+- `sarafan-celery-beat`
+- `sarafan-vk-bot` — демон ВК-бота САРАФАНа (Bots Long Poll, `scripts/vk_bot_daemon.py`;
   юнит ставится `scripts/install_vk_bot_service.sh`)
 
 Перезапуск:
 
 ```bash
-sudo systemctl restart setka setka-celery-worker setka-celery-beat setka-vk-bot
+sudo systemctl restart sarafan sarafan-celery-worker sarafan-celery-beat sarafan-vk-bot
 ```
 
-Логи: `~/SETKA/logs/` (есть logrotate); демон бота пишет в `logs/vk-bot.log`.
+Логи: `~/САРАФАН/logs/` (есть logrotate); демон бота пишет в `logs/vk-bot.log`.
 
 ВК-бот: демон пишет heartbeat `setka:vkbot:heartbeat` (Redis db 1, unix-ts) после
 каждого ответа Long Poll; сторож `vk-bot-watchdog` (beat, каждые 10 минут) шлёт Telegram,
@@ -42,7 +42,7 @@ sudo systemctl restart setka setka-celery-worker setka-celery-beat setka-vk-bot
 ## 3) Celery (ручной запуск)
 
 ```bash
-cd ~/SETKA
+cd ~/САРАФАН
 ./scripts/start_celery.sh
 ```
 
@@ -77,12 +77,12 @@ cd ~/SETKA
 
 ## 5) Nginx
 
-Редактируемая копия: `config/setka.conf.editable`.
+Редактируемая копия: `config/sarafan.conf.editable`.
 
 Применение:
 
 ```bash
-~/SETKA/scripts/apply_nginx_config.sh
+~/САРАФАН/scripts/apply_nginx_config.sh
 ```
 
 Что должно работать:
@@ -102,7 +102,7 @@ cd ~/SETKA
 Сводка состояния:
 
 ```bash
-cd ~/SETKA
+cd ~/САРАФАН
 bash scripts/check-setka.sh
 ```
 

@@ -9,13 +9,17 @@
 
 ---
 
+## 🏷️ Project Name
+
+**SETKA** → **САРАФАН** (репозиторий на GitHub пока `setka`, проект называется САРАФАН)
+
 ## 📋 Pre-Deployment Checklist
 
 ### 1. Verify Environment Variables
 
 ```bash
-# These must be set in /etc/setka/setka.env
-cat /etc/setka/setka.env | grep -E "DATABASE_URL|MONGO_CLIENT|VK_TOKEN|REDIS"
+# These must be set in /etc/sarafan/sarafan.env
+cat /etc/sarafan/sarafan.env | grep -E "DATABASE_URL|MONGO_CLIENT|VK_TOKEN|REDIS"
 ```
 
 Required:
@@ -26,7 +30,7 @@ Required:
 ### 2. Verify Services Status
 
 ```bash
-systemctl status setka setka-celery-worker setka-celery-beat setka-vk-bot
+systemctl status sarafan sarafan-celery-worker sarafan-celery-beat sarafan-vk-bot
 ```
 
 If services don't exist yet, see setup below.
@@ -38,7 +42,7 @@ If services don't exist yet, see setup below.
 ### Step 1: Pull Latest Code
 
 ```bash
-cd ~/SETKA
+cd ~/САРАФАН
 git pull origin main
 ```
 
@@ -79,13 +83,13 @@ This will:
 
 ```bash
 # Main application
-sudo systemctl restart setka
+sudo systemctl restart sarafan
 
 # Celery worker (processes tasks)
-sudo systemctl restart setka-celery-worker
+sudo systemctl restart sarafan-celery-worker
 
 # Celery beat (schedules tasks — NOW WITH 27 NEW POSTOPUS TASKS)
-sudo systemctl restart setka-celery-beat
+sudo systemctl restart sarafan-celery-beat
 ```
 
 ### Step 5: Verify
@@ -159,14 +163,14 @@ All crontab entries from old_postopus are now Celery Beat schedules:
 
 ```bash
 # App logs (uvicorn stdout/stderr + Python logging — systemd редиректит
-# stdout/stderr в этот файл, см. setka.service)
-tail -f ~/SETKA/logs/uvicorn_production.log
+# stdout/stderr в этот файл, см. sarafan.service)
+tail -f ~/САРАФАН/logs/uvicorn_production.log
 
 # Celery worker logs
-journalctl -u setka-celery-worker -f --no-pager
+journalctl -u sarafan-celery-worker -f --no-pager
 
 # Celery beat logs
-journalctl -u setka-celery-beat -f --no-pager
+journalctl -u sarafan-celery-beat -f --no-pager
 ```
 
 ### Celery Flower (if installed)
@@ -213,21 +217,21 @@ crontab -e
 ### "Module not found" errors
 ```bash
 # Restart services to reload PYTHONPATH
-sudo systemctl restart setka setka-celery-worker setka-celery-beat setka-vk-bot
+sudo systemctl restart sarafan sarafan-celery-worker sarafan-celery-beat sarafan-vk-bot
 ```
 
 ### Celery tasks not running
 ```bash
 # Check beat schedule
-journalctl -u setka-celery-beat | grep "postopus"
+journalctl -u sarafan-celery-beat | grep "postopus"
 
 # Check worker picks up tasks
-journalctl -u setka-celery-worker | grep "parsing_scheduler"
+journalctl -u sarafan-celery-worker | grep "parsing_scheduler"
 ```
 
 ### Database tables missing
 ```bash
-sudo -u postgres psql -d setka -c "\dt"
+sudo -u postgres psql -d sarafan -c "\dt"
 # Should see: parsing_stats, region_configs, work_tables, scheduled_publications
 ```
 
