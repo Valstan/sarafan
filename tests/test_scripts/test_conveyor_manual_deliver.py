@@ -93,10 +93,30 @@ def test_render_delivery_shows_mismatch_not_as_a_summary():
                 "remote_id": "r1",
             }
         ],
+        days=30,
     )
     assert "delivered=2" in text
+    # Окно печатается: «почти пусто» и «окно слишком узкое» неразличимы,
+    # пока число не названо (замер 30.09: 0 кандидатов на 3 сутках).
+    assert "окно=30" in text
     assert "РАСХОЖДЕНИЕ С ЖУРНАЛОМ" in text
     assert "журнал=selected" in text
+
+
+def test_manual_window_default_is_thirty_days():
+    """Ручной прогон — добор, а не стриминг: дефолт конвейера (3 суток) для него
+    почти бесполезен (0 кандидатов из 28 на «Культуре»)."""
+    assert manual.DEFAULT_DAYS == 30
+
+
+def test_default_days_argument_is_thirty():
+    """Проверяем именно разбор аргументов: значение по умолчанию задаётся там."""
+    import argparse
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--days", type=int, default=manual.DEFAULT_DAYS)
+    assert parser.parse_args([]).days == 30
+    assert parser.parse_args(["--days", "3"]).days == 3
 
 
 def test_render_plan_names_the_lips_without_verdicts():

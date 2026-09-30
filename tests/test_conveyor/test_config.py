@@ -247,11 +247,13 @@ class TestKultura:
         )
 
     def test_sections_are_institution_slugs(self):
-        """Рубрика приёмника — slug учреждения; полный список 31 (мандат
-        brain 30.09, таблица Культуры) — классификатор кладёт сразу в раздел."""
+        """Рубрика приёмника — slug учреждения. Список из 31 (мандат brain 30.09,
+        таблица Культуры) плюс два городских учреждения, добавленных по заказу
+        владельца 30.09: список из 31 был только сёла и РЦКД, поэтому посты о
+        ДШИ и краеведческом музее уходили без раздела."""
         sections = cc.get_site("kultura")["sections"]
-        assert len(sections) == 31
-        assert len(set(sections)) == 31
+        assert len(sections) == 33
+        assert len(set(sections)) == 33
         assert sections[:5] == (
             "rckd",
             "kalinino",
@@ -259,7 +261,16 @@ class TestKultura:
             "aryk",
             "bolshoy-kityak",
         )
-        assert sections[-3:] == ("nosly", "deryushevo", "savali")
+        assert sections[-3:] == ("savali", "dshi", "kraevedcheskiy-muzej")
+
+    def test_city_culture_institutions_have_slugs(self):
+        """Городские учреждения культуры Малмыжа — с теми же слаги, что предложены
+        письмом от 30.09. Проверка не даёт потерять их при перестановке списка:
+        раздел приёмника создаётся у него, и несовпадение имён выглядело бы как
+        «у нас новости есть, а у вас они без раздела»."""
+        sections = cc.get_site("kultura")["sections"]
+        assert "dshi" in sections
+        assert "kraevedcheskiy-muzej" in sections
 
     def test_source_is_the_district_feed_filtered_by_topic(self):
         site = cc.get_site("kultura")

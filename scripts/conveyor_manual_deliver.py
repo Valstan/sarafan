@@ -275,11 +275,13 @@ def render_plan(report: Dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def render_delivery(stats: Dict[str, Any], mismatches: Sequence[Dict[str, Any]]) -> str:
+def render_delivery(
+    stats: Dict[str, Any], mismatches: Sequence[Dict[str, Any]], *, days: Optional[int] = None
+) -> str:
+    head = "site={site} окно={days}".format(site=stats.get("site"), days=days or "?")
     lines = [
-        "site={site} selected={selected} delivered={delivered} rejected={rejected} "
+        head + " selected={selected} delivered={delivered} rejected={rejected} "
         "held={held} failed={failed} без вердикта={skipped}".format(
-            site=stats.get("site"),
             selected=stats.get("selected"),
             delivered=stats.get("delivered"),
             rejected=stats.get("rejected"),
@@ -369,6 +371,14 @@ async def still_failed(session, site_key: str) -> tuple:
     return retryable, no_verdict
 
 
+# Окно ручного прогона. Дефолт конвейера — 3 суток, и для ручного режима он
+# почти бесполезен: замер 30.09 на «Культуре» дал 0 кандидатов из 28 на трёх
+# сутках и 173 из 537 на тридцати (окно бьёт по свежести, а не по объёму, и
+# смена суток ничего не решает). Ручный прогон — это добор, а не стриминг, ему
+# возраст не мешает.
+DEFAULT_DAYS = 30
+
+
 async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
     """Вся работа режима. Отделено от ``main``, который только разбирает аргументы.
 
@@ -382,6 +392,9 @@ async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
     from modules.secrets_bootstrap import bootstrap_secrets
 
     site_key = str(site.get("key") or args.site)
+    # Окно печатается в каждом режиме: «почти пусто» и «окно слишком узкое»
+    # неразличимы, пока число не названо.
+    window = args.days if args.days is not None else DEFAULT_DAYS
 
     # Секреты комнаты в окружение — до всего, что их спросит. ``main.py`` и
     # воркер делают то же на старте; скрипт, который этого не делает, отдаёт
@@ -396,7 +409,12 @@ async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
 
         async def go(sess):
             return await runner_mod.run_site(
-                sess, site, days=args.days, limit=args.limit, dry_run=True, dry_full=True
+                sess,
+                site,
+                days=window,
+                limit=args.limit,
+                dry_run=True,
+                dry_full=True,
             )
 
         try:
@@ -407,7 +425,7 @@ async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
         payload = _emit_payload(site_key, stats)
         _write_file(file_name, payload)
         print(
-            f"site={site_key} кандидатов={len(payload['candidates'])} "
+            f"site={site_key} окно={window} сут. кандидатов={len(payload['candidates'])} "
             f"дублей={len(payload['duplicates'])} → {file_name}"
         )
         return 0
@@ -458,7 +476,7 @@ async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
 
         async def go_plan(sess):
             return await plan(
-                sess, site, verdicts, days=args.days, limit=args.limit, file_name=file_name
+                sess, site, verdicts, days=window, limit=args.limit, file_name=file_name
             )
 
         try:
@@ -493,7 +511,7 @@ async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
         stats = await runner_mod.run_site(
             sess,
             site,
-            days=args.days,
+            days=window,
             limit=args.limit,
             verdicts=verdicts,
             collect_results=True,
@@ -509,10 +527,14 @@ async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
 
     if args.json:
         print(
-            json.dumps({"stats": stats, "mismatches": mismatches}, ensure_ascii=False, default=str)
+            json.dumps(
+                {"site": site_key, "days": window, "stats": stats, "mismatches": mismatches},
+                ensure_ascii=False,
+                default=str,
+            )
         )
     else:
-        print(render_delivery(stats, mismatches))
+        print(render_delivery(stats, mismatches, days=window))
     if mismatches:
         print("журнал разошёлся с отчётом — см. расхождение выше", file=sys.stderr)
         return 2
@@ -532,7 +554,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         action="store_true",
         help="повторить доставку по сохранённым вердиктам (строки failed)",
     )
-    parser.add_argument("--days", type=int, default=None, help="окно свежести, сутки")
+    parser.add_argument(
+        "--days",
+        type=int,
+        default=DEFAULT_DAYS,
+        help=f"окно свежести, сутки (ручной режим по умолчанию {DEFAULT_DAYS})",
+    )
     parser.add_argument("--limit", type=int, default=None, help="потолок постов")
     parser.add_argument("--json", action="store_true", help="вывести сводку JSON")
     args = parser.parse_args(argv)
