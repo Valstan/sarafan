@@ -508,6 +508,43 @@ async def test_retry_failed_returns_2_when_nothing_is_fixed(db_session, wired, m
     assert rc == 2
 
 
+@pytest.mark.asyncio
+async def test_retry_ignores_failed_rows_that_never_had_a_verdict(
+    db_session, wired, monkeypatch, capsys
+):
+    """Строки без вердикта не в счёт провала повтора — они ждут движка.
+
+    Проверено на проде 30.09: четыре строки `failed` с `http_402` (упала
+    классификация, вердикта нет) заставляли повтор возвращать 2 при пяти
+    доставленных постах. Такой код не погаснет, пока лежит DeepSeek, и через
+    неделю его перестанут читать — а уйдёт тогда настоящий провал.
+    """
+    script = _load_script()
+    _patch_session(monkeypatch, db_session)
+    monkeypatch.setenv("VMALMYZHE_INGEST_KEY", "k")
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+    await source.record_selection(db_session, site="vmalmyzhe", lips=["1_10"])
+    await source.update_delivery(
+        db_session,
+        site="vmalmyzhe",
+        lip="1_10",
+        status="failed",
+        reason="no_key",
+        verdict=_accept(),
+    )
+    await source.record_selection(db_session, site="vmalmyzhe", lips=["2_20"])
+    await source.update_delivery(
+        db_session, site="vmalmyzhe", lip="2_20", status="failed", reason="http_402"
+    )
+    await db_session.commit()
+
+    rc = await script._amain(_args(limit=5), _real_site(), "retry", "")
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "доставлено=1" in out
+    assert "ждут движка" in out and "2_20" in out
+
+
 def _args(**over):
     """Пространство имён как его собирает argparse (разбор проверен отдельно)."""
     import argparse
