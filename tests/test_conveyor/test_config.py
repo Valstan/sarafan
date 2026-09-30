@@ -247,8 +247,19 @@ class TestKultura:
         )
 
     def test_sections_are_institution_slugs(self):
-        """Рубрика приёмника — slug учреждения; список растёт на их стороне."""
-        assert cc.get_site("kultura")["sections"] == ("rckd", "kalinino")
+        """Рубрика приёмника — slug учреждения; полный список 31 (мандат
+        brain 30.09, таблица Культуры) — классификатор кладёт сразу в раздел."""
+        sections = cc.get_site("kultura")["sections"]
+        assert len(sections) == 31
+        assert len(set(sections)) == 31
+        assert sections[:5] == (
+            "rckd",
+            "kalinino",
+            "adzhim",
+            "aryk",
+            "bolshoy-kityak",
+        )
+        assert sections[-3:] == ("nosly", "deryushevo", "savali")
 
     def test_source_is_the_district_feed_filtered_by_topic(self):
         site = cc.get_site("kultura")
