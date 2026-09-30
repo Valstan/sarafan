@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Mapping, Optional
 
 from config.content_conveyor import (
     get_batch_max,
@@ -42,6 +42,27 @@ logger = logging.getLogger(__name__)
 # 20 секунд на прогон, что для трёх запусков в сутки несущественно.
 DEFAULT_PACE_SECONDS = 1.0
 
+# Ручной режим (вердикты глазами, движок DeepSeek лежит). Причины, которые
+# закрывают пост навсегда, — решение человека, а не модели, и журнал обязан
+# это различать: строка «manual_reject» читается как «оператор отказал»,
+# «llm_reject» — «модель отказала». Смешав их, разбор «почему этой новости нет
+# на сайте» через месяц будет врать о том, кто принял решение.
+_DECISION_PREFIXES = ("llm_reject", "manual_reject")
+
+
+def _manual_reason(refusal: Optional[str]) -> str:
+    """Переименовать код отказа модели в код отказа человека.
+
+    Гейты остаются теми же (``parse_verdict``), меняется только подпись: в
+    журнале должно быть видно, что решение принял оператор, а не DeepSeek.
+    """
+    code = str(refusal or "unknown")
+    if code.startswith("llm_reject"):
+        return "manual_reject" + code[len("llm_reject") :]
+    if code.startswith("llm_"):
+        return "manual_" + code[len("llm_") :]
+    return f"manual_{code}"
+
 
 async def run_site(
     session,
@@ -53,15 +74,31 @@ async def run_site(
     dry_run: bool = False,
     pace: float = DEFAULT_PACE_SECONDS,
     sleep: Optional[Callable[[float], None]] = None,
+    verdicts: Optional[Mapping[str, Dict[str, Any]]] = None,
+    collect_results: bool = False,
+    dry_full: bool = False,
 ) -> Dict[str, Any]:
     """Один прогон по сайту. Возвращает сводку: сколько отобрано и чем кончилось.
 
     ``dry_run`` — пройти весь путь **без** классификации и доставки: отбор
     выполняется, журнал не пишется, наружу ничего не уходит. Нужен, чтобы
     посмотреть на живых данных, что именно конвейер собирается отправить, до
-    того как он это отправит.
+    того как он это отправит. ``dry_full`` добавляет в превью сам текст поста —
+    этого хватает, чтобы прочитать кандидатов и написать по ним вердикты.
+
+    ``verdicts`` — **ручной режим**: карта ``lip → вердикт`` в том же формате,
+    что отдаёт модель (``action``/``section``/``title``/``text``). Классификация
+    тогда не вызывается вовсе, а гейты вердикта — те же самые
+    (``classify.parse_verdict``), включая сторож на дописанные факты. Пост без
+    вердикта не уходит никуда и **не падает в LLM**: молчаливый уход в движок,
+    который лежит, выглядел бы как «отбор пуст», а это другое совсем.
+
+    ``collect_results`` кладёт в сводку построчный результат — он нужен ручному
+    прогону для сверки с журналом, а автоматическому (beat) не нужен и потому
+    по умолчанию не собирается.
     """
     site_key = str(site.get("key") or "").strip().lower()
+    manual_mode = verdicts is not None
     stats: Dict[str, Any] = {
         "site": site_key,
         "selected": 0,
@@ -70,10 +107,13 @@ async def run_site(
         "rejected": 0,
         "held": 0,
         "failed": 0,
+        "skipped": 0,
+        "without_verdict": [],
         "unknown_sections": [],
         "tokens": 0,
         "publish": bool(wants_publish(site)),
         "dry_run": bool(dry_run),
+        "manual": bool(manual_mode),
     }
 
     posts = await source_mod.fetch_pending_for_site(
@@ -101,6 +141,16 @@ async def run_site(
                 "theme": p["theme"],
                 "chars": len(p["text"]),
                 "media": len(p["media"]),
+                **(
+                    {
+                        "text": p.get("text") or "",
+                        "url": p.get("url") or "",
+                        "published_at": p.get("published_at"),
+                        "items": p.get("media") or [],
+                    }
+                    if dry_full
+                    else {}
+                ),
             }
             for p in posts
         ]
@@ -137,6 +187,17 @@ async def run_site(
 
     results: List[Dict[str, Any]] = []
     for i, post in enumerate(posts):
+        lip = str(post.get("lip") or "")
+        manual = None
+        if manual_mode:
+            manual = verdicts.get(lip)
+            if manual is None:
+                # Пост без вердикта — не сбой и не отказ. Ни строки в журнале
+                # (сказать нечего), ни ухода в LLM (движок может лежать, и тогда
+                # тишина выглядела бы как «отбор пуст»).
+                stats["skipped"] += 1
+                stats["without_verdict"].append(lip)
+                continue
         if i and pace and sleep is not None:
             sleep(pace)
         outcome = await _process_one(
@@ -147,11 +208,24 @@ async def run_site(
             sections=sections,
             rules=rules,
             publish_key=publish_key,
+            manual_verdict=manual,
         )
         results.append(outcome)
         stats[outcome["bucket"]] = stats.get(outcome["bucket"], 0) + 1
         stats["tokens"] += outcome.get("tokens") or 0
         await session.commit()
+
+    if collect_results:
+        stats["results"] = [
+            {
+                "lip": r.get("lip"),
+                "bucket": r.get("bucket"),
+                "http_status": r.get("http_status"),
+                "remote_id": r.get("remote_id"),
+                "reason": r.get("reason"),
+            }
+            for r in results
+        ]
 
     stats["unknown_sections"] = classify_mod.collect_unknown_sections(
         [r["classify"] for r in results if r.get("classify")]
@@ -258,18 +332,33 @@ async def _process_one(
     sections,
     rules: str,
     publish_key: str = "",
+    manual_verdict: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Путь одного поста. Никогда не бросает — падение на одном не рушит прогон."""
+    """Путь одного поста. Никогда не бросает — падение на одном не рушит прогон.
+
+    ``manual_verdict`` — вердикт человека вместо модели (движок DeepSeek лежит).
+    Разбор тот же (``classify.parse_verdict``), поэтому «нет заголовка», «текст
+    раздулся» и прочие гейты работают и здесь: ручной путь не должен стать
+    дырой, через которую на сайт уедет то, что модель бы не пропустила.
+    """
     site_key = str(site.get("key") or "").strip().lower()
     lip = str(post.get("lip") or "")
-    try:
-        # api_key НЕ передаём: у classify свой ключ (DeepSeek), а `key` здесь —
-        # ключ доставки на сайт. Это разные секреты разных сторон, и смешать их
-        # означало бы отправить ключ сайта в чужой API.
-        verdict_res = classify_mod.classify(post, sections=sections, rules=rules)
-    except Exception as e:  # pragma: no cover — защитный контур
-        logger.warning("конвейер %s: классификация упала на %s: %s", site_key, lip, e)
-        verdict_res = {"ok": False, "reason": "classify_crashed"}
+    if manual_verdict is not None:
+        verdict, refusal = classify_mod.parse_verdict(manual_verdict, post, sections=sections or ())
+        verdict_res = (
+            {"ok": True, "verdict": verdict, "usage": {"total_tokens": 0}, "source": "manual"}
+            if verdict is not None
+            else {"ok": False, "reason": _manual_reason(refusal), "source": "manual"}
+        )
+    else:
+        try:
+            # api_key НЕ передаём: у classify свой ключ (DeepSeek), а `key` здесь —
+            # ключ доставки на сайт. Это разные секреты разных сторон, и смешать их
+            # означало бы отправить ключ сайта в чужой API.
+            verdict_res = classify_mod.classify(post, sections=sections, rules=rules)
+        except Exception as e:  # pragma: no cover — защитный контур
+            logger.warning("конвейер %s: классификация упала на %s: %s", site_key, lip, e)
+            verdict_res = {"ok": False, "reason": "classify_crashed"}
 
     tokens = ((verdict_res.get("usage") or {}) or {}).get("total_tokens") or 0
     if not verdict_res.get("ok"):
@@ -277,11 +366,17 @@ async def _process_one(
         # Отказ модели — это решение («не для сайта»), а сбой связи — нет.
         # Первое закрывает пост навсегда, второе оставляет строку в failed,
         # чтобы следующий прогон её не подобрал молча как новую.
-        bucket = "rejected" if reason.startswith("llm_reject") else "failed"
+        bucket = "rejected" if reason.startswith(_DECISION_PREFIXES) else "failed"
         await source_mod.update_delivery(
             session, site=site_key, lip=lip, status=bucket, reason=reason
         )
-        return {"bucket": bucket, "tokens": tokens, "classify": verdict_res}
+        return {
+            "lip": lip,
+            "bucket": bucket,
+            "tokens": tokens,
+            "reason": reason,
+            "classify": verdict_res,
+        }
 
     verdict = verdict_res["verdict"]
     body = delivery_mod.build_payload(
@@ -297,7 +392,13 @@ async def _process_one(
         await source_mod.update_delivery(
             session, site=site_key, lip=lip, status="held", reason=bad, verdict=verdict
         )
-        return {"bucket": "held", "tokens": tokens, "classify": verdict_res}
+        return {
+            "lip": lip,
+            "bucket": "held",
+            "tokens": tokens,
+            "reason": bad,
+            "classify": verdict_res,
+        }
 
     res = delivery_mod.deliver(site, key, body, sleep=time.sleep, publish_key=publish_key)
     if res.get("ok"):
@@ -311,7 +412,14 @@ async def _process_one(
             http_status=res.get("status"),
             remote_id=res.get("remote_id"),
         )
-        return {"bucket": "delivered", "tokens": tokens, "classify": verdict_res}
+        return {
+            "lip": lip,
+            "bucket": "delivered",
+            "tokens": tokens,
+            "http_status": res.get("status"),
+            "remote_id": res.get("remote_id"),
+            "classify": verdict_res,
+        }
 
     await source_mod.update_delivery(
         session,
@@ -323,4 +431,11 @@ async def _process_one(
         attempts=res.get("attempts"),
         http_status=res.get("status"),
     )
-    return {"bucket": "failed", "tokens": tokens, "classify": verdict_res}
+    return {
+        "lip": lip,
+        "bucket": "failed",
+        "tokens": tokens,
+        "reason": str(res.get("reason") or "delivery_failed"),
+        "http_status": res.get("status"),
+        "classify": verdict_res,
+    }
