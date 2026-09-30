@@ -430,6 +430,84 @@ async def test_deliver_mode_rc_2_when_journal_disagrees(
     assert "РАСХОЖДЕНИЕ С ЖУРНАЛОМ" in out and "журнал=selected" in out
 
 
+@pytest.mark.asyncio
+async def test_cli_bootstraps_room_secrets_before_anything(db_session, monkeypatch, tmp_path):
+    """Ключи сайта приезжают из комнаты — скрипт обязан их подтянуть сам.
+
+    Проверено на живом прогоне 30.09: пять принятых постов упали с ``no_key``
+    при ключе, который лежал в комнате и числился принятым. Причина — скрипт не
+    звал ``bootstrap_secrets()``, в отличие от ``main.py`` и воркера (G353).
+    Тест-страж: удалить вызов — упадёт он, а не прод.
+    """
+    script = _load_script()
+    calls = {"bootstrap": 0}
+
+    import modules.secrets_bootstrap as sb
+
+    monkeypatch.setattr(sb, "bootstrap_secrets", lambda: calls.__setitem__("bootstrap", 1))
+    _patch_session(monkeypatch, db_session)
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+    out = tmp_path / "cand.json"
+
+    rc = await script._amain(_args(emit=str(out)), _real_site(), "emit", str(out))
+    assert rc == 0
+    assert calls["bootstrap"] == 1
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_redelivers_and_reports_leftovers(db_session, wired, monkeypatch):
+    """Повтор по сохранённым вердиктам и честный код 2, если осталось failed.
+
+    Именно этим приёмом чинится случай «доставка упала, вердикт уже разобран»:
+    отбор такую строку больше не возьмёт (любой статус журнала исключает lip).
+    """
+    script = _load_script()
+    _patch_session(monkeypatch, db_session)
+    monkeypatch.setenv("VMALMYZHE_INGEST_KEY", "k")
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+    # Прогон с падением доставки: verdict в журнале остаётся, статус failed.
+    await source.record_selection(db_session, site="vmalmyzhe", lips=["1_10"])
+    await source.update_delivery(
+        db_session,
+        site="vmalmyzhe",
+        lip="1_10",
+        status="failed",
+        reason="no_key",
+        verdict=_accept(),
+    )
+    await db_session.commit()
+
+    rc = await script._amain(_args(limit=5), _real_site(), "retry", "")
+    assert rc == 0
+    status, _ = await _status(db_session, "1_10")
+    assert status == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_retry_failed_returns_2_when_nothing_is_fixed(db_session, wired, monkeypatch):
+    """Повтор, который ничего не вылечил, обязан вернуть 2, а не «повторено 5»."""
+    script = _load_script()
+    _patch_session(monkeypatch, db_session)
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+    await source.record_selection(db_session, site="vmalmyzhe", lips=["1_10"])
+    await source.update_delivery(
+        db_session,
+        site="vmalmyzhe",
+        lip="1_10",
+        status="failed",
+        reason="no_key",
+        verdict=_accept(),
+    )
+    await db_session.commit()
+
+    def boom(*a, **kw):
+        return {"ok": False, "status": 0, "reason": "network"}
+
+    monkeypatch.setattr(runner.delivery_mod, "deliver", boom)
+    rc = await script._amain(_args(limit=5), _real_site(), "retry", "")
+    assert rc == 2
+
+
 def _args(**over):
     """Пространство имён как его собирает argparse (разбор проверен отдельно)."""
     import argparse

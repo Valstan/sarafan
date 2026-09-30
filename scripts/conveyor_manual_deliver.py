@@ -26,9 +26,18 @@
     берутся сайтом. Ничего не пишет и не отправляет. Ноль изменений — не пустой
     отчёт, а ненулевой код возврата.
 
-``--deliver FILE``
-    Доставка. Пишет журнал и отправляет приёмнику, затем **перечитывает журнал
-    и сверяет построчно** — расхождение печатается и даёт код возврата 2.
+⚠️ **Ключи сайта приезжают из комнаты КАРМАНа, а скрипт обязан сам их
+подтянуть** (``bootstrap_secrets()``, как это делают ``main.py`` и воркер).
+Без этого вызова всё отобранное падает с ``no_key`` при ключе, который лежит в
+комнате и числится принятым — это ровно G353 из двух allowlist'ов. Проверено на
+живом прогоне 30.09: 5 принятых постов упали с ``no_key`` при живом ключе в
+комнате.
+
+``--retry-failed``
+    Повтор доставки по уже сохранённым вердиктам: подборка строк `failed` с
+    вердиктом в журнале (тот случай, когда доставка упала, а материал уже
+    разобран — платить за классификацию второй раз незачем). Остаток `failed`
+    после прогона печатается и даёт код 2.
 
 Почему сверка обязательна (а не «повыводить и посмотреть»): отчёт скрипта и
 журнал — разные источники, и именно они расходились. Скрипт рапортовал
@@ -78,6 +87,7 @@ import argparse
 import asyncio
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
@@ -332,6 +342,26 @@ def _write_file(path: str, payload: Dict[str, Any]) -> None:
     )
 
 
+async def still_failed(session, site_key: str) -> list:
+    """Строки ``failed`` — то, что повтор не вылечил.
+
+    Нужны не для красоты: без такой сверки повтор, который ничего не исправил,
+    отчитался бы «повторено 5» и ушёл с кодом 0.
+    """
+    from sqlalchemy import select
+
+    from database.models_extended import ConveyorDelivery
+
+    rows = (
+        await session.execute(
+            select(ConveyorDelivery.lip, ConveyorDelivery.reason)
+            .where(ConveyorDelivery.site == site_key)
+            .where(ConveyorDelivery.status == "failed")
+        )
+    ).all()
+    return [{"lip": r[0], "reason": r[1]} for r in rows]
+
+
 async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
     """Вся работа режима. Отделено от ``main``, который только разбирает аргументы.
 
@@ -342,8 +372,14 @@ async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
     """
     from database.connection import AsyncSessionLocal
     from modules.conveyor import runner as runner_mod
+    from modules.secrets_bootstrap import bootstrap_secrets
 
     site_key = str(site.get("key") or args.site)
+
+    # Секреты комнаты в окружение — до всего, что их спросит. ``main.py`` и
+    # воркер делают то же на старте; скрипт, который этого не делает, отдаёт
+    # приёмнику ``no_key`` при ключе, лежащем в комнате (G353).
+    bootstrap_secrets()
 
     async def with_session(coro_factory):
         async with AsyncSessionLocal() as sess:
@@ -369,6 +405,35 @@ async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
         )
         return 0
 
+    if mode == "retry":
+
+        async def go_retry(sess):
+            stats = await runner_mod.retry_failed(
+                sess, site, limit=args.limit or 50, sleep=time.sleep
+            )
+            return stats, await still_failed(sess, site_key)
+
+        try:
+            stats, left = await with_session(go_retry)
+        except Exception as e:  # noqa: BLE001
+            print(f"повтор не выполнен: {e}", file=sys.stderr)
+            return 1
+        print(
+            "site={site} повторено={retried} доставлено={delivered} задержано={held} "
+            "упало={failed}".format(
+                site=site_key,
+                retried=stats.get("retried"),
+                delivered=stats.get("delivered"),
+                held=stats.get("held"),
+                failed=stats.get("failed"),
+            )
+        )
+        for row in left:
+            print(f"  ! {row['lip']}: всё ещё failed — {row['reason']}")
+        return 2 if left else 0
+
+    # Файл вердиктов читается здесь, а не выше: у режима ``--retry-failed``
+    # файла нет вовсе, и чтение ``Path("")`` уводило в каталог.
     try:
         verdicts = load_verdicts(file_name)
     except (OSError, ValueError, json.JSONDecodeError) as e:
@@ -448,15 +513,23 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         "--check", metavar="FILE", help="разобрать вердикты из FILE, ничего не шлёт"
     )
     parser.add_argument("--deliver", metavar="FILE", help="доставить по вердиктам из FILE")
+    parser.add_argument(
+        "--retry-failed",
+        action="store_true",
+        help="повторить доставку по сохранённым вердиктам (строки failed)",
+    )
     parser.add_argument("--days", type=int, default=None, help="окно свежести, сутки")
     parser.add_argument("--limit", type=int, default=None, help="потолок постов")
     parser.add_argument("--json", action="store_true", help="вывести сводку JSON")
     args = parser.parse_args(argv)
 
     chosen = [(m, getattr(args, m)) for m in ("emit", "check", "deliver") if getattr(args, m)]
+    if args.retry_failed:
+        chosen.append(("retry", ""))
     if len(chosen) != 1:
         print(
-            "нужен ровно один режим: --emit FILE | --check FILE | --deliver FILE",
+            "нужен ровно один режим: --emit FILE | --check FILE | --deliver FILE | "
+            "--retry-failed",
             file=sys.stderr,
         )
         return 1
