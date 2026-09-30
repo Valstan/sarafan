@@ -33,7 +33,26 @@ def test_grants_url_shares_host_with_bootstrap():
         sg.grants_url("https://vault.example/api/secrets")
         == "https://vault.example/api/secrets/grants"
     )
-    assert sg.grants_url().startswith(sg.VAULT_URL)
+
+
+def test_grants_url_falls_back_to_env(monkeypatch):
+    """Адрес хранилища приходит из окружения, а не из кода: репозиторий публичный."""
+    monkeypatch.setenv("SECRETS_VAULT_URL", "https://vault.example/api/secrets")
+    assert sg.grants_url() == "https://vault.example/api/secrets/grants"
+
+
+def test_grants_url_without_address_fails_loudly(monkeypatch):
+    """Нет адреса — внятная ошибка, а не URL из пустоты вида «/grants»."""
+    monkeypatch.delenv("SECRETS_VAULT_URL", raising=False)
+    with pytest.raises(RuntimeError, match="SECRETS_VAULT_URL"):
+        sg.grants_url()
+
+
+def test_vault_address_is_not_hardcoded_in_code():
+    """Сторож на инфра-деталь: технический домен в коде — находка для постороннего."""
+    from modules import secrets_bootstrap as sb
+
+    assert sb.VAULT_URL == ""
 
 
 def test_decide_rejects_unknown_name():
