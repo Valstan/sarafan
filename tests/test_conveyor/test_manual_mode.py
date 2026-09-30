@@ -128,15 +128,45 @@ async def test_manual_verdict_passes_through_the_same_gates(db_session, wired, m
 async def test_post_without_verdict_is_not_sent_to_the_model(db_session, wired, monkeypatch):
     """Нет вердикта — не сбой: ни строки в журнале, ни ухода в LLM.
 
-    Тишина при лежащем движке иначе читалась бы как «отбор пуст».
+    Тишина при лежащем движке иначе читалась бы как «отбор пуст». И — важнее —
+    такой пост обязан остаться в отборе: отбор отсекает любой ``lip`` со строкой
+    журнала, и заведённая ``selected``-строка выбросила бы его навсегда (проверено
+    ниже отдельным тестом).
     """
     monkeypatch.setenv("VMALMYZHE_INGEST_KEY", "k")
     await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
     stats = await runner.run_site(db_session, SITE, verdicts={"2_20": _accept()}, sleep=None)
     assert stats["skipped"] == 1 and stats["without_verdict"] == ["1_10"]
     assert stats["delivered"] == 0 and wired["classify"] == [] and wired["deliver"] == []
-    status, _ = await _status(db_session, "1_10")
-    assert status == "selected"
+    assert await source.site_status_counts(db_session, site="vmalmyzhe") == {}
+    assert await source.fetch_pending_for_site(db_session, SITE)
+
+
+@pytest.mark.asyncio
+async def test_post_without_verdict_stays_selectable(db_session, wired, monkeypatch):
+    """Кандидат без вердикта остаётся кандидатом следующего прогона.
+
+    Это и есть разница между ручным режимом и модельным: там вердикт есть у
+    каждого, и ``selected``-строка означает «обрабатывается прямо сейчас».
+    Здесь строка была бы приговором — отбор больше никогда этот lip не возьмёт.
+    """
+    monkeypatch.setenv("VMALMYZHE_INGEST_KEY", "k")
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+    await seed_pair(db_session, lip="2_20", text=OTHER_TEXT)
+
+    first = await runner.run_site(db_session, SITE, verdicts={"1_10": _accept()}, sleep=None)
+    assert first["skipped"] == 1 and first["without_verdict"] == ["2_20"]
+    assert await source.site_status_counts(db_session, site="vmalmyzhe") == {"delivered": 1}
+
+    # Второй прогон без вердиктов для 2_20 всё равно его видит.
+    pending = await source.fetch_pending_for_site(db_session, SITE)
+    assert [p["lip"] for p in pending] == ["2_20"]
+
+    second = await runner.run_site(
+        db_session, SITE, verdicts={"2_20": _accept(OTHER_TEXT)}, sleep=None
+    )
+    assert second["delivered"] == 1 and second["without_verdict"] == []
+    assert await source.site_status_counts(db_session, site="vmalmyzhe") == {"delivered": 2}
 
 
 @pytest.mark.asyncio
