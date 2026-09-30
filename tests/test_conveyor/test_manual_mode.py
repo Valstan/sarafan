@@ -261,6 +261,149 @@ async def test_inflated_manual_text_is_caught_by_the_shared_gate(db_session, wir
     assert await source.site_status_counts(db_session, site="vmalmyzhe") == {"failed": 1}
 
 
+@pytest.mark.asyncio
+async def test_emit_mode_writes_candidates_with_text(db_session, monkeypatch, tmp_path):
+    """``--emit`` на живом отборе: файл с текстом, а не пустая заглушка.
+
+    Режимы CLI проверяются именно здесь, а не только разбором чистых функций:
+    ветка ``--emit`` оставалась непокрытой и держала баг «свободная переменная
+    ``runner_mod``», который виден только при запуске скрипта целиком. Тест,
+    не заходящий в ветку, не отличит «работает» от «никогда не запускалось».
+    """
+    script = _load_script()
+    _patch_session(monkeypatch, db_session)
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+    out = tmp_path / "cand.json"
+
+    assert await script._amain(_args(emit=str(out)), _real_site(), "emit", str(out)) == 0
+
+    data = json.loads(out.read_text(encoding="utf-8"))
+    assert data["verdicts"] == {}
+    assert [c["lip"] for c in data["candidates"]] == ["1_10"]
+    assert data["candidates"][0]["text"] == LONG_TEXT
+    assert await source.site_status_counts(db_session, site="vmalmyzhe") == {}
+
+
+@pytest.mark.asyncio
+async def test_check_mode_end_to_end(db_session, monkeypatch, tmp_path, capsys):
+    """``--check`` на настоящем отборе: 1 — пока вердикт не на все посты."""
+    script = _load_script()
+    _patch_session(monkeypatch, db_session)
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+    await seed_pair(db_session, lip="2_20", text=OTHER_TEXT)
+    site = _real_site()
+
+    file_name = tmp_path / "plan.json"
+    file_name.write_text(
+        json.dumps({"verdicts": {"1_10": _accept()}}, ensure_ascii=False), encoding="utf-8"
+    )
+    rc = await script._amain(_args(check=str(file_name)), site, "check", str(file_name))
+    assert rc == 1
+    assert "нет вердикта" in capsys.readouterr().out
+
+    file_name.write_text(
+        json.dumps(
+            {"verdicts": {"1_10": _accept(), "2_20": _accept(text=OTHER_TEXT)}},
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    rc = await script._amain(_args(check=str(file_name)), site, "check", str(file_name))
+    assert rc == 0
+    assert await source.site_status_counts(db_session, site="vmalmyzhe") == {}
+
+
+@pytest.mark.asyncio
+async def test_deliver_mode_end_to_end(db_session, wired, monkeypatch, tmp_path, capsys):
+    """``--deliver`` на живом пути: отправлено, журнал сошёлся, код 0."""
+    script = _load_script()
+    _patch_session(monkeypatch, db_session)
+    monkeypatch.setenv("VMALMYZHE_INGEST_KEY", "k")
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+    file_name = tmp_path / "plan.json"
+    file_name.write_text(
+        json.dumps({"verdicts": {"1_10": _accept()}}, ensure_ascii=False), encoding="utf-8"
+    )
+    rc = await script._amain(_args(deliver=str(file_name)), _real_site(), "deliver", str(file_name))
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "delivered=1" in out and "РАСХОЖДЕНИЕ" not in out
+    status, _ = await _status(db_session, "1_10")
+    assert status == "delivered"
+
+
+@pytest.mark.asyncio
+async def test_deliver_mode_rc_2_when_journal_disagrees(
+    db_session, wired, monkeypatch, tmp_path, capsys
+):
+    """Код 2 — прогон состоялся, но журнал разошёлся: молчать здесь нельзя.
+
+    Именно этот случай отчёт скрипта показывал зелёным 30.09, пока строка
+    оставалась ``selected``.
+    """
+    script = _load_script()
+    _patch_session(monkeypatch, db_session)
+    monkeypatch.setenv("VMALMYZHE_INGEST_KEY", "k")
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+
+    real_update = source.update_delivery
+    calls = {"n": 0}
+
+    async def flaky(session, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False  # строка не найдена — как на живых данных
+        return await real_update(session, **kw)
+
+    monkeypatch.setattr(source, "update_delivery", flaky)
+    file_name = tmp_path / "plan.json"
+    file_name.write_text(
+        json.dumps({"verdicts": {"1_10": _accept()}}, ensure_ascii=False), encoding="utf-8"
+    )
+    rc = await script._amain(_args(deliver=str(file_name)), _real_site(), "deliver", str(file_name))
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "РАСХОЖДЕНИЕ С ЖУРНАЛОМ" in out and "журнал=selected" in out
+
+
+def _args(**over):
+    """Пространство имён как его собирает argparse (разбор проверен отдельно)."""
+    import argparse
+
+    base = {
+        "site": "vmalmyzhe",
+        "emit": None,
+        "check": None,
+        "deliver": None,
+        "days": None,
+        "limit": None,
+        "json": False,
+    }
+    base.update(over)
+    return argparse.Namespace(**base)
+
+
+def _real_site():
+    """Настоящий сайт из конфига, а не тестовый словарь: проверяем и путь конфигурации."""
+    from config.content_conveyor import get_site
+
+    return get_site("vmalmyzhe")
+
+
+def _patch_session(monkeypatch, session):
+    """Подменить фабрику сессий CLI на уже открытую тестовую сессию."""
+    from database import connection
+
+    class _Ctx:
+        async def __aenter__(self):
+            return session
+
+        async def __aexit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(connection, "AsyncSessionLocal", lambda: _Ctx())
+
+
 def _load_script():
     import importlib.util
     import sys as _sys
