@@ -41,18 +41,28 @@
 доставки сайтов — в комнате КАРМАНа и подтягиваются bootstrap'ом):
 
     cd /home/valstan/SETKA
-    sudo bash -c 'set -a; . /etc/setka/secrets-token.env; . /etc/setka/setka.env; set +a;
-                   venv/bin/python scripts/conveyor_manual_deliver.py
-                   --site kultura --emit /tmp/kultura.json'
+    sudo -n bash -c 'set -a
+        . /etc/setka/secrets-token.env; . /etc/setka/setka.env; set +a
+        venv/bin/python scripts/conveyor_manual_deliver.py
+        --site kultura --emit /tmp/kultura.json'
 
     # прочитать /tmp/kultura.json, заполнить verdicts, затем:
-    sudo bash -c 'set -a; . /etc/setka/secrets-token.env; . /etc/setka/setka.env; set +a;
-                   venv/bin/python scripts/conveyor_manual_deliver.py
-                   --site kultura --check /tmp/kultura.json'
+    sudo -n bash -c 'set -a
+        . /etc/setka/secrets-token.env; . /etc/setka/setka.env; set +a
+        venv/bin/python scripts/conveyor_manual_deliver.py
+        --site kultura --check /tmp/kultura.json'
     # и только после зелёной сверки:
-    sudo bash -c 'set -a; . /etc/setka/secrets-token.env; . /etc/setka/setka.env; set +a;
-                   venv/bin/python scripts/conveyor_manual_deliver.py
-                   --site kultura --deliver /tmp/kultura.json'
+    sudo -n bash -c 'set -a
+        . /etc/setka/secrets-token.env; . /etc/setka/setka.env; set +a
+        venv/bin/python scripts/conveyor_manual_deliver.py
+        --site kultura --deliver /tmp/kultura.json'
+
+⚠️ **env читается внутри `sudo -n bash -c`, а не снаружи.** Файлы
+`/etc/setka/*.env` — `600 root:root`, поэтому `sudo venv/bin/python` без
+`set -a` внутри того же шелла видит пустое окружение и падает на
+``DATABASE_URL is not set`` (проверено на живом прогоне 30.09). Отсюда же
+вторая ошибка того же класса: `cd ~/SETKA` под sudo даёт `/root`, поэтому
+каталог в команде — абсолютный.
 
 Канон режима: **доставка требует явного ``--deliver``** (#264 — разовый скрипт
 наследует режим окружения, а не намерение автора). Скрипт без флага отправляет
@@ -303,41 +313,24 @@ def _write_file(path: str, payload: Dict[str, Any]) -> None:
     )
 
 
-def main(argv: Optional[Sequence[str]] = None) -> int:
-    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
-    parser.add_argument("--site", required=True, help="ключ сайта из SITES (напр. kultura)")
-    parser.add_argument("--emit", metavar="FILE", help="выгрузить кандидатов в FILE")
-    parser.add_argument(
-        "--check", metavar="FILE", help="разобрать вердикты из FILE, ничего не шлёт"
-    )
-    parser.add_argument("--deliver", metavar="FILE", help="доставить по вердиктам из FILE")
-    parser.add_argument("--days", type=int, default=None, help="окно свежести, сутки")
-    parser.add_argument("--limit", type=int, default=None, help="потолок постов")
-    parser.add_argument("--json", action="store_true", help="вывести сводку JSON")
-    args = parser.parse_args(argv)
+async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
+    """Вся работа режима. Отделено от ``main``, который только разбирает аргументы.
 
-    modes = [m for m in (args.emit, args.check, args.deliver) if m]
-    if len(modes) != 1:
-        print(
-            "нужен ровно один режим: --emit FILE | --check FILE | --deliver FILE",
-            file=sys.stderr,
-        )
-        return 1
+    Разделение не для красоты: ``main`` зовёт ``asyncio.run``, а вызвать его из
+    уже идущей петли нельзя — значит, ветки с БД иначе нечем проверить, кроме
+    как запуском скрипта руками. Именно так и вышло: ветка ``--emit``
+    осталась непокрытой и держала баг, который виден только при запуске целиком.
+    """
+    from database.connection import AsyncSessionLocal
+    from modules.conveyor import runner as runner_mod
 
-    from config.content_conveyor import get_site
-
-    site = get_site(args.site)
-    if site is None:
-        print(f"нет сайта с ключом {args.site!r}", file=sys.stderr)
-        return 1
+    site_key = str(site.get("key") or args.site)
 
     async def with_session(coro_factory):
-        from database.connection import AsyncSessionLocal
-
         async with AsyncSessionLocal() as sess:
             return await coro_factory(sess)
 
-    if args.emit:
+    if mode == "emit":
 
         async def go(sess):
             return await runner_mod.run_site(
@@ -345,26 +338,25 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
 
         try:
-            stats = asyncio.run(with_session(go))
+            stats = await with_session(go)
         except Exception as e:  # noqa: BLE001 — CLI обязан сказать, а не упасть молча
             print(f"отбор не выполнился: {e}", file=sys.stderr)
             return 1
-        payload = _emit_payload(args.site, stats)
-        _write_file(args.emit, payload)
+        payload = _emit_payload(site_key, stats)
+        _write_file(file_name, payload)
         print(
-            f"site={args.site} кандидатов={len(payload['candidates'])} "
-            f"дублей={len(payload['duplicates'])} → {args.emit}"
+            f"site={site_key} кандидатов={len(payload['candidates'])} "
+            f"дублей={len(payload['duplicates'])} → {file_name}"
         )
         return 0
 
     try:
-        verdicts = load_verdicts(args.check or args.deliver)
+        verdicts = load_verdicts(file_name)
     except (OSError, ValueError, json.JSONDecodeError) as e:
         print(f"файл вердиктов не прочитан: {e}", file=sys.stderr)
         return 1
 
-    file_name = args.check or args.deliver
-    if args.check:
+    if mode == "check":
 
         async def go_plan(sess):
             return await plan(
@@ -372,7 +364,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             )
 
         try:
-            report = asyncio.run(with_session(go_plan))
+            report = await with_session(go_plan)
         except Exception as e:  # noqa: BLE001
             print(f"разбор не выполнился: {e}", file=sys.stderr)
             return 1
@@ -389,8 +381,6 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 1
         return 1 if not_ready else 0
 
-    from modules.conveyor import runner as runner_mod
-
     async def go_deliver(sess):
         stats = await runner_mod.run_site(
             sess,
@@ -400,13 +390,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             verdicts=verdicts,
             collect_results=True,
         )
-        mismatches = await reconcile(
-            sess, str(site.get("key") or args.site), stats.get("results") or []
-        )
+        mismatches = await reconcile(sess, site_key, stats.get("results") or [])
         return stats, mismatches
 
     try:
-        stats, mismatches = asyncio.run(with_session(go_deliver))
+        stats, mismatches = await with_session(go_deliver)
     except Exception as e:  # noqa: BLE001
         print(f"доставка не выполнена: {e}", file=sys.stderr)
         return 1
@@ -421,6 +409,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("журнал разошёлся с отчётом — см. расхождение выше", file=sys.stderr)
         return 2
     return 0
+
+
+def main(argv: Optional[Sequence[str]] = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    parser.add_argument("--site", required=True, help="ключ сайта из SITES (напр. kultura)")
+    parser.add_argument("--emit", metavar="FILE", help="выгрузить кандидатов в FILE")
+    parser.add_argument(
+        "--check", metavar="FILE", help="разобрать вердикты из FILE, ничего не шлёт"
+    )
+    parser.add_argument("--deliver", metavar="FILE", help="доставить по вердиктам из FILE")
+    parser.add_argument("--days", type=int, default=None, help="окно свежести, сутки")
+    parser.add_argument("--limit", type=int, default=None, help="потолок постов")
+    parser.add_argument("--json", action="store_true", help="вывести сводку JSON")
+    args = parser.parse_args(argv)
+
+    chosen = [(m, getattr(args, m)) for m in ("emit", "check", "deliver") if getattr(args, m)]
+    if len(chosen) != 1:
+        print(
+            "нужен ровно один режим: --emit FILE | --check FILE | --deliver FILE",
+            file=sys.stderr,
+        )
+        return 1
+    mode, file_name = chosen[0]
+
+    from config.content_conveyor import get_site
+
+    site = get_site(args.site)
+    if site is None:
+        print(f"нет сайта с ключом {args.site!r}", file=sys.stderr)
+        return 1
+
+    return asyncio.run(_amain(args, site, mode, file_name))
 
 
 if __name__ == "__main__":
