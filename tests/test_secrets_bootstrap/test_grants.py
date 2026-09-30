@@ -167,3 +167,12 @@ def test_real_allowlist_has_sabantuy_from_its_own_room():
         "accept"
     )
     assert sg.decide({"aliasKey": "SABANTUY_INGEST_KEY", "sourceSlug": "evil"}) == "skip_source"
+
+
+def test_real_allowlist_has_kultura_from_its_own_room():
+    """Письмо brain 2026-09-30: ключ портала «Культура» принимаем только
+    из комнаты ``dkmalmyzh``. Ключа публикации нет вовсе — в allowlist
+    только ingest-имя, доставка идёт черновиком."""
+    assert sg.GRANT_ALLOWLIST["KULTURA_INGEST_KEY"] == frozenset({"dkmalmyzh"})
+    assert sg.decide({"aliasKey": "KULTURA_INGEST_KEY", "sourceSlug": "dkmalmyzh"}) == ("accept")
+    assert sg.decide({"aliasKey": "KULTURA_INGEST_KEY", "sourceSlug": "evil"}) == "skip_source"
