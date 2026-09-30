@@ -112,7 +112,7 @@ async def collect(days: int) -> Dict[str, Any]:
                         {
                             "region": str(region_code),
                             "category": "?",
-                            "wall": url.rsplit("/", 1)[-1],
+                            "wall": (match.group(1) if match else "?"),
                             "name": "(стены нет в реестре communities)",
                         }
                     )
@@ -165,7 +165,7 @@ def render(report: Dict[str, Any]) -> str:
         lines.append("чужие стены в реklama (смотреть глазами — это не приговор):")
         for row in report["foreign"]:
             lines.append(
-                f"  - регион {row['region']} · стена {row.get('wall', '?')} · "
+                f"  - регион {row['region']} · стена {row.get('wall') or '?'} · "
                 f"категория {row['category']} · {row['name']}"
             )
     else:

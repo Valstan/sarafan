@@ -81,3 +81,27 @@ def test_missing_board_is_named_with_its_count():
     text = report_mod.render(_report())
     assert "без: 2" in text
     assert "falenki, oparino" in text
+
+
+def test_unknown_wall_is_printed_as_id_not_url():
+    """Стена вне реестра печатается идентификатором, а не хвостом URL.
+
+    Проверено на живом прогоне: срез `url.rsplit('/')` давал в колонке «стена»
+    мусор вида ``wall-194944166_5911761`` вместо ``-194944166``, и строка выглядела
+    как ошибка инструмента там, где на самом деле просто неизвестная стена.
+    """
+    text = report_mod.render(
+        _report(
+            unknown_posts=1,
+            foreign=[
+                {
+                    "region": "mi",
+                    "category": "?",
+                    "wall": "-194944166",
+                    "name": "(стены нет в реестре communities)",
+                }
+            ],
+        )
+    )
+    assert "стена -194944166 ·" in text
+    assert "wall" not in text.split("чужие стены")[1].split("\n")[1]
