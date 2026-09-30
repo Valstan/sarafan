@@ -57,8 +57,13 @@ import os
 import urllib.request
 from typing import Any, Dict, List, Optional
 
-# Хост vault КАРМАНа из спеки (адресован как SECRETS_VAULT_URL env, см. свойство 6).
-VAULT_URL = "https://831d0ce99bdf.vps.myjino.ru/api/secrets"
+# Адрес хранилища в коде НЕ держим: технический домен в отслеживаемом файле —
+# инфра-деталь, а репозиторий публичный (AGENTS.md, «Что не публикуется»).
+# Он приходит из окружения: на проде это `SECRETS_VAULT_URL` в env-файле
+# приложения, локально — из окружения разработчика. Пустая строка означает
+# «адрес не задан», и клиент об этом говорит громко (см. bootstrap_secrets),
+# а не молча уходит в сеть по адресу из воздуха.
+VAULT_URL = ""
 # Секреты, без которых SETKA не стартует (ровно те, что config.runtime требует
 # через _require). Их отсутствие = «локальная копия потеряна».
 REQUIRED_NAMES: tuple = ("DATABASE_URL", "REDIS_URL")
@@ -299,6 +304,15 @@ def bootstrap_secrets(
         return {"recovered": 0, "ignored": [], "reason": "no-token"}
 
     url = vault_url if vault_url is not None else (env.get("SECRETS_VAULT_URL") or VAULT_URL)
+    if not str(url).strip():
+        # Молча пропустить pull нельзя: приложение продолжит старт и упадёт
+        # позже, на REQUIRED-секретах, с сообщением не о том, что не задано
+        # подключение к хранилищу. Адрес — не секрет, но и не место для репозитория.
+        log.error(
+            "SETKA: SECRETS_VAULT_URL не задан — восстановление из vault невозможно "
+            "(адрес хранилища задаётся окружением, в коде его быть не должно)"
+        )
+        return {"recovered": 0, "ignored": [], "reason": "no-url"}
     try:
         fetched = _fetch_secrets(token, url)
     except Exception as e:  # noqa: BLE001 — best-effort, см. свойство 4

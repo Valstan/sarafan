@@ -15,6 +15,26 @@ import pytest
 
 from modules import secrets_bootstrap as sb
 
+# Адрес хранилища в коде больше не зашит (это инфра-деталь, AGENTS.md), поэтому
+# тесты задают его через окружение — ровно так, как это делает прод. Хост
+# ``vault.example`` зарезервирован стандартом и ничего не резолвит.
+_VAULT_URL = "https://vault.example/api/secrets"
+
+
+def _bootstrap_env(env):
+    """Дописать адрес хранилища в то же окружение, которое клиент будет менять.
+
+    Мутируем на месте — как на проде, где это ``os.environ``: тесты проверяют
+    содержимое того же словаря, который передали.
+    """
+    env.setdefault("SECRETS_VAULT_URL", _VAULT_URL)
+    return env
+
+
+def _bootstrap(env, **kw):
+    """``bootstrap_secrets`` с адресом в окружении — как на проде."""
+    return sb.bootstrap_secrets(env=_bootstrap_env(env), **kw)
+
 
 def test_no_token_means_no_network(monkeypatch):
     """Без ``SECRETS_TOKEN`` в vault не ходим ни в каком режиме.
@@ -33,10 +53,48 @@ def test_no_token_means_no_network(monkeypatch):
     env = {"DATABASE_URL": "postgresql+asyncpg://u:p@h/db", "REDIS_URL": "redis://h:1/0"}
     monkeypatch.setattr(sb, "_fetch_secrets", _fake_fetch)
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert res["reason"] == "no-token"
     assert res["recovered"] == 0
     assert calls == []
+
+
+def test_missing_vault_address_is_reported_not_silently_skipped(monkeypatch):
+    """Нет ``SECRETS_VAULT_URL`` — приложение продолжает старт, но причина названа.
+
+    Раньше адрес был зашит в код, и такая ошибка была невозможна; теперь, когда
+    он приходит из окружения, «нет адреса» обязано звучать в логе, иначе старт
+    упадёт позже и совсем по другому поводу — на REQUIRED-секретах.
+    """
+    calls = []
+
+    def _fake_fetch(*a, **k):  # pragma: no cover — не должен вызываться
+        calls.append(a)
+        return {}
+
+    monkeypatch.setattr(sb, "_fetch_secrets", _fake_fetch)
+    env = {"SECRETS_TOKEN": "tok"}
+    res = sb.bootstrap_secrets(env=env)
+    assert res["reason"] == "no-url"
+    assert res["recovered"] == 0
+    assert calls == []
+
+
+def test_vault_address_taken_from_env(monkeypatch):
+    """Адрес берётся из окружения — значение в подставленном URL приходит из него."""
+    seen = {}
+
+    def _fake_fetch(token, url):
+        seen["url"] = url
+        return {}
+
+    monkeypatch.setattr(sb, "_fetch_secrets", _fake_fetch)
+    env = {
+        "SECRETS_TOKEN": "tok",
+        "SECRETS_VAULT_URL": "https://vault.example/api/secrets",
+    }
+    sb.bootstrap_secrets(env=_bootstrap_env(env))
+    assert seen["url"] == "https://vault.example/api/secrets"
 
 
 def test_recovers_missing_required_from_vault(monkeypatch):
@@ -52,7 +110,7 @@ def test_recovers_missing_required_from_vault(monkeypatch):
         },
     )
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert res["reason"] == "recovered"
     assert res["recovered"] == 3
     assert env["DATABASE_URL"].startswith("postgresql+asyncpg")
@@ -79,7 +137,7 @@ def test_foreign_keys_ignored_by_allowlist(monkeypatch):
         },
     )
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert res["recovered"] == 2  # только DATABASE_URL + REDIS_URL
     assert sorted(res["ignored"]) == ["LD_PRELOAD", "NODE_OPTIONS", "PYTHONPATH"]
     assert "NODE_OPTIONS" not in env
@@ -102,11 +160,14 @@ def test_bootstrap_config_never_accepted_from_vault(monkeypatch):
         },
     )
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert res["recovered"] == 2
     assert sorted(res["ignored"]) == ["SECRETS_MANAGER_URL", "SECRETS_TOKEN", "SECRETS_VAULT_URL"]
     assert env["SECRETS_TOKEN"] == "tok"  # оригинал не перетёрся
-    assert env.get("SECRETS_VAULT_URL") is None
+    # Адрес хранилища задаётся окружением, поэтому «не перетёрся» тут означает
+    # «остался локальным», а не «отсутствует». Подмена адреса из ответа vault —
+    # ровно тот самый вектор, ради которого bootstrap-конфиг вне allowlist.
+    assert env["SECRETS_VAULT_URL"] == _VAULT_URL
 
 
 def test_local_value_wins_over_vault(monkeypatch):
@@ -125,7 +186,7 @@ def test_local_value_wins_over_vault(monkeypatch):
         },
     )
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert res["recovered"] == 1  # только REDIS_URL
     assert env["DATABASE_URL"] == "postgresql+asyncpg://local:p@h/db"
 
@@ -135,7 +196,7 @@ def test_no_token_returns_no_token(monkeypatch):
     env = {}  # и REQUIRED нет, и токена нет
     monkeypatch.setattr(sb, "_fetch_secrets", lambda *a, **k: pytest.fail("не должен вызываться"))
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert res["reason"] == "no-token"
     assert res["recovered"] == 0
 
@@ -148,7 +209,7 @@ def test_vault_unreachable_is_best_effort(monkeypatch):
         raise RuntimeError("connection refused")
 
     monkeypatch.setattr(sb, "_fetch_secrets", _boom)
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert res["reason"] == "fetch-failed"
     assert res["recovered"] == 0
 
@@ -178,7 +239,7 @@ def test_ignored_logged_by_names_only(monkeypatch, caplog):
     )
 
     with caplog.at_level(logging.WARNING, logger="modules.secrets_bootstrap"):
-        sb.bootstrap_secrets(env=env)
+        sb.bootstrap_secrets(env=_bootstrap_env(env))
 
     assert "MYSTERY" in caplog.text
     assert "super-secret-value-12345" not in caplog.text
@@ -198,7 +259,7 @@ def test_recovered_logs_count(monkeypatch, caplog):
     # WARNING (не INFO) — хук выполняется до logging.basicConfig, должен пройти
     # даже через lastResort-хендлер root-логгера.
     with caplog.at_level(logging.WARNING, logger="modules.secrets_bootstrap"):
-        sb.bootstrap_secrets(env=env)
+        sb.bootstrap_secrets(env=_bootstrap_env(env))
 
     assert "восстановлено секретов из vault: 2" in caplog.text
 
@@ -222,7 +283,7 @@ def test_site_ingest_keys_accepted_by_suffix(monkeypatch):
         },
     )
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert env["VMALMYZHE_INGEST_KEY"] == "site-key-1"
     assert env["CDK_KALININO_INGEST_KEY"] == "site-key-2"
     assert res["ignored"] == ["NODE_OPTIONS"]
@@ -245,7 +306,7 @@ def test_gateway_key_name_is_not_smuggled_in_by_suffix_rule(monkeypatch):
         },
     )
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert res["ignored"] == ["GATEWAY_KEY_VMALMYZHE"]
     assert "GATEWAY_KEY_VMALMYZHE" not in env
 
@@ -266,7 +327,7 @@ def test_room_is_a_source_not_only_a_backup(monkeypatch):
         sb, "_fetch_secrets", lambda token, url: {"DEEPSEEK_API_KEY": "sk-from-room"}
     )
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert env["DEEPSEEK_API_KEY"] == "sk-from-room"
     assert res["recovered"] == 1 and res["reason"] == "pulled"
 
@@ -284,7 +345,7 @@ def test_pull_always_can_be_switched_off(monkeypatch):
         raise AssertionError("в vault ходить не должны")
 
     monkeypatch.setattr(sb, "_fetch_secrets", _boom)
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert res["reason"] == "local-env-intact" and res["recovered"] == 0
 
 
@@ -302,7 +363,7 @@ def test_local_env_still_wins_in_pull_mode(monkeypatch):
         lambda token, url: {"GROQ_API_KEY": "from-room", "DEEPSEEK_API_KEY": "new"},
     )
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert env["GROQ_API_KEY"] == "local-wins"
     assert env["DEEPSEEK_API_KEY"] == "new"
     assert res["recovered"] == 1
@@ -324,7 +385,7 @@ def test_allowlist_still_applies_in_pull_mode(monkeypatch):
         },
     )
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert res["ignored"] == ["NODE_OPTIONS"]
     assert "NODE_OPTIONS" not in env
 
@@ -341,7 +402,7 @@ def test_unreachable_vault_does_not_break_start(monkeypatch):
         raise OSError("vault недоступен")
 
     monkeypatch.setattr(sb, "_fetch_secrets", _fail)
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert res["reason"] == "fetch-failed" and res["recovered"] == 0
 
 
@@ -355,7 +416,7 @@ def test_quiet_when_pull_adds_nothing(monkeypatch, caplog):
     monkeypatch.setattr(sb, "_fetch_secrets", lambda token, url: {})
 
     with caplog.at_level(logging.WARNING, logger="modules.secrets_bootstrap"):
-        sb.bootstrap_secrets(env=env)
+        sb.bootstrap_secrets(env=_bootstrap_env(env))
 
     assert "восстановлено секретов" not in caplog.text
 
@@ -476,7 +537,7 @@ def test_site_publish_key_reaches_the_process(monkeypatch):
         },
     )
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert env["VMALMYZHE_PUBLISH_KEY"] == "publish-key"
     assert res["ignored"] == []
 
@@ -496,7 +557,7 @@ def test_publish_suffix_does_not_open_the_door_to_gateway_names(monkeypatch):
         },
     )
 
-    res = sb.bootstrap_secrets(env=env)
+    res = sb.bootstrap_secrets(env=_bootstrap_env(env))
     assert "GATEWAY_KEY_VMALMYZHE" in res["ignored"]
     assert "GATEWAY_KEY_VMALMYZHE" not in env
     assert env["SECRETS_TOKEN"] == "tok"  # bootstrap-имя не перетёрто

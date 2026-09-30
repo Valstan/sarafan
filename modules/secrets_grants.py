@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -62,8 +63,18 @@ _TIMEOUT_SEC = 10
 
 
 def grants_url(vault_url: Optional[str] = None) -> str:
-    """``…/api/secrets`` → ``…/api/secrets/grants`` (тот же хост, что у bootstrap'а)."""
-    base = (vault_url or VAULT_URL).rstrip("/")
+    """``…/api/secrets`` → ``…/api/secrets/grants`` (тот же хост, что у bootstrap'а).
+
+    Адрес приходит аргументом или из ``SECRETS_VAULT_URL`` — в коде его нет
+    намеренно: технический домен в отслеживаемом файле это инфра-деталь, а
+    репозиторий публичный (AGENTS.md, «Что не публикуется»). Без адреса падаем
+    с внятной ошибкой, а не собираем URL из пустоты.
+    """
+    base = (vault_url or os.getenv("SECRETS_VAULT_URL") or VAULT_URL).rstrip("/")
+    if not base:
+        raise RuntimeError(
+            "адрес хранилища не задан: передай vault_url или задай SECRETS_VAULT_URL"
+        )
     return f"{base}/grants"
 
 
