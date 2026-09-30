@@ -51,6 +51,11 @@ GRANT_ALLOWLIST: Dict[str, frozenset] = {
     # Сабантуя, выдача sabantuymalmyzh → setka под именем SABANTUY_INGEST_KEY.
     # Ключа публикации Сабантуй не выдавал — доставка только черновиком.
     "SABANTUY_INGEST_KEY": frozenset({"sabantuymalmyzh"}),
+    # Четвёртый приёмник (письмо brain 2026-09-30, эшелон зафиксирован
+    # единственным): ключ портала «Культура Малмыжского района», выдача
+    # dkmalmyzh → setka под именем KULTURA_INGEST_KEY. Ключа публикации нет
+    # вовсе — приёмник всегда игнорирует publish с warning, всё черновики.
+    "KULTURA_INGEST_KEY": frozenset({"dkmalmyzh"}),
 }
 
 _TIMEOUT_SEC = 10

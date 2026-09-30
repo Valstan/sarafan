@@ -26,9 +26,12 @@ date?, images?, publish?}`; идемпотентность по `vkPostId`; от
 - Письмо мозгу: `mailbox/to-brain/2026-09-29-standard-delivery-echelon-culture-portal.md`
   (kind=idea, suggest): подтвердить D-074 + поручить ДК приёмник и грант
   `KULTURA_INGEST_KEY`.
-- Наша часть после гранта (путь Сабантуя): SITES-запись `kultura` + фильтр
-  (тема kultura + имена учреждений) + `rules/kultura.md` + `CONVEYOR_SITES` +
-  сухой прогон + первая доставка с отчётом.
+- Ответ мозга 29.09: эшелон зафиксирован единственным, D-074 закрыт, мандат
+  Культуре ушёл (строка 06.10), имя гранта утверждено.
+- Ответ мозга 30.09: приёмник жив (401), грант id=15 предложен (201) — наш ход.
+- Код нашей части: ветка `feat/conveyor-kultura` (allowlist + SITES `kultura` +
+  `rules/kultura.md` + тесты). Дальше: merge → прод pull → accept гранта →
+  `CONVEYOR_SITES` → рестарт → сухой прогон → первая доставка + отчёт мозгу.
 
 ## Блокеры
 

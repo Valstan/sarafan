@@ -228,3 +228,65 @@ class TestSabantuy:
         site = cc.get_site("sabantuy")
         assert "publish_key_env" not in site
         assert cc.wants_publish(site) is False
+
+
+class TestKultura:
+    """Четвёртый приёмник (письмо brain 2026-09-30): портал «Культура»."""
+
+    def test_site_is_described_but_not_active_by_default(self):
+        site = cc.get_site("kultura")
+        assert site is not None
+        assert cc.get_active_sites() == []
+
+    def test_ingest_key_is_receiver_side_name(self):
+        assert cc.get_site("kultura")["key_env"] == "KULTURA_INGEST_KEY"
+
+    def test_ingest_url_is_the_portal_receiver(self):
+        assert cc.get_site("kultura")["ingest_url"] == (
+            "https://культура.вмалмыже.рф/api/ingest/posts"
+        )
+
+    def test_sections_are_institution_slugs(self):
+        """Рубрика приёмника — slug учреждения; список растёт на их стороне."""
+        assert cc.get_site("kultura")["sections"] == ("rckd", "kalinino")
+
+    def test_source_is_the_district_feed_filtered_by_topic(self):
+        site = cc.get_site("kultura")
+        assert site["source_region"] == "mi"
+        assert not site.get("source_owner_ids")
+        assert site["source_keywords"]
+
+    def test_keywords_catch_forms_but_not_lookalikes(self):
+        """Голые корни «дк»/«хор» ловят и «будку»/«хорошо» (пробелы срезает
+        `_norm_keywords`) — это осознанная плата префильтра, лишнее отклонит
+        классификатор. Здесь проверяем: профильное ловится, заведомо чужое —
+        нет."""
+        from modules.conveyor import source as source_mod
+
+        words = cc.get_site("kultura")["source_keywords"]
+        for text in (
+            "культура Малмыжа",
+            "о культуре района",
+            "культурный центр",
+            "РЦКД приглашает",
+            "в СДК Калинино концерт",
+            "вечер в ДК",
+            "ДК Малмыж",
+            "школьный хор выступил",
+            "выставка в музее",
+            "кружок вышивки",
+        ):
+            assert source_mod.matches_keywords(text, words), text
+        for text in (
+            "отключение воды",
+            "розыгрыш призов",
+            "урожай зерновых",
+        ):
+            assert not source_mod.matches_keywords(text, words), text
+
+    def test_no_publish_key_at_all(self, monkeypatch):
+        """Ключа публикации нет вовсе — только черновики."""
+        monkeypatch.setenv("KULTURA_PUBLISH_KEY", "подброшено")
+        site = cc.get_site("kultura")
+        assert "publish_key_env" not in site
+        assert cc.wants_publish(site) is False
