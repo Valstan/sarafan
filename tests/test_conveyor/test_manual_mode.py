@@ -349,6 +349,35 @@ async def test_check_mode_end_to_end(db_session, monkeypatch, tmp_path, capsys):
 
 
 @pytest.mark.asyncio
+async def test_check_is_ready_when_every_post_is_decided(db_session, monkeypatch, tmp_path, capsys):
+    """Отказ — тоже решение: план, где часть постов отклонена, готов к доставке.
+
+    Пока ``--check`` считал отказ «нерешённым», любой план с отказами (а они
+    будут почти всегда) возвращал код 1 — и гейт переставал быть сигналом.
+    """
+    script = _load_script()
+    _patch_session(monkeypatch, db_session)
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+    await seed_pair(db_session, lip="2_20", text=OTHER_TEXT)
+    file_name = tmp_path / "plan.json"
+    file_name.write_text(
+        json.dumps(
+            {
+                "verdicts": {
+                    "1_10": _accept(),
+                    "2_20": {"action": "reject", "reason": "не для сайта"},
+                }
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    rc = await script._amain(_args(check=str(file_name)), _real_site(), "check", str(file_name))
+    assert rc == 0
+    assert "решено: 2 из 2" in capsys.readouterr().out
+
+
+@pytest.mark.asyncio
 async def test_deliver_mode_end_to_end(db_session, wired, monkeypatch, tmp_path, capsys):
     """``--deliver`` на живом пути: отправлено, журнал сошёлся, код 0."""
     script = _load_script()
