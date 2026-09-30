@@ -47,6 +47,35 @@ class TestVkPostId:
         assert delivery.lip_to_vk_post_id(bad) is None
 
 
+class TestVkPostIdSign:
+    """P186: знак берётся из адреса стены, а не из слепого «всегда минус».
+
+    Пост с личной страницы (положительный owner) иначе уезжает с чужим
+    vkPostId — приёмник с собственным импортом его не узнаёт и заводит
+    вторую запись (дубль «Дорогие друзья!» id 1325 на Культуре).
+    """
+
+    def test_group_wall_keeps_minus(self):
+        post = {"lip": "110599037_2997", "url": "https://vk.com/wall-110599037_2997"}
+        assert delivery.vk_post_id_for(post) == "-110599037_2997"
+
+    def test_personal_page_keeps_no_minus(self):
+        post = {"lip": "234960216_8123", "url": "https://vk.com/wall234960216_8123"}
+        assert delivery.vk_post_id_for(post) == "234960216_8123"
+
+    def test_build_payload_uses_wall_address(self):
+        body = delivery.build_payload(
+            {"lip": "234960216_8123", "url": "https://vk.com/wall234960216_8123", "text": "t"},
+            {"title": "З"},
+        )
+        assert body["vkPostId"] == "234960216_8123"
+
+    @pytest.mark.parametrize("url", ["", "https://vk.com/dk_malmyzh", None])
+    def test_unparseable_url_falls_back_to_lip(self, url):
+        post = {"lip": "158787639_77646", "url": url}
+        assert delivery.vk_post_id_for(post) == "-158787639_77646"
+
+
 # ───────── инвариант мусора (pool #133) ─────────
 
 

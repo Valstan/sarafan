@@ -83,6 +83,29 @@ def lip_to_vk_post_id(lip: str) -> Optional[str]:
     return f"-{owner}_{post}"
 
 
+_WALL_URL_RE = re.compile(r"wall(-?\d+)_(\d+)")
+
+
+def vk_post_id_for(post: Dict[str, Any]) -> str:
+    """Ключ идемпотентности приёмника для поста — со знаком из правды.
+
+    ``lip`` хранит owner по модулю, а знак у сообществ и личных страниц разный:
+    слепое «всегда минус» (старое поведение ``lip_to_vk_post_id``) для поста с
+    личной страницы даёт чужой ``vkPostId`` — приёмник с собственным импортом
+    (портал «Культура»: мотор пишет истинный знак) такой пост не узнает и
+    заведёт вторую запись (P186, дубль «Дорогие друзья!» id 1325).
+
+    Поэтому знак берём из ``post["url"]`` (``.../wall-123_456`` vs
+    ``.../wall123_456`` — так стену адресует сам ВК), а ``lip`` остаётся
+    запасным путём, когда адреса нет или он не разобрался.
+    """
+    url = str((post or {}).get("url") or "")
+    m = _WALL_URL_RE.search(url)
+    if m:
+        return f"{m.group(1)}_{m.group(2)}"
+    return lip_to_vk_post_id(str((post or {}).get("lip") or "")) or ""
+
+
 def _letters_ratio(text: str) -> float:
     """Доля букв среди непробельных символов. Пусто → 0.0."""
     body = [c for c in text if not c.isspace()]
@@ -187,7 +210,7 @@ def build_payload(
             break
 
     body: Dict[str, Any] = {
-        "vkPostId": lip_to_vk_post_id(str(post.get("lip") or "")) or "",
+        "vkPostId": vk_post_id_for(post),
         "sourceUrl": str(post.get("url") or "").strip(),
         "title": str(verdict.get("title") or "").strip(),
         "text": str(verdict.get("text") or post.get("text") or "").strip(),
