@@ -342,11 +342,16 @@ def _write_file(path: str, payload: Dict[str, Any]) -> None:
     )
 
 
-async def still_failed(session, site_key: str) -> list:
-    """Строки ``failed`` — то, что повтор не вылечил.
+async def still_failed(session, site_key: str) -> tuple:
+    """Что осталось ``failed`` — и что из этого повтор вообще мог починить.
 
-    Нужны не для красоты: без такой сверки повтор, который ничего не исправил,
-    отчитался бы «повторено 5» и ушёл с кодом 0.
+    Разделение существенно. Повтор берёт строки **с вердиктом** (материал уже
+    разобран); строки без вердикта — это падение классификации, их лечит
+    DeepSeek, а не повтор. Если считать ошибкой прогона и их, код 2 будет
+    гореть вечно, пока лежит модель: сигнал, который никогда не погаснет, через
+    неделю перестанут читать — и тогда уйдёт настоящий. Поэтому ``retryable``
+    (повтор обязан был починить и не починил) влияет на код возврата,
+    ``no_verdict`` перечисляется для сведения.
     """
     from sqlalchemy import select
 
@@ -354,12 +359,14 @@ async def still_failed(session, site_key: str) -> list:
 
     rows = (
         await session.execute(
-            select(ConveyorDelivery.lip, ConveyorDelivery.reason)
+            select(ConveyorDelivery.lip, ConveyorDelivery.reason, ConveyorDelivery.verdict)
             .where(ConveyorDelivery.site == site_key)
             .where(ConveyorDelivery.status == "failed")
         )
     ).all()
-    return [{"lip": r[0], "reason": r[1]} for r in rows]
+    retryable = [{"lip": r[0], "reason": r[1]} for r in rows if r[2]]
+    no_verdict = [{"lip": r[0], "reason": r[1]} for r in rows if not r[2]]
+    return retryable, no_verdict
 
 
 async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
@@ -411,10 +418,11 @@ async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
             stats = await runner_mod.retry_failed(
                 sess, site, limit=args.limit or 50, sleep=time.sleep
             )
-            return stats, await still_failed(sess, site_key)
+            retryable, no_verdict = await still_failed(sess, site_key)
+            return stats, retryable, no_verdict
 
         try:
-            stats, left = await with_session(go_retry)
+            stats, retryable, no_verdict = await with_session(go_retry)
         except Exception as e:  # noqa: BLE001
             print(f"повтор не выполнен: {e}", file=sys.stderr)
             return 1
@@ -428,9 +436,15 @@ async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
                 failed=stats.get("failed"),
             )
         )
-        for row in left:
+        for row in retryable:
             print(f"  ! {row['lip']}: всё ещё failed — {row['reason']}")
-        return 2 if left else 0
+        if no_verdict:
+            print(
+                f"  ~ {len(no_verdict)} строк failed без вердикта — ждут движка "
+                "(повтор их не берёт): "
+                + ", ".join(f"{r['lip']}({r['reason']})" for r in no_verdict[:5])
+            )
+        return 2 if retryable else 0
 
     # Файл вердиктов читается здесь, а не выше: у режима ``--retry-failed``
     # файла нет вовсе, и чтение ``Path("")`` уводило в каталог.
