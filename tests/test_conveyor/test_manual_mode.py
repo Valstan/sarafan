@@ -13,6 +13,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 
 import pytest
 
@@ -268,11 +269,12 @@ async def test_emit_mode_writes_candidates_with_text(db_session, monkeypatch, tm
     Режимы CLI проверяются именно здесь, а не только разбором чистых функций:
     ветка ``--emit`` оставалась непокрытой и держала баг «свободная переменная
     ``runner_mod``», который виден только при запуске скрипта целиком. Тест,
-    не заходящий в ветку, не отличит «работает» от «никогда не запускалось».
+    не заходящий в ветку, не отличит «работает» от «никогда не запускалось``.
     """
     script = _load_script()
     _patch_session(monkeypatch, db_session)
-    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+    published = datetime(2026, 9, 29, 18, 30)
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT, published_at=published)
     out = tmp_path / "cand.json"
 
     assert await script._amain(_args(emit=str(out)), _real_site(), "emit", str(out)) == 0
@@ -281,6 +283,9 @@ async def test_emit_mode_writes_candidates_with_text(db_session, monkeypatch, tm
     assert data["verdicts"] == {}
     assert [c["lip"] for c in data["candidates"]] == ["1_10"]
     assert data["candidates"][0]["text"] == LONG_TEXT
+    # Дата из БД приходит объектом datetime: без приведения к ISO файл не пишется.
+    # На тестах с published_at=None баз был не виден, на живых данных он есть всегда.
+    assert data["candidates"][0]["published_at"] == published.isoformat()
     assert await source.site_status_counts(db_session, site="vmalmyzhe") == {}
 
 

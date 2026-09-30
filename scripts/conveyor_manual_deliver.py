@@ -293,6 +293,25 @@ def render_delivery(stats: Dict[str, Any], mismatches: Sequence[Dict[str, Any]])
     return "\n".join(lines)
 
 
+def _iso(value: Any) -> Optional[str]:
+    """Дата в ISO-строке.
+
+    Отдельная функция, потому что ``published_at`` из БД — это ``datetime``, а
+    ``json.dumps`` такой объект не берёт: файл просто не писался. На тестах это
+    не всплывало — там дата была ``None``, а на живых данных она всегда есть.
+    """
+    if value is None or isinstance(value, str):
+        return value
+    isoformat = getattr(value, "isoformat", None)
+    return isoformat() if callable(isoformat) else str(value)
+
+
+def _emit_candidate(post: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(post)
+    out["published_at"] = _iso(post.get("published_at"))
+    return out
+
+
 def _emit_payload(site_key: str, stats: Dict[str, Any]) -> Dict[str, Any]:
     return {
         "site": site_key,
@@ -301,7 +320,7 @@ def _emit_payload(site_key: str, stats: Dict[str, Any]) -> Dict[str, Any]:
             '"title": ..., "text": ...}} или {"action": "reject", "reason": ...}. '
             "Формат ровно тот, что отдаёт модель, — гейты общие."
         ),
-        "candidates": stats.get("preview") or [],
+        "candidates": [_emit_candidate(p) for p in stats.get("preview") or []],
         "duplicates": stats.get("preview_duplicates") or [],
         "verdicts": {},
     }
@@ -309,7 +328,7 @@ def _emit_payload(site_key: str, stats: Dict[str, Any]) -> Dict[str, Any]:
 
 def _write_file(path: str, payload: Dict[str, Any]) -> None:
     Path(path).write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        json.dumps(payload, ensure_ascii=False, indent=2, default=str) + "\n", encoding="utf-8"
     )
 
 
