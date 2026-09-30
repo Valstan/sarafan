@@ -38,7 +38,27 @@ from typing import Any, Dict, Optional
 
 from database.models import Community
 from modules.discovery.ai_categorizer import categorize_candidate
+from modules.discovery.ai_categorizer import usage_tokens as _usage_tokens
 from modules.vk_monitor.vk_client import VKClient
+
+
+def ai_tokens_kwargs(ai_result: dict) -> dict:
+    """Токены AI-вызова как kwargs для ``CommunityHealth``.
+
+    Тонкость, из-за которой это обёртка, а не прямое ``tokens_prompt=ai.get(...)``:
+    неизмеренный вызов — это ``None`` (нечем померить), а не ``0`` (стоит ноль).
+    Поле в структуре при этом ``int``, поэтому ``None`` становится нулём, а рядом
+    ставится ``tokens_known=False`` — иначе «не измерено» и «ноль» слились бы в
+    одно число и занизили цену прогона (P001).
+    """
+    prompt, completion = _usage_tokens(ai_result)
+    known = prompt is not None and completion is not None
+    return {
+        "tokens_prompt": int(prompt or 0),
+        "tokens_completion": int(completion or 0),
+        "tokens_known": known,
+    }
+
 
 logger = logging.getLogger(__name__)
 
@@ -93,6 +113,18 @@ class CommunityHealth:
     suggested_category: Optional[str]
     error_code: Optional[int]
     reasoning: Optional[str]
+    # Токены, потраченные на AI-классификацию этой стены. Считаются здесь, а не
+    # потом собираются грепом по логу: «сколько стоит прогон» — вопрос, на который
+    # отчёт recheck обязан отвечать сам (P001, «цена в токенах» как условие
+    # включения авто-подбора).
+    #
+    # ``tokens_known`` различает три состояния, которые ноль склеивает в одно:
+    # вызова не было (стена без текста — 0 честно), вызов проваидером не
+    # посчитан (0 обманчив) и вызов стоил ноль (не бывает). По одному
+    # ``tokens_prompt`` это не восстановить, поэтому флаг явный.
+    tokens_prompt: int = 0
+    tokens_completion: int = 0
+    tokens_known: bool = True
 
 
 def _extract_last_post_dt(items: list) -> Optional[datetime]:
@@ -292,6 +324,7 @@ async def check_community_health(
             suggested_category=ai_cat,
             error_code=None,
             reasoning=ai.get("reasoning"),
+            **ai_tokens_kwargs(ai),
         )
 
     return CommunityHealth(
@@ -303,4 +336,5 @@ async def check_community_health(
         suggested_category=None,
         error_code=None,
         reasoning=ai.get("reasoning"),
+        **ai_tokens_kwargs(ai),
     )

@@ -71,7 +71,17 @@ def _make_community(*, id_, vk_id=100, category="novost", is_active=True):
     return c
 
 
-def _health(community_id, status, *, suggested=None, error_code=None, last_post_at=None):
+def _health(
+    community_id,
+    status,
+    *,
+    suggested=None,
+    error_code=None,
+    last_post_at=None,
+    tokens_prompt=0,
+    tokens_completion=0,
+    tokens_known=True,
+):
     return CommunityHealth(
         community_id=community_id,
         vk_id=100,
@@ -81,7 +91,55 @@ def _health(community_id, status, *, suggested=None, error_code=None, last_post_
         suggested_category=suggested,
         error_code=error_code,
         reasoning=None,
+        tokens_prompt=tokens_prompt,
+        tokens_completion=tokens_completion,
+        tokens_known=tokens_known,
     )
+
+
+# ───────── цена прогона в отчёте (P001) ─────────
+#
+# Recheck — самая крупная статья расхода в модуле discovery (замер 01.10.2026:
+# 1786 вызовов за прогон), и вопрос «включать ли авто-подбор» упирается именно в
+# цену. Если она живёт только в логе, вопрос висит до следующего grep'а по
+# архиву логов — четыре месяца так и висел.
+
+
+def test_tokens_of_health_sums_measured_calls():
+    got = dt._tokens_of_health(
+        [
+            _health(1, "active", tokens_prompt=800, tokens_completion=50),
+            _health(2, "active", tokens_prompt=900, tokens_completion=60),
+        ]
+    )
+    assert got["tokens_prompt"] == 1700
+    assert got["tokens_completion"] == 110
+    assert got["tokens_measured"] is True
+    assert got["tokens_unmeasured_calls"] == 0
+
+
+def test_tokens_of_health_flags_unmeasured_call():
+    """Стена с текстом, но без счётчиков от провайдера — ноль обманчив.
+
+    Эвристика «ноль бывает только у мёртвых стен» здесь не годится: у этой
+    стены вызов был, и оплачен, но посчитать его нечем.
+    """
+    got = dt._tokens_of_health(
+        [
+            _health(1, "active", tokens_prompt=800, tokens_completion=50),
+            _health(2, "active", tokens_known=False),
+        ]
+    )
+    assert got["tokens_prompt"] == 800
+    assert got["tokens_measured"] is False
+    assert got["tokens_unmeasured_calls"] == 1
+
+
+def test_tokens_of_health_empty_is_measured_zero():
+    got = dt._tokens_of_health([])
+    assert got["tokens_prompt"] == 0
+    assert got["tokens_completion"] == 0
+    assert got["tokens_measured"] is True
 
 
 # ───────── _dormant_days_for_region ─────────

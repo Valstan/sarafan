@@ -24,7 +24,7 @@ from sqlalchemy import func, select, update
 from database.connection import AsyncSessionLocal
 from database.models import Community, CommunityCandidate, Region
 from modules.discovery import dormant_outcomes
-from modules.discovery.ai_categorizer import categorize_candidate
+from modules.discovery.ai_categorizer import categorize_candidate, sum_ai_tokens
 from modules.discovery.health_check import (
     DEFAULT_DORMANT_DAYS,
     DEFAULT_POSTS_SAMPLE,
@@ -372,6 +372,10 @@ async def run_discovery_for_region_async(
         "skipped_ai_failed": ai_failed,
         "localities_count": len(localities),
         "keywords_count": len(keywords),
+        # Цена одного прогона подбора — то самое «сколько это стоит в токенах»,
+        # ради которого P001 четыре месяца висит вопросом владельца. Раньше
+        # число существовало только в ротированных логах.
+        **sum_ai_tokens(ai_results.values()),
     }
 
 
@@ -533,7 +537,31 @@ async def recheck_communities_for_region_async(
             "region": region.code,
             "total": len(rows),
             **counts,
+            # Цена прогона — в самом отчёте, а не в логе: «включать ли
+            # авто-одбор» (P001) — вопрос о стоимости, и он должен читаться
+            # из результата задачи, а не собираться грепом по ротированным
+            # логам через полгода.
+            **_tokens_of_health(results),
         }
+
+
+def _tokens_of_health(results: Sequence[CommunityHealth]) -> Dict[str, Any]:
+    """Сумма токенов AI-классификации по результатам recheck.
+
+    ``tokens_measured=False`` означает, что хотя бы часть вызовов не вернула
+    счётчиков (``tokens_known=False``), и сумма — нижняя оценка: читать её как
+    полный расход нельзя. Флаг, а не эвристика «ноль бывает только у мёртвых
+    стен»: у стены с текстом, но без счётчиков от провайдера, ноль — обман.
+    """
+    prompt = sum(int(getattr(r, "tokens_prompt", 0) or 0) for r in results)
+    completion = sum(int(getattr(r, "tokens_completion", 0) or 0) for r in results)
+    unmeasured = sum(1 for r in results if not getattr(r, "tokens_known", True))
+    return {
+        "tokens_prompt": prompt,
+        "tokens_completion": completion,
+        "tokens_measured": unmeasured == 0,
+        "tokens_unmeasured_calls": unmeasured,
+    }
 
 
 async def recheck_all_active_regions_async(
@@ -584,6 +612,12 @@ async def recheck_all_active_regions_async(
         "success": True,
         "total_regions": len(region_ids),
         "regions": reports,
+        # Сумма по всем регионам: недельный прогон recheck — самая крупная
+        # статья расхода в модуле discovery, и без числа в отчёте её не видно
+        # нигде, кроме логов (замер 01.10.2026: 1786 вызовов за прогон).
+        "tokens_prompt": sum(int(r.get("tokens_prompt") or 0) for r in reports),
+        "tokens_completion": sum(int(r.get("tokens_completion") or 0) for r in reports),
+        "tokens_measured": all(bool(r.get("tokens_measured")) for r in reports),
     }
 
 

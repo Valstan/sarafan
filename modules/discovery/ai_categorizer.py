@@ -212,4 +212,58 @@ async def categorize_candidate(
     # ложится в БД рядом с вердиктом, и «какой моделью размечено» должно быть
     # правдой, даже если DEEPSEEK_MODEL переопределён через env.
     out["model"] = str(result.get("model") or "")
+    out["tokens_prompt"], out["tokens_completion"] = usage_tokens(result)
     return out
+
+
+def usage_tokens(result: Dict[str, Any]) -> tuple[Optional[int], Optional[int]]:
+    """``(prompt_tokens, completion_tokens)`` из ответа клиента.
+
+    Провайдер вправе не вернуть счётчики, и тогда честное значение — ``None``,
+    а не ``0``: «нечем померить» не должно выглядеть как «вызов стоил ноль».
+    Иначе сумма расхода по прогону тихо занижается, и решение «включать ли
+    авто-подбор» принимается по неверной цене (P001).
+
+    Отдельной функцией потому, что ``usage`` кладёт в результат клиент, а
+    разбирают его два независимых потребителя (отбор кандидатов и recheck).
+    """
+    usage = result.get("usage")
+    if not isinstance(usage, dict):
+        return None, None
+    return _usage_int(usage, "prompt_tokens"), _usage_int(usage, "completion_tokens")
+
+
+def _usage_int(usage: Dict[str, Any], field: str) -> Optional[int]:
+    value = usage.get(field)
+    return int(value) if isinstance(value, (int, float)) else None
+
+
+def sum_ai_tokens(results: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
+    """Сумма токенов по набору результатов + признак полноты замера.
+
+    ``tokens_measured`` отвечает на вопрос, который сумма сама не скажет: «это
+    весь расход или нижняя оценка». Частичный замер (провайдер не вернул
+    ``usage`` хотя бы по части вызовов) — это не ноль и не полная сумма, а
+    третье состояние; без флага его приходится угадывать по отчёту.
+
+    Провал вызова тоже попадает в ``tokens_unmeasured_calls``: неизвестно, был
+    ли он оплачен провайдером (сеть оборвалась после отправки — не наш расход,
+    но и не наш ноль).
+    """
+    prompt = 0
+    completion = 0
+    missing = 0
+    for item in results:
+        p = item.get("tokens_prompt")
+        c = item.get("tokens_completion")
+        if isinstance(p, (int, float)) and isinstance(c, (int, float)):
+            prompt += int(p)
+            completion += int(c)
+        else:
+            missing += 1
+    return {
+        "tokens_prompt": prompt,
+        "tokens_completion": completion,
+        "tokens_measured": missing == 0,
+        "tokens_unmeasured_calls": missing,
+    }
