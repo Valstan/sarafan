@@ -283,9 +283,36 @@ def parse_and_publish_theme(
                 # (``addons``: своих сообществ нет ни у одного района, 1752
                 # публикации за 7 дней). Флаг — для замера и аварии, дефолт ON;
                 # цену повтора снимает кэш стен, а не отключение (P180).
+                #
+                # ИСКЛЮЧЕНИЕ для тем из THEMES_WITHOUT_ALL_COMMUNITIES_FALLBACK:
+                # для ``reklama`` фолбэк опасен тем, что рекламный фильтр в этой
+                # теме выключен, а ВК банит аккаунта админа за контент (P023,
+                # замер и решение — P188). Замер 01.10.2026 показал, что фолбэк по
+                # reklama не срабатывал ни разу за 30 суток, так что запрет стоит
+                # ноль потерь сегодня и закрывает класс на будущее.
                 from config.runtime import theme_fallback_all_communities_enabled
+                from modules.bulletin_pipeline_settings import (
+                    FALLBACK_ALL,
+                    FALLBACK_DISABLED,
+                    FALLBACK_FORBIDDEN,
+                    fallback_decision,
+                )
 
-                if theme_fallback_all_communities_enabled():
+                decision = fallback_decision(
+                    theme, global_enabled=theme_fallback_all_communities_enabled()
+                )
+                if decision == FALLBACK_FORBIDDEN:
+                    # Тема, для которой фолбэк запрещён осознанно (см.
+                    # THEMES_WITHOUT_ALL_COMMUNITIES_FALLBACK). Своё сообщение,
+                    # а не «волна пропущена» вместе с выключенным флагом: иначе
+                    # запрет и поломка настройки выглядели бы одинаково.
+                    logger.warning(
+                        "No communities found for %s/%s; тема исключена из fallback "
+                        "«все communities» — волна пропущена",
+                        region_code,
+                        theme,
+                    )
+                elif decision == FALLBACK_ALL:
                     logger.warning(
                         f"No communities found for {region_code}/{theme}; "
                         "falling back to all active communities in region"
@@ -297,6 +324,7 @@ def parse_and_publish_theme(
                     )
                     community_ids = [row[0] for row in fallback_result.fetchall()]
                 else:
+                    assert decision == FALLBACK_DISABLED, decision
                     logger.warning(
                         "No communities found for %s/%s; запасной путь выключен "
                         "(PARSE_THEME_FALLBACK_ALL_COMMUNITIES=0) — волна пропущена",
