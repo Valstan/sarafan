@@ -341,6 +341,30 @@ Brain-мандат [#027](../brain_matrica/cross-project-ideas/ideas/027-gate-re
 ### Безопасность
 - Секреты — **только** в env-файле приложения на прод-боксе (`600 root:root`), никогда в репозитории. Не коммитить, не писать в чат, не выводить в лог. Точный путь остаётся в отслеживаемых памятках сознательно — см. оговорку про коллизию в [«Что не публикуется»](#что-не-публикуется-секреты-и-инфра-детали).
 - VK-токены собираются по префиксу `VK_TOKEN_<NAME>` (см. `config/runtime.py`).
+- **Комната КАРМАНа `setka`** (D-102, строка от 30.09): bootstrap-токен — `/etc/setka/secrets-token.env`
+  под именем `SECRETS_TOKEN`, **отдельным файлом** `600` и намеренно не в `setka.env` (свойство 5 в
+  [`modules/secrets_bootstrap.py`](modules/secrets_bootstrap.py)); адрес vault в env **не задаётся** — клиент
+  берёт встроенный `VAULT_URL` из того же модуля, переменной `SECRETS_VAULT_URL` на боксе нет. Что и как —
+  `brain_matrica/docs/KARMAN_ROOM.md`; приёмка и выдача грантов — [`scripts/accept_secret_grants.py`](scripts/accept_secret_grants.py).
+  **Allowlist'ов два, и это ловушка (G353):** `ACCEPTED_NAMES` в `secrets_bootstrap` решает, что комната
+  отдаёт **в процесс**, `GRANT_ALLOWLIST` в [`modules/secrets_grants.py`](modules/secrets_grants.py) — чью
+  выдачу мы согласны принять **в комнату**. Ключ, принятый грантом и лежащий в комнате, может не доехать
+  до процесса — и это не ошибка настройки. Плюс правила приёма по форме имени: `<SITE>_INGEST_KEY` /
+  `<SITE>_PUBLISH_KEY` (суффикс), `VK_TOKEN_*` / `TELEGRAM_TOKEN_*` (префиксы).
+  **Снимок содержимого на 2026-09-30 — 46 имён:** `AD_AUTO_GREETING_COMMUNITIES`, `AD_AUTO_GREETING_TEXT`,
+  `BULLETIN_CURATION_REGION_CODES`, `BULLETIN_CURATION_SHADOW_ENABLED`, `CLASSIFIER_INGEST_KEY`,
+  `CLOUDFLARE_API_TOKEN`, `COLLECTION_AUDIT_SHADOW_ENABLED`, `DATABASE_URL`, `DB_MAX_OVERFLOW`,
+  `DB_POOL_SIZE`, `DEEPSEEK_API_KEY`, `ECOSYSTEM_KEY`, `ESA_CLIENT_SECRET_PORTAL`, `GATEWAY_KEY_DKMALMYZH`,
+  `GATEWAY_KEY_RMZ`, `KAZANSKAYA_INGEST_KEY`, `KRUGOZOR_BROADCAST_DISABLED`, `KULTURA_INGEST_KEY`,
+  `PRODUCTION_WORKFLOW_CONFIG`, `RADAR_BOT_ALLOWED_USERS`, `RADAR_BOT_NAME`, `RADAR_ID_VK_APP_ID`,
+  `RADAR_INVITE_CODE`, `RADAR_VAPID_PRIVATE_KEY`, `RADAR_VAPID_SUBJECT`, `RADAR_VK_COMMUNITY_ID`,
+  `REDIS_URL`, `SABANTUY_INGEST_KEY`, `SESSION_COOKIE_DOMAIN`, `SETKA_WEB_SECRET`, `SQLALCHEMY_ECHO`,
+  `SSH_KEY__sarafan__rmz4val`, `SSH_PUB__sarafan__rmz4val`, `TELEGRAM_ALERT_CHAT_ID`,
+  `TELEGRAM_TOKEN_AFONYA`, `TELEGRAM_TOKEN_VALSTANBOT`, `TG_PREVIEW_RELAY_URL`, `TG_RELAY_SECRET`,
+  `VK_NEVER_PUBLISH_TOKEN_NAMES`, `VK_PUBLISH_TOKEN_NAME`, `VK_RESERVE_PUBLISH_TOKEN_NAMES`,
+  `VK_TEST_GROUP_ID`, `VK_TOKEN_VALSTAN`, `VK_TOKEN_VITA`, `VMALMYZHE_INGEST_KEY`, `VMALMYZHE_PUBLISH_KEY`.
+  Список — снимок, а не источник истины: он меняется с каждым грантом. Сверить — `GET /api/secrets`
+  ключами ответа, **значения не выводить** (на боксе `python3` + заголовок `Authorization: Bearer $SECRETS_TOKEN`).
 - **Бэкап env — временный носитель, а не архив.** Снял копию перед правкой — затри `shred -u` сразу
   после того, как проверил результат; больше трёх копий не копить. Каждая копия хранит ПОЛНЫЙ набор
   секретов на момент снятия, в том числе те, что потом ротировали, а ротация обесценивает секрет
