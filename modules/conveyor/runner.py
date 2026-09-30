@@ -164,7 +164,16 @@ async def run_site(
     key = get_ingest_key(site)
     publish_key = get_publish_key(site)
     sections = site.get("sections") or ()
-    await source_mod.record_selection(session, site=site_key, lips=[p["lip"] for p in posts + dups])
+    # Журнал заводим **только на то, что реально пойдёт в обработку**. В ручном
+    # режиме это неочевидно и дорого: отбор исключает любой lip, у которого есть
+    # строка журнала (в любом статусе), — значит кандидат без вердикта, попавший
+    # в record_selection, тихо выпадает из будущих прогонов навсегда. Модельный
+    # путь этой ловушки не знает (там вердикт есть у каждого), а ручный знает
+    # всегда: часть кандидатов в любой порции остаётся без решения.
+    to_process = [p for p in posts if str(p.get("lip") or "") in verdicts] if manual_mode else posts
+    await source_mod.record_selection(
+        session, site=site_key, lips=[p["lip"] for p in to_process + dups]
+    )
     # Дубль закрываем строкой журнала сразу: без неё следующий прогон подберёт
     # его как новый пост и заплатит за ту же новость второй раз. Причина несёт
     # lip победителя — «почему этой новости нет на сайте» обязано иметь ответ.
