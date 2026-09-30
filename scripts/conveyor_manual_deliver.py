@@ -392,13 +392,23 @@ async def _amain(args, site: Dict[str, Any], mode: str, file_name: str) -> int:
         else:
             print(render_plan(report))
         rows = report.get("rows") or []
-        not_ready = [r for r in rows if r["verdict"] != "уедет"] + [
+        # Решён — значит и «уедет», и «отказ»: отказ человека это решение, а не
+        # недоделанность. Гейт на код возврата отвечает на один вопрос — все ли
+        # кандидаты получили решение. Иначе план, где половина отказов, вечно
+        # возвращал бы 1 и перестал быть сигналом.
+        undecided = {"нет вердикта", "задержан", "нечем проверять"}
+        not_ready = [r for r in rows if r["verdict"] in undecided] + [
             {"lip": lip} for lip in (report.get("unknown_lips") or [])
         ]
         if not rows and not verdicts:
             print("отбор пуст — вердикты не по чему писать", file=sys.stderr)
             return 1
-        return 1 if not_ready else 0
+        decided = len(rows) - len([r for r in rows if r["verdict"] in undecided])
+        if not_ready:
+            print(f"не решено: {len(not_ready)} из {len(rows)} кандидатов", file=sys.stderr)
+            return 1
+        print(f"решено: {decided} из {len(rows)} кандидатов, доставка готова")
+        return 0
 
     async def go_deliver(sess):
         stats = await runner_mod.run_site(
