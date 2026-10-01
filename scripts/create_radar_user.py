@@ -34,12 +34,13 @@ async def upsert_user(login: str, password: str, role: str, deactivate: bool) ->
     from database.models_extended import RadarUser
     from modules.radar.auth import hash_password
 
+    normalized_login = login.strip().lower()
     async with AsyncSessionLocal() as session:
         user = (
-            await session.execute(select(RadarUser).where(RadarUser.login == login))
+            await session.execute(select(RadarUser).where(RadarUser.login == normalized_login))
         ).scalar_one_or_none()
         if user is None:
-            user = RadarUser(login=login)
+            user = RadarUser(login=normalized_login)
             session.add(user)
             action = "created"
         else:
