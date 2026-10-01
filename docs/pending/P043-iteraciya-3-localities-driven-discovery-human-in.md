@@ -28,3 +28,19 @@
 
 _Смежный факт (живёт в секции D-024, не здесь): beat-слот `discovery-rolling-daily` закомментирован —
 `tasks/celery_app.py:2264` `# "discovery-rolling-daily": {`._
+
+---
+
+### ⏱ Ре-триаж 2026-10-01: clipboard AI-batch vs авто-путь DeepSeek
+
+**Итог:** PR 1/2/3 выкачены, миграция 012 применена, UI `/regions/<code>/prepare` и `/discovery/ai-batch` работают. Но после D-024 (DeepSeek вместо Groq, 2026-08-12) **автоматическая AI-категоризация в discovery работает без участия человека** (`modules/discovery/ai_categorizer.py` вызывается из `tasks/discovery_tasks.py:_ai_categorize_all`). Clipboard-ветка (`web/api/discovery.py`: `GET /ai-batch`, `POST /ai-batch/apply`, `/ai-batch/status`) теперь **дублирует авто-путь** — ручной fallback для случая, когда модели нет, а модель есть.
+
+**Решение владельца (единственный открытый вопрос):**  
+- **Вариант А** — оставить clipboard как *ручной запасной путь* (на случай если DeepSeek отвалится), но **писать это прямо** в UI и коде: бейдж «Ручной режим — DeepSeek недоступен», кнопка отключена пока авто-путь жив.  
+- **Вариант Б** — снести целиком (dead-code #036): UI-бейдж, API endpoints, JS. Чище, меньше кода.
+
+Рекомендую **Вариант А с явным флагом**: `DISCOVERY_AI_BATCH_MODE=auto|manual|off`. Сейчас — `auto` (авто-путь), clipboard скрыт. Если DeepSeek 402 (P177) — владелец ставит `manual`, clipboard появляется. Это снимает «дублирует» и даёт runway.
+
+**Смежный:** beat-слот `discovery-rolling-daily` (P001) ждёт только оплаты DeepSeek; clipboard не нужен для включения авто-подбора.
+
+**Действие:** добавить флаг `DISCOVERY_AI_BATCH_MODE` в `config/runtime.py`, в `web/api/discovery.py` — бейдж в ответе `/ai-batch/status`, в UI — условный рендер. Dead-code гейт (#036) следом проверит.
