@@ -4,6 +4,7 @@ Metrics Middleware for automatic API metrics collection
 
 import logging
 import time
+from typing import Any, Dict
 
 from fastapi import Request
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -15,6 +16,85 @@ from monitoring.metrics import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Значение лейбла ``endpoint`` становится именем prometheus-серии. Брать его из
+# ``request.url.path`` нельзя: сканеры из интернета дают бесконечное число новых
+# путей, и каждый превращается в 11 серий гистограммы, живущих retention дней.
+#
+# Чем это обернулось на боевом боксе (замер 2026-10-01): 4 708 уникальных значений
+# ``endpoint``, 52 811 серий в одном семействе histogram, 7 МБ текста на каждый
+# скрейп при интервале 30 с. TSDB разрослась до 1 ГБ, а prometheus дважды
+# побирался ядром OOM (RSS 418–440 МБ на боксе с 1.5 ГБ RAM и без swap) — и
+# съедал память именно тогда, когда её не хватало сервисам. Среди значений были
+# ``/%2e%2e/%2e%2e/etc/shadow`` и ``/%2e%2e/%2e%2e/home/admin/.ssh/id_rsa``.
+#
+# Поэтому ``endpoint`` — это шаблон маршрута, а не путь. Всё, что маршрутом не
+# опознано (то есть ровно трафик сканеров), сводится в два фиксированных
+# значения. Решения и альтернативы — docs/adr/0006-metrics-endpoint-cardinality.md.
+
+UNMATCHED = "__unmatched__"
+LONG_PATH = "__long_path__"
+
+# Потолок длины метки — страховка на будущее, а не починка сегодняшнего бага.
+# ``{path:path}`` уже схлопывается правильно (хвост уходит в path_params и
+# становится ``{path}``), но маршрут, покрытый параметрами лишь ЧАСТИЧНО,
+# воспроизвёл бы длинную метку. Пока такого маршрута нет — проверка остаётся,
+# потому что её исчезновение означало бы, что новые маршруты не проверяют.
+MAX_LABEL_LEN = 120
+
+
+def endpoint_label(scope: Dict[str, Any], path: str) -> str:
+    """Шаблон маршрута для лейбла метрики.
+
+    Starlette (проверено на 0.48) кладёт в scope только ``endpoint`` и
+    ``path_params``, но **не** ``route``, поэтому шаблон собирается обратно из
+    ``path_params`` подстановкой значений параметров в сегменты пути.
+
+    - нет ``path_params`` → маршрут не совпал (404/405, сканеры) → ``__unmatched__``;
+    - сегмент совпал с параметром → ``{имя}``;
+    - получилось длиннее ``MAX_LABEL_LEN`` → ``__long_path__``;
+    - хвостовой ``/`` отбрасывается: ``/api/x`` и ``/api/x/`` — один маршрут,
+      а для метрики это две серии.
+    """
+    params = {
+        str(name): str(value)
+        for name, value in (scope.get("path_params") or {}).items()
+        if value is not None and str(value) != ""
+    }
+    if not params:
+        return UNMATCHED
+
+    remaining = dict(params)
+    parts = path.split("/")
+    replacements: Dict[int, str] = {}
+
+    # Проход 1 — только точное совпадение сегмента. Именно отдельным проходом, а
+    # не внутри цикла по сегментам: иначе параметр «1» по подстроке съел бы «1»
+    # внутри статического «v1» раньше, чем до сегмента «1» дойдёт очередь.
+    for index, segment in enumerate(parts):
+        for name, value in remaining.items():
+            if value == segment:
+                replacements[index] = "{" + name + "}"
+                del remaining[name]
+                break
+
+    # Проход 2 — частичное совпадение (uuid с префиксом, слаг в составном
+    # сегменте). То, что не забрал проход 1, идёт в остаток.
+    for index, segment in enumerate(parts):
+        if index in replacements:
+            continue
+        for name, value in remaining.items():
+            if value in segment:
+                replacements[index] = "{" + name + "}"
+                del remaining[name]
+                break
+
+    label = "/".join(replacements.get(i, part) for i, part in enumerate(parts))
+    if len(label) > MAX_LABEL_LEN:
+        return LONG_PATH
+    if len(label) > 1 and label.endswith("/"):
+        label = label.rstrip("/") or "/"
+    return label or UNMATCHED
 
 
 class MetricsMiddleware(BaseHTTPMiddleware):
@@ -84,19 +164,9 @@ class MetricsMiddleware(BaseHTTPMiddleware):
             # Determine status category
             status = "success" if 200 <= status_code < 400 else "error"
 
-            # Get endpoint (clean path)
-            endpoint = request.url.path
-
-            # Remove IDs from path for cleaner metrics
-            # /api/posts/123 -> /api/posts/{id}
-            parts = endpoint.split("/")
-            clean_parts = []
-            for part in parts:
-                if part.isdigit():
-                    clean_parts.append("{id}")
-                else:
-                    clean_parts.append(part)
-            endpoint = "/".join(clean_parts)
+            # Метка endpoint = шаблон маршрута, НЕ сырой путь. Сырой путь
+            # неограничен: чужие сканеры создают новую серию на каждый запрос.
+            endpoint = endpoint_label(request.scope, request.url.path)
 
             # Record metrics
             api_requests_total.labels(method=request.method, endpoint=endpoint, status=status).inc()
