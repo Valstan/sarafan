@@ -52,18 +52,19 @@ class TestEndpointLabel:
         # Прежняя чистка умела только `.isdigit()`, поэтому UUID и слаги
         # утекали в лейбл как есть.
         slug = "9f2b1c7a-4d3e-4a1b-8c2d-7e6f5a4b3c2d"
-        assert endpoint_label(_scope(id=slug), f"/api/clients/{slug}") == (
-            "/api/clients/{id}"
-        )
+        assert endpoint_label(_scope(id=slug), f"/api/clients/{slug}") == ("/api/clients/{id}")
         assert endpoint_label(_scope(slug="abc-def"), "/api/theme-quotas/abc-def") == (
             "/api/theme-quotas/{slug}"
         )
 
     def test_several_params_in_one_path(self):
-        assert endpoint_label(
-            _scope(client_id="42", month="2026-09"),
-            "/api/ad-crm/clients/42/stats/2026-09",
-        ) == "/api/ad-crm/clients/{client_id}/stats/{month}"
+        assert (
+            endpoint_label(
+                _scope(client_id="42", month="2026-09"),
+                "/api/ad-crm/clients/42/stats/2026-09",
+            )
+            == "/api/ad-crm/clients/{client_id}/stats/{month}"
+        )
 
     def test_equal_param_values_do_not_eat_each_other(self):
         # Оба параметра равны "x": наивный replace() дал бы "{a}/{a}".
@@ -71,15 +72,11 @@ class TestEndpointLabel:
 
     def test_static_segment_is_not_corrupted_by_short_param(self):
         # Параметр "1" не должен съесть "1" внутри статического "v1".
-        assert endpoint_label(_scope(id="1"), "/api/v1/items/1") == (
-            "/api/v1/items/{id}"
-        )
+        assert endpoint_label(_scope(id="1"), "/api/v1/items/1") == ("/api/v1/items/{id}")
 
     def test_trailing_slash_does_not_split_the_route(self):
         # На проде было 52 и 78 попаданий на один и тот же маршрут — из-за "/".
-        assert endpoint_label(_scope(id="7"), "/api/theme-quotas/7/") == (
-            "/api/theme-quotas/{id}"
-        )
+        assert endpoint_label(_scope(id="7"), "/api/theme-quotas/7/") == ("/api/theme-quotas/{id}")
         assert endpoint_label(_scope(), "/api/theme-quotas/") == UNMATCHED
 
     def test_catch_all_route_collapses_to_placeholder(self):
