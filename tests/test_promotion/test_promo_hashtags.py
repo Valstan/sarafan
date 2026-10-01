@@ -87,3 +87,39 @@ class TestPlanForRegions:
         # Суна, Кумёны и Зуевка запущены 27.08 — именно ради них модуль и пишется.
         for code in ("suna", "kumyony", "zuevka"):
             assert code in DISTRICT_ADJECTIVES
+
+    def test_every_live_tatarstan_district_has_an_adjective(self):
+        """Каждый район Татарстана в сети обязан иметь прилагательное.
+
+        Список берётся из миграций-скелетов, а не из кода: предыдущая проверка
+        хардкодила тройку 27.08, и поэтому молча пропустила батч №6
+        (Камское Устье / Кайбицы / Чистополь, 29.09) — эти три района остались
+        без районного хэштега в продвижении. Гейт на тройку проверяет только ту
+        тройку; гейт на список проверяет любую следующую порцию.
+        """
+        for code in (
+            # батчи №1–№3 (сентябрь 2026)
+            "saby",
+            "arsk",
+            "tyulyachi",
+            "mamadysh",
+            "atnya",
+            "vysokaya_gora",
+            "pestretsy",
+            "rybnaya_sloboda",
+            "zelenodolsk",
+            "laishevo",
+            "elabuga",
+            "mendeleevsk",
+            "nizhnekamsk",
+            "verhniy_uslon",
+            # батч №6 (29.09) — именно эти три выпали из проверки
+            "kamsko_ustinsky",
+            "kaybitsky",
+            "chistopolsky",
+            # батч №7 (01.10)
+            "apastovsky",
+            "tetyushsky",
+            "spassky",
+        ):
+            assert code in DISTRICT_ADJECTIVES, f"{code}: нет прилагательного района"
