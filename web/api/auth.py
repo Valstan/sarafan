@@ -77,9 +77,10 @@ def _set_session_cookie(response: Response, user: RadarUser) -> None:
 @router.post("/login")
 async def login(body: LoginIn, response: Response):
     """Проверить креды и выдать сессионную cookie."""
+    normalized_login = body.login.strip().lower()
     async with AsyncSessionLocal() as session:
         user = (
-            await session.execute(select(RadarUser).where(RadarUser.login == body.login))
+            await session.execute(select(RadarUser).where(RadarUser.login == normalized_login))
         ).scalar_one_or_none()
         # verify и на несуществующем юзере (фиктивный хэш не храним — просто
         # ровняем стоимость ответа, не выдавая enumeration по таймингу scrypt).
@@ -132,13 +133,14 @@ async def register(body: RegisterIn, response: Response):
         raise HTTPException(status_code=409, detail="Логин занят")
 
     async with AsyncSessionLocal() as session:
+        normalized_login = body.login.strip().lower()
         exists = (
-            await session.execute(select(RadarUser.id).where(RadarUser.login == body.login))
+            await session.execute(select(RadarUser.id).where(RadarUser.login == normalized_login))
         ).scalar_one_or_none()
         if exists:
             raise HTTPException(status_code=409, detail="Логин занят")
         user = RadarUser(
-            login=body.login,
+            login=normalized_login,
             password_hash=hash_password(body.password),
             role="radar",
             is_active=True,
