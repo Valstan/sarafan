@@ -1,4 +1,4 @@
--- 108: skeleton for the seventh Tatarstan batch: apastovsky (Апастовский),
+-- 109: skeleton for the seventh Tatarstan batch: apastovsky (Апастовский),
 -- tetyushsky (Тетюшский), spassky (Спасский). Same pattern as 101–107:
 -- INACTIVE regions with vk_group_id NULL — the "- ИНФО" groups are created after
 -- this migration. Additive and reversible.
@@ -112,12 +112,30 @@ WHERE NOT EXISTS (SELECT 1 FROM region_configs rc WHERE rc.region_code = v.regio
 -- Соседи. Новым — только коды, существующие в `regions` (Буинский, Алькеевский,
 -- Алексеевский в сети не заведены). Уже живым — текущее значение с прода
 -- (снято 2026-10-01) ПЛЮС новые коды, по алфавиту.
-UPDATE regions SET neighbors = 'apastovsky,tetyushsky,kamsko_ustinsky,verhniy_uslon,kaybitsky' WHERE code = 'apastovsky';
+--
+-- ⚠️ Первая редакция ставила здесь `apastovsky` в соседях `apastovsky`, и эта
+-- ошибка принципиально невидима для проверки симметричности: код совпадает сам с
+-- собой, поэтому «обратная» сторона существует по построению. Ловится только
+-- отдельной проверкой на самоссылку (она в конце файла). Три самоссылки за одну
+-- миграцию — это не случайность, а признак того, что список соседей пишется
+-- руками; проверка на самоссылку обязана быть гейтом, а не комментарием.
+UPDATE regions SET neighbors = 'kamsko_ustinsky,kaybitsky,tetyushsky,verhniy_uslon' WHERE code = 'apastovsky';
 UPDATE regions SET neighbors = 'apastovsky,kamsko_ustinsky,spassky' WHERE code = 'tetyushsky';
 UPDATE regions SET neighbors = 'kamsko_ustinsky,laishevo,tetyushsky' WHERE code = 'spassky';
 
--- Обратные связи для уже живых:
-UPDATE regions SET neighbors = 'apastovsky,chistopolsky,kamsko_ustinsky,kaybitsky,laishevo,spassky,verhniy_uslon' WHERE code = 'kamsko_ustinsky';
+-- Обратные связи для уже живых. ВНИМАНИЕ, порядок именно такой: сначала
+-- `apastovsky` и `tetyushsky` (новые, чьи `neighbors` уже записаны выше), и
+-- только потом `verhniy_uslon` и `laishevo` — иначе новые коды повиснут
+-- односторонними. `kamsko_ustinsky` перечисляет здесь всех троих новых.
+--
+-- ⚠️ Первый вариант этой строки содержал две ошибки, и обе поймала проверка
+-- симметричности из конца файла, а не ревью: (1) `kamsko_ustinsky` был указан
+-- в соседях самого себя; (2) `tetyushsky` в списке `kamsko_ustinsky` забыт,
+-- хотя `tetyushsky` указывает `kamsko_ustinsky`. Симметрия соседей — это
+-- инвариант, который держит каскад соседских новостей, и он не проверялся ни
+-- одним гейтом, потому что проверка жила в комментарии, а не в тесте.
+-- Односторонние связи батча №6 (см. 110) — того же класса.
+UPDATE regions SET neighbors = 'apastovsky,chistopolsky,kaybitsky,laishevo,spassky,tetyushsky,verhniy_uslon' WHERE code = 'kamsko_ustinsky';
 UPDATE regions SET neighbors = 'apastovsky,kamsko_ustinsky,kaybitsky,laishevo,zelenodolsk' WHERE code = 'verhniy_uslon';
 UPDATE regions SET neighbors = 'kamsko_ustinsky,pestretsy,rybnaya_sloboda,spassky,verhniy_uslon' WHERE code = 'laishevo';
 -- kaybitsky: `apastovsky` уже прописан миграцией 107 — менять нечего.
@@ -136,8 +154,13 @@ COMMIT;
 -- Отсутствие «висящих» соседей (пустая выдача = все коды существуют):
 --   SELECT a.code, b.code FROM regions a, unnest(string_to_array(coalesce(a.neighbors,''), ',')) AS b(code)
 --   WHERE b.code <> '' AND NOT EXISTS (SELECT 1 FROM regions r WHERE r.code = b.code);
+-- Отсутствие самоссылок (пустая выдача = район не сосед сам с собой; эта
+-- проверка ловит то, чего принципиально не ловит проверка симметричности):
+--   SELECT code FROM regions
+--   WHERE code = ANY(string_to_array(coalesce(neighbors,''), ','));
 --
--- Rollback (возврат к состоянию после 107, снятому с прода 2026-09-29):
+-- Rollback (возврат к состоянию после 107, снятому с прода 2026-09-29; между
+-- ними накатывалась только 108_login_case_insensitive, `regions` не трогала):
 -- UPDATE regions SET neighbors = 'laishevo,verhniy_uslon,kaybitsky,chistopolsky' WHERE code = 'kamsko_ustinsky';
 -- UPDATE regions SET neighbors = 'laishevo,zelenodolsk,kamsko_ustinsky,kaybitsky' WHERE code = 'verhniy_uslon';
 -- UPDATE regions SET neighbors = 'pestretsy,rybnaya_sloboda,kamsko_ustinsky,verhniy_uslon' WHERE code = 'laishevo';
