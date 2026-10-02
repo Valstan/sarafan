@@ -613,9 +613,15 @@ async def region_new_page(request: Request):
 @app.get("/regions/{region_code}/discovery")
 async def region_discovery_page(request: Request, region_code: str):
     """Список кандидатов на сообщества для региона (big idea 2026-05-22)."""
+    from config.runtime import discovery_ai_batch_mode
+
     return templates.TemplateResponse(
         "region_discovery.html",
-        {"request": request, "region_code": region_code},
+        {
+            "request": request,
+            "region_code": region_code,
+            "ai_batch_mode": discovery_ai_batch_mode(),
+        },
     )
 
 
@@ -640,9 +646,15 @@ async def region_diagnostics_page(request: Request, region_code: str):
 @app.get("/regions/{region_code}/discovery/ai-batch")
 async def region_ai_batch_page(request: Request, region_code: str):
     """Human-in-the-loop AI categorisation через clipboard."""
+    from config.runtime import discovery_ai_batch_mode
+
     return templates.TemplateResponse(
         "region_ai_batch.html",
-        {"request": request, "region_code": region_code},
+        {
+            "request": request,
+            "region_code": region_code,
+            "ai_batch_mode": discovery_ai_batch_mode(),
+        },
     )
 
 
