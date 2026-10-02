@@ -29,6 +29,11 @@ async def get_parsing_stats(
     Get parsing statistics.
 
     Returns aggregated parsing stats for specified region/theme/time period.
+
+    ⚠️ Читать цифры только вместе с `success`/`error_message` (P175): строка
+    со всеми нулями и `success=false` означает «волна не мерила» (ранний выход
+    конвейера — нет детей, нечего собирать, нет токенов), а не «померила и там
+    пусто». Суммы счётчиков по таким строкам — не измерения.
     """
     # Build query
     query = select(ParsingStats)
@@ -254,6 +259,14 @@ async def get_publications(
 
 
 def calculate_aggregates(stats_records: List[ParsingStats]) -> dict:
+    """Calculate aggregate statistics.
+
+    ⚠️ Суммы счётчиков считают только строки-замеры (P175): у строк ранних
+    выходов (`success=false`, все нули) цифры — «не мерили», и в
+    `total_posts_scanned`/`total_groups_checked` они дают ноль честно, но
+    `success_rate` такие строки топят вниз осознанно — волна действительно не
+    отработала.
+    """
     """Calculate aggregate statistics."""
     if not stats_records:
         return {}

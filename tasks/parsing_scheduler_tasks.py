@@ -32,6 +32,37 @@ def _parse_vk_post_id(url: str | None) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def resolve_stats_outcome(result: Dict[str, Any]) -> tuple[bool, str | None, Dict[str, Any]]:
+    """Исход для строки `ParsingStats` по результату волны (P175).
+
+    Ноль, означающий «не мерили», обязан отличаться от нуля, означающего
+    «померили и там пусто». Ранние выходы конвейера (нет детей у каскада,
+    нечего собирать, пропуск волны отбором, «нет токенов») возвращают dict
+    **без ключа `stats`** — а `_save_stats` писал по нему строку со всеми
+    нулями и `success=True`, неотличимую от честно пустого замера.
+
+    Правила:
+    - `stats` пуст/отсутствует → замера не было: `success=False`,
+      `error_message` = `error`/`message` результата (там лежит настоящая
+      причина — «no active children», «no fresh posts…», «No active VK READ
+      tokens»), счётчики остаются нулями;
+    - `stats` непуст → как раньше, но при `success=False` пробрасываем
+      `result["error"]` в `error_message` (раньше он терялся — поле оставалось
+      NULL, хотя причина была известна).
+    """
+    stats = result.get("stats") or {}
+    if not stats:
+        reason = (
+            result.get("error")
+            or result.get("message")
+            or ("pipeline returned no stats (early exit, nothing measured)")
+        )
+        return False, str(reason), {}
+    if result.get("success", False):
+        return True, None, stats
+    return False, (str(result["error"]) if result.get("error") is not None else None), stats
+
+
 def _use_cascade_bulletin(region_kind: str | None, region_config: Any) -> bool:
     """Решает, собирать ли сводка каскадом (из главных групп детей/соседей)
     или обычным путём (из собственных ``communities`` региона).
@@ -938,38 +969,30 @@ def parse_and_publish_theme(
 
             async def _save_stats():
                 async with AsyncSessionLocal() as session:
+                    stats_outcome_success, stats_outcome_error, stats = resolve_stats_outcome(
+                        result
+                    )
                     record = ParsingStats(
                         region_code=region_code,
                         theme=theme,
                         run_date=start_time,
                         run_type="scheduled",
                         duration_seconds=(datetime.now() - start_time).total_seconds(),
-                        success=result.get("success", False),
-                        total_groups_checked=result.get("stats", {}).get("total_groups_checked", 0),
-                        total_posts_scanned=result.get("stats", {}).get("total_posts_scanned", 0),
-                        posts_filtered_old=result.get("stats", {}).get("posts_filtered_old", 0),
-                        posts_filtered_duplicate_lip=result.get("stats", {}).get(
-                            "posts_filtered_duplicate_lip", 0
-                        ),
-                        posts_filtered_duplicate_text=result.get("stats", {}).get(
-                            "posts_filtered_duplicate_text", 0
-                        ),
-                        posts_filtered_duplicate_foto=result.get("stats", {}).get(
-                            "posts_filtered_duplicate_foto", 0
-                        ),
-                        posts_filtered_black_id=result.get("stats", {}).get(
-                            "posts_filtered_black_id", 0
-                        ),
-                        posts_filtered_no_region_words=result.get("stats", {}).get(
+                        success=stats_outcome_success,
+                        error_message=stats_outcome_error,
+                        total_groups_checked=stats.get("total_groups_checked", 0),
+                        total_posts_scanned=stats.get("total_posts_scanned", 0),
+                        posts_filtered_old=stats.get("posts_filtered_old", 0),
+                        posts_filtered_duplicate_lip=stats.get("posts_filtered_duplicate_lip", 0),
+                        posts_filtered_duplicate_text=stats.get("posts_filtered_duplicate_text", 0),
+                        posts_filtered_duplicate_foto=stats.get("posts_filtered_duplicate_foto", 0),
+                        posts_filtered_black_id=stats.get("posts_filtered_black_id", 0),
+                        posts_filtered_no_region_words=stats.get(
                             "posts_filtered_no_region_words", 0
                         ),
-                        posts_filtered_advertisement=result.get("stats", {}).get(
-                            "posts_filtered_advertisement", 0
-                        ),
-                        posts_filtered_no_attachments=result.get("stats", {}).get(
-                            "posts_filtered_no_attachments", 0
-                        ),
-                        posts_final_count=result.get("stats", {}).get("posts_final_count", 0),
+                        posts_filtered_advertisement=stats.get("posts_filtered_advertisement", 0),
+                        posts_filtered_no_attachments=stats.get("posts_filtered_no_attachments", 0),
+                        posts_final_count=stats.get("posts_final_count", 0),
                         published_to_test_polygon=test_mode,
                         published_url=result.get("published_url"),
                         published_post_id=_parse_vk_post_id(result.get("published_url")),
