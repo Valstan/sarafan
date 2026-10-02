@@ -15,10 +15,12 @@
                title="Настроить нп / ключевики и перезапустить поиск сообществ">
                 <i class="bi bi-gear"></i> Настройки поиска
             </a>
+            {% if ai_batch_mode == "manual" %}
             <a class="btn btn-sm btn-outline-primary" href="/regions/{{ region_code }}/discovery/ai-batch"
-               title="Категоризировать кандидатов через нейросеть в браузере">
+               title="Ручной запасной путь: категоризировать кандидатов через нейросеть в браузере (авто-путь недоступен)">
                 <i class="bi bi-robot"></i> AI-категоризация
             </a>
+            {% endif %}
             <button id="rerun-btn" class="btn btn-sm btn-outline-primary">
                 <i class="bi bi-arrow-clockwise"></i> Перезапустить поиск
             </button>

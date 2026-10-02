@@ -929,3 +929,23 @@ def get_bulletin_jaccard_min_tokens() -> int:
         return max(1, int(_getenv("BULLETIN_JACCARD_MIN_TOKENS", "10") or "10"))
     except ValueError:
         return 10
+
+
+def discovery_ai_batch_mode() -> str:
+    """Ручной clipboard-путь AI-категоризации discovery: auto|manual|off (P043).
+
+    С D-024 основной путь — авто-категоризация DeepSeek, а clipboard-ветка
+    (``/regions/<code>/discovery/ai-batch``) её дублирует. Флаг честно
+    разводит их по ролям:
+
+    - ``auto`` (дефолт) — авто-путь главный, ссылка на clipboard в UI скрыта;
+    - ``manual`` — DeepSeek недоступен (напр. 402, P177): ссылка показана,
+      страница помечена как ручной запасной путь;
+    - ``off`` — endpoints ``/ai-batch*`` отвечают 404.
+
+    Неизвестное/пустое значение → ``auto`` (текущее поведение сохраняется).
+    """
+    raw = (_getenv("DISCOVERY_AI_BATCH_MODE", "auto") or "auto").strip().lower()
+    if raw not in ("auto", "manual", "off"):
+        return "auto"
+    return raw

@@ -19,12 +19,31 @@
         AI-batch категоризация — <code>{{ region_code }}</code>
     </h2>
 
+    {% if ai_batch_mode == "manual" %}
+    <div class="alert alert-warning small">
+        <strong>Ручной режим</strong> (<code>DISCOVERY_AI_BATCH_MODE=manual</code>):
+        авто-категоризация недоступна, разбираем кандидатов вручную через
+        нейросеть в браузере.
+    </div>
+    {% elif ai_batch_mode == "off" %}
+    <div class="alert alert-danger small">
+        <strong>Выключено</strong> (<code>DISCOVERY_AI_BATCH_MODE=off</code>):
+        endpoints этой страницы отвечают 404. Уберите флаг, чтобы пользоваться.
+    </div>
+    {% else %}
+    <div class="alert alert-secondary small">
+        <strong>Запасной путь.</strong> Основной — авто-категоризация DeepSeek
+        (с D-024); эта страница нужна, только когда авто-путь недоступен
+        (тогда владелец ставит <code>DISCOVERY_AI_BATCH_MODE=manual</code>).
+    </div>
+    {% endif %}
+
     <div class="alert alert-info small">
         <strong>Зачем это?</strong>
-        Groq API на проде не работает (нет бюджета), но AI-категоризация всё
-        равно нужна — иначе модератор каждому из сотен кандидатов вручную
-        тыкает категорию. Этот процесс делегирует работу нейросети, к которой
-        у тебя уже есть доступ: ChatGPT / Claude.ai в браузере.
+        Когда у авто-категоризации нет доступа к модели, модератору пришлось бы
+        каждому из сотен кандидатов вручную тыкать категорию. Этот процесс
+        делегирует работу нейросети, к которой у тебя уже есть доступ:
+        ChatGPT / Claude.ai в браузере.
         <hr class="my-2">
         <strong>Flow:</strong> программа собирает чанк из 30 кандидатов и
         готовый prompt → ты копируешь его в чат с нейросетью → нейросеть

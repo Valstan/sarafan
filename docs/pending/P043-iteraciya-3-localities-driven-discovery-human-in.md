@@ -44,3 +44,22 @@ _Смежный факт (живёт в секции D-024, не здесь): be
 **Смежный:** beat-слот `discovery-rolling-daily` (P001) ждёт только оплаты DeepSeek; clipboard не нужен для включения авто-подбора.
 
 **Действие:** добавить флаг `DISCOVERY_AI_BATCH_MODE` в `config/runtime.py`, в `web/api/discovery.py` — бейдж в ответе `/ai-batch/status`, в UI — условный рендер. Dead-code гейт (#036) следом проверит.
+
+---
+
+### ✅ Закрыто 2026-10-02 (вариант А)
+
+Флаг читается из env, дефолт `auto` = текущее поведение:
+
+- `config/runtime.py::discovery_ai_batch_mode()` — `auto|manual|off`, неизвестное/пустое → `auto`;
+- `web/api/discovery.py` — гвард `_ai_batch_mode_or_404()` первым делом во всех трёх
+  endpoints (`off` → 404), поле `mode` в `/ai-batch/status`;
+- `main.py` — `ai_batch_mode` в контексте обеих страниц; ссылка на ai-batch в
+  `region_discovery.html` рендерится только при `manual`;
+- `region_ai_batch.html` — устаревший Groq-текст переписан (авто-путь DeepSeek с D-024 —
+  основной), баннер по режиму; `region_ai_batch.js` — бейдж режима в heartbeat;
+- тесты: `tests/test_discovery/test_ai_batch_mode.py` (11 шт.: парсинг флага,
+  `off` → 404 ×3, `auto/manual` работают + `mode` в статусе).
+
+Владелец по-прежнему может выбрать вариант Б (снести целиком) — флаг ему не мешает.
+Связь с P177: при 402 достаточно `DISCOVERY_AI_BATCH_MODE=manual` в env + restart `setka`.

@@ -51,6 +51,8 @@
             statusDetail.textContent = data.remaining > 0
                 ? ` · осталось ${data.remaining}`
                 : ' · готово ✓';
+            const modeLabels = {auto: 'авто', manual: 'ручной', off: 'выкл'};
+            statusDetail.textContent += ` · режим: ${modeLabels[data.mode] || data.mode || '?'}`;
         } catch (e) {
             statusSummary.textContent = `Ошибка статуса: ${escapeHtml(e.message)}`;
         }

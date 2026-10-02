@@ -28,6 +28,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field, validator
 from sqlalchemy import select, update
 
+from config.runtime import discovery_ai_batch_mode
 from database.connection import AsyncSessionLocal
 from database.models import Community, CommunityCandidate, Region
 from modules.discovery.ai_categorizer import ALLOWED_CATEGORIES
@@ -204,12 +205,23 @@ async def get_region_discovery_config(code: str):
 # браузере, копирует JSON-ответ обратно, программа парсит и обновляет БД.
 #
 # С 2026-08-12 движок — DeepSeek с рабочим ключом (D-024), и обходной путь
-# больше не вынужденный. Оставлен: он не стоит ничего, работает при нулевом
-# бюджете API и остаётся быстрым способом разобрать большую пачку руками —
-# та же логика, по которой у ai_drafter сохранён clipboard fallback.
+# больше не вынужденный. Роль ветки честно разведена флагом
+# DISCOVERY_AI_BATCH_MODE (P043): auto — авто-путь главный, clipboard скрыт;
+# manual — ручной запасной путь (DeepSeek недоступен); off — endpoints 404.
 
 AI_BATCH_CHUNK_SIZE_DEFAULT = 30
 AI_BATCH_CHUNK_SIZE_MAX = 100  # длинные prompt'ы режутся LLM-ом, держим разумно
+
+
+def _ai_batch_mode_or_404() -> str:
+    """Режим clipboard-пути; ``off`` → 404 на всех трёх endpoints (P043)."""
+    mode = discovery_ai_batch_mode()
+    if mode == "off":
+        raise HTTPException(
+            status_code=404,
+            detail="ai-batch выключен флагом DISCOVERY_AI_BATCH_MODE=off",
+        )
+    return mode
 
 
 def _build_ai_batch_prompt(region_name: str, localities: List[str], chunk: List[dict]) -> str:
@@ -287,6 +299,7 @@ async def get_ai_batch(
     тех же кандидатов (если БД не менялась). Если chunk вышел за пределы —
     возвращается ``{items: [], prompt: "", chunk_index, chunks_total}``.
     """
+    _ai_batch_mode_or_404()
     async with AsyncSessionLocal() as session:
         region = (
             await session.execute(select(Region).where(Region.code == code))
@@ -351,6 +364,7 @@ async def apply_ai_batch(code: str, body: _AiBatchApply):
 
     Возвращает ``{updated, skipped, missing_ids, summary}``.
     """
+    _ai_batch_mode_or_404()
     if not body.items:
         return {"updated": 0, "skipped": 0, "missing_ids": [], "summary": {}}
 
@@ -424,6 +438,7 @@ async def ai_batch_status(code: str):
     Considers a candidate «done» if ai_category IS NOT NULL OR
     ai_is_relevant IS NOT NULL — оба поля заполняются apply'ем.
     """
+    mode = _ai_batch_mode_or_404()
     async with AsyncSessionLocal() as session:
         region = (
             await session.execute(select(Region).where(Region.code == code))
@@ -452,6 +467,7 @@ async def ai_batch_status(code: str):
         "total": total,
         "processed": processed,
         "remaining": total - processed,
+        "mode": mode,
     }
 
 
