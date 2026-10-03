@@ -306,9 +306,15 @@ class TestKultura:
         ):
             assert not source_mod.matches_keywords(text, words), text
 
-    def test_no_publish_key_at_all(self, monkeypatch):
-        """Ключа публикации нет вовсе — только черновики."""
-        monkeypatch.setenv("KULTURA_PUBLISH_KEY", "подброшено")
+    def test_publish_key_declared_but_inactive_without_grant(self, monkeypatch):
+        """Право публикации — отдельным ключом (переговорная 2026-10-03).
+
+        Поле объявлено, но без принятого гранта ключа нет — всё едет
+        черновиками как раньше. С ключом — публикует (тот же путь, что портал).
+        """
+        monkeypatch.delenv("KULTURA_PUBLISH_KEY", raising=False)
         site = cc.get_site("kultura")
-        assert "publish_key_env" not in site
+        assert site["publish_key_env"] == "KULTURA_PUBLISH_KEY"
         assert cc.wants_publish(site) is False
+        monkeypatch.setenv("KULTURA_PUBLISH_KEY", "k")
+        assert cc.wants_publish(site) is True

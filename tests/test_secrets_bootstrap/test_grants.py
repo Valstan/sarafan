@@ -182,6 +182,19 @@ def test_real_allowlist_has_sabantuy_from_its_own_room():
     доставка идёт черновиком.
     """
     assert sg.GRANT_ALLOWLIST["SABANTUY_INGEST_KEY"] == frozenset({"sabantuymalmyzh"})
+
+
+def test_real_allowlist_has_kultura_publish_key_from_its_own_room():
+    """Переговорная 2026-10-03: право публикации Культуры — отдельным ключом.
+
+    Принимаем только из комнаты ``dkmalmyzh``; от чужой комнаты то же имя —
+    отказ (decide покрыт отдельно). Та же пара, что ingest/publish у портала.
+    """
+    assert sg.GRANT_ALLOWLIST["KULTURA_PUBLISH_KEY"] == frozenset({"dkmalmyzh"})
+    assert sg.decide({"aliasKey": "KULTURA_PUBLISH_KEY", "sourceSlug": "dkmalmyzh"}) == "accept"
+    assert (
+        sg.decide({"aliasKey": "KULTURA_PUBLISH_KEY", "sourceSlug": "vmalmyzhe"}) == "skip_source"
+    )
     assert sg.decide({"aliasKey": "SABANTUY_INGEST_KEY", "sourceSlug": "sabantuymalmyzh"}) == (
         "accept"
     )
