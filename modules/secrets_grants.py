@@ -57,6 +57,12 @@ GRANT_ALLOWLIST: Dict[str, frozenset] = {
     # dkmalmyzh → setka под именем KULTURA_INGEST_KEY. Ключа публикации нет
     # вовсе — приёмник всегда игнорирует publish с warning, всё черновики.
     "KULTURA_INGEST_KEY": frozenset({"dkmalmyzh"}),
+    # Право публикации Культуры (переговорная 2026-10-03, владелец ДК
+    # разрешил): отдельный ключ KULTURA_PUBLISH_KEY, выдача dkmalmyzh →
+    # setka. Отдельным именем, а не флагом в канале доставки — урок #124:
+    # флаг publish в канале молча раздал бы право всем держателям ключа
+    # доставки. Та же пара, что VMALMYZHE_INGEST_KEY/VMALMYZHE_PUBLISH_KEY.
+    "KULTURA_PUBLISH_KEY": frozenset({"dkmalmyzh"}),
 }
 
 _TIMEOUT_SEC = 10
