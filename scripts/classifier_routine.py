@@ -12,10 +12,17 @@ HTTP-вызовы с ним читаются как небезопасный п�
 ``postulates.md``, вынести вердикты, сохранить ``verdicts.json``.
 
 Подкоманды:
-  fetch  [--limit N] [--out DIR] [--no-media]
+  fetch  [--limit N] [--out DIR] [--no-media] [--region CODE ...]
                                    GET /postulates + /pending →
                                    DIR/postulates.md + DIR/pending.json,
                                    сводка JSON в stdout (DIR дефолт classifier_run).
+                                   Без --region батч берёт allowlist сервера
+                                   (CLASSIFIER_REGION_CODES; пусто = все регионы).
+                                   С --region (можно несколько раз) — только эти
+                                   регионы, по одному запросу на регион, посты
+                                   склеиваются в один pending.json (у каждого
+                                   поста своё region_code). Пилот без DeepSeek:
+                                   --region mi --region ur --region klz.
                                    Постам БЕЗ текста скачивает фото/PDF через
                                    media-прокси в DIR/media/ (пути — в поле
                                    media_files поста), чтобы модель посмотрела
@@ -228,11 +235,31 @@ def _fetch_media_for_textless(posts: list, out: Path) -> int:
     return downloaded
 
 
+def _fetch_merged_pending(codes: list[str], limit: int) -> dict:
+    """Забрать /pending по каждому региону и склеить посты в один батч.
+
+    У каждого поста ответа уже есть своё ``region_code``, поэтому склейка
+    безопасна: чанкирование по регионам делает классифицирующая сторона.
+    Отдельная функция ради юнит-теста без сети (см.
+    tests/test_scripts/test_classifier_routine.py).
+    """
+    posts: list[dict] = []
+    for code in codes:
+        q = urllib.parse.quote(code, safe="")
+        batch = json.loads(_request("GET", f"/api/classifier/pending?region={q}&limit={limit}"))
+        posts.extend(batch.get("posts") or [])
+    return {"region_filter": list(codes), "count": len(posts), "posts": posts}
+
+
 def cmd_fetch(args: argparse.Namespace) -> None:
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     postulates = _request("GET", "/api/classifier/postulates")
-    pending = json.loads(_request("GET", f"/api/classifier/pending?limit={args.limit}"))
+    regions = [str(r).strip() for r in (args.region or []) if str(r).strip()]
+    if regions:
+        pending = _fetch_merged_pending(regions, args.limit)
+    else:
+        pending = json.loads(_request("GET", f"/api/classifier/pending?limit={args.limit}"))
     media_files = 0
     if not args.no_media:
         media_files = _fetch_media_for_textless(pending.get("posts") or [], out)
@@ -299,6 +326,12 @@ def main(argv: list[str] | None = None) -> None:
         "--no-media",
         action="store_true",
         help="не качать вложения постов без текста (медиа-анализ выключен)",
+    )
+    p_fetch.add_argument(
+        "--region",
+        action="append",
+        default=[],
+        help="код региона (можно несколько раз); без флага — allowlist сервера",
     )
     p_fetch.set_defaults(func=cmd_fetch)
 
