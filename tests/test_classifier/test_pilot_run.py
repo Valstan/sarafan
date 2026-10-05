@@ -56,7 +56,10 @@ def test_format_elapsed_russian(seconds, expected):
 
 
 def test_format_actions_only_nonzero():
-    assert pilot_run.format_actions({"publish": 40, "delete": 38, "hold": 0}) == "publish 40 / delete 38"
+    assert (
+        pilot_run.format_actions({"publish": 40, "delete": 38, "hold": 0})
+        == "publish 40 / delete 38"
+    )
     assert pilot_run.format_actions({}) == "нет"
 
 
@@ -80,7 +83,11 @@ def test_build_message_has_all_four_lines():
 
 def test_first_run_says_so_honestly():
     msg = pilot_run.build_message(
-        recorded=1, regions=["mi"], actions={"publish": 1}, elapsed_seconds=None, stamp="05.10 18:42"
+        recorded=1,
+        regions=["mi"],
+        actions={"publish": 1},
+        elapsed_seconds=None,
+        stamp="05.10 18:42",
     )
     assert "прошлого прогона не было" in msg
 
@@ -96,9 +103,7 @@ def test_regions_dedup_preserves_first_seen_order():
 @pytest.mark.asyncio
 async def test_note_run_sends_and_writes_timestamp(monkeypatch):
     sent = []
-    monkeypatch.setattr(
-        pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True)
-    )
+    monkeypatch.setattr(pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True))
     redis = FakeRedis()
     out = await pilot_run.note_run(
         recorded=79,
@@ -122,9 +127,7 @@ async def test_repeat_submit_is_not_a_second_note(monkeypatch):
     дважды.
     """
     sent = []
-    monkeypatch.setattr(
-        pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True)
-    )
+    monkeypatch.setattr(pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True))
     redis = FakeRedis()
     out = await pilot_run.note_run(
         recorded=0, verdicts=[_v("mi")], redis_client=redis, now_ts=1000.0
@@ -137,9 +140,7 @@ async def test_repeat_submit_is_not_a_second_note(monkeypatch):
 @pytest.mark.asyncio
 async def test_elapsed_computed_from_previous_run(monkeypatch):
     sent = []
-    monkeypatch.setattr(
-        pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True)
-    )
+    monkeypatch.setattr(pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True))
     redis = FakeRedis({pilot_run.LAST_RUN_KEY: "700.0"})
     await pilot_run.note_run(recorded=1, verdicts=[_v("mi")], redis_client=redis, now_ts=1000.0)
     assert "С прошлого: 5м" in sent[0]
@@ -149,11 +150,11 @@ async def test_elapsed_computed_from_previous_run(monkeypatch):
 async def test_corrupt_previous_value_degrades_to_first_run(monkeypatch):
     """Мусор в ключе не должен ронять отметку — читаем как «прогона не было»."""
     sent = []
-    monkeypatch.setattr(
-        pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True)
-    )
+    monkeypatch.setattr(pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True))
     redis = FakeRedis({pilot_run.LAST_RUN_KEY: "не-число"})
-    out = await pilot_run.note_run(recorded=1, verdicts=[_v("mi")], redis_client=redis, now_ts=1000.0)
+    out = await pilot_run.note_run(
+        recorded=1, verdicts=[_v("mi")], redis_client=redis, now_ts=1000.0
+    )
     assert out == "note-sent"
     assert "прошлого прогона не было" in sent[0]
 
@@ -162,9 +163,7 @@ async def test_corrupt_previous_value_degrades_to_first_run(monkeypatch):
 async def test_disabled_flag_is_silent(monkeypatch):
     monkeypatch.setenv("CLASSIFIER_PILOT_NOTIFY", "0")
     sent = []
-    monkeypatch.setattr(
-        pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True)
-    )
+    monkeypatch.setattr(pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True))
     redis = FakeRedis()
     out = await pilot_run.note_run(recorded=79, verdicts=[_v("mi")], redis_client=redis)
     assert out == "skipped:disabled"
@@ -185,9 +184,7 @@ async def test_telegram_failure_does_not_raise_and_still_records(monkeypatch):
 @pytest.mark.asyncio
 async def test_redis_failure_does_not_break_note(monkeypatch):
     sent = []
-    monkeypatch.setattr(
-        pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True)
-    )
+    monkeypatch.setattr(pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True))
 
     class BrokenRedis:
         def get(self, key):
@@ -206,9 +203,7 @@ async def test_redis_failure_does_not_break_note(monkeypatch):
 @pytest.mark.asyncio
 async def test_works_without_redis_at_all(monkeypatch):
     sent = []
-    monkeypatch.setattr(
-        pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True)
-    )
+    monkeypatch.setattr(pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True))
     out = await pilot_run.note_run(recorded=1, verdicts=[_v("mi")], redis_client=None)
     assert out == "note-sent"
     assert "прошлого прогона не было" in sent[0]
