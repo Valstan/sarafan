@@ -9,6 +9,7 @@
 from scripts.classifier_routine import (
     DEFAULT_API_BASE,
     RULE_TEXT_MAX,
+    _fetch_merged_pending,
     api_base,
     validate_proposals,
     validate_verdicts,
@@ -113,3 +114,58 @@ def test_api_base_env_override_strips_trailing_slash(monkeypatch):
     assert api_base() == DEFAULT_API_BASE
     monkeypatch.setenv("CLASSIFIER_API_BASE", "https://example.test/")
     assert api_base() == "https://example.test"
+
+
+def _pending_batch(region, lips):
+    return {
+        "region_filter": [region],
+        "count": len(lips),
+        "posts": [
+            {"lip": lip, "region_code": region, "text": "новость", "has_media": False}
+            for lip in lips
+        ],
+    }
+
+
+def test_fetch_merged_pending_combines_regions(monkeypatch):
+    import json
+
+    import scripts.classifier_routine as routine
+
+    calls = []
+
+    def fake_request(method, path, body=None):
+        calls.append((method, path))
+        region = path.split("region=")[1].split("&")[0]
+        return json.dumps(_pending_batch(region, [f"{region}_1", f"{region}_2"]))
+
+    monkeypatch.setattr(routine, "_request", fake_request)
+    merged = _fetch_merged_pending(["mi", "ur", "klz"], 30)
+    assert merged["region_filter"] == ["mi", "ur", "klz"]
+    assert merged["count"] == 6
+    assert [p["lip"] for p in merged["posts"]] == [
+        "mi_1",
+        "mi_2",
+        "ur_1",
+        "ur_2",
+        "klz_1",
+        "klz_2",
+    ]
+    assert len(calls) == 3
+    assert all(c[0] == "GET" and "limit=30" in c[1] for c in calls)
+
+
+def test_fetch_merged_pending_skips_empty_batches(monkeypatch):
+    import json
+
+    import scripts.classifier_routine as routine
+
+    def fake_request(method, path, body=None):
+        if "region=ur" in path:
+            return json.dumps(_pending_batch("ur", []))
+        return json.dumps(_pending_batch("mi", ["mi_1"]))
+
+    monkeypatch.setattr(routine, "_request", fake_request)
+    merged = _fetch_merged_pending(["mi", "ur"], 10)
+    assert merged["count"] == 1
+    assert merged["posts"][0]["region_code"] == "mi"
