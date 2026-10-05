@@ -63,6 +63,11 @@ GRANT_ALLOWLIST: Dict[str, frozenset] = {
     # флаг publish в канале молча раздал бы право всем держателям ключа
     # доставки. Та же пара, что VMALMYZHE_INGEST_KEY/VMALMYZHE_PUBLISH_KEY.
     "KULTURA_PUBLISH_KEY": frozenset({"dkmalmyzh"}),
+    # Relay-секрет Телефона (переговорная v1.1/v1.2, письмо brain 2026-10-04):
+    # выдача karman-hotline → setka под именем HOTLINE_RELAY_SECRET. Как принят —
+    # dual-write файл+relay включается сам. Принимаем только из комнаты
+    # karman-hotline; то же имя от чужой комнаты — отказ (decide покрыт тестом).
+    "HOTLINE_RELAY_SECRET": frozenset({"karman-hotline"}),
 }
 
 _TIMEOUT_SEC = 10

@@ -208,3 +208,14 @@ def test_real_allowlist_has_kultura_from_its_own_room():
     assert sg.GRANT_ALLOWLIST["KULTURA_INGEST_KEY"] == frozenset({"dkmalmyzh"})
     assert sg.decide({"aliasKey": "KULTURA_INGEST_KEY", "sourceSlug": "dkmalmyzh"}) == ("accept")
     assert sg.decide({"aliasKey": "KULTURA_INGEST_KEY", "sourceSlug": "evil"}) == "skip_source"
+
+
+def test_real_allowlist_has_hotline_relay_from_karman_hotline():
+    """Переговорная v1.1/v1.2 (письмо brain 2026-10-04): relay-секрет Телефона
+    принимаем только из комнаты ``karman-hotline`` под именем
+    ``HOTLINE_RELAY_SECRET``. То же имя от чужой комнаты — отказ."""
+    assert sg.GRANT_ALLOWLIST["HOTLINE_RELAY_SECRET"] == frozenset({"karman-hotline"})
+    assert (
+        sg.decide({"aliasKey": "HOTLINE_RELAY_SECRET", "sourceSlug": "karman-hotline"}) == "accept"
+    )
+    assert sg.decide({"aliasKey": "HOTLINE_RELAY_SECRET", "sourceSlug": "evil"}) == "skip_source"
