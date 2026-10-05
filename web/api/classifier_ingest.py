@@ -22,7 +22,7 @@ from typing import Optional
 from urllib.parse import urlparse
 
 import httpx
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query
 from fastapi.responses import PlainTextResponse, Response
 
 from config.classifier import (
@@ -33,7 +33,7 @@ from config.classifier import (
     get_source_days,
 )
 from database.connection import AsyncSessionLocal
-from modules.classifier import rules, service
+from modules.classifier import pilot_run, rules, service
 from modules.classifier.schema import RuleProposalBatch, parse_verdict_loose
 
 logger = logging.getLogger(__name__)
@@ -88,13 +88,22 @@ async def postulates():
 
 
 @router.post("/verdicts")
-async def verdicts(batch: dict, _auth: None = Depends(require_ingest_key)):
+async def verdicts(
+    batch: dict,
+    background_tasks: BackgroundTasks,
+    _auth: None = Depends(require_ingest_key),
+):
     """Принять пакет вердиктов от рутины → записать в content_classifications.
 
     Разбор толерантный, per-item (``parse_verdict_loose``): один кривой вердикт
     (перелимит эха текста, мусорный confidence) больше НЕ роняет весь батч
     422-й — прогон рутины стоит токенов, чинимое чиним, нечинимое считаем в
     ``skipped_invalid``.
+
+    **Отметка о прогоне** (``modules.classifier.pilot_run``) вешается фоновой
+    задачей после записи: время разбора уходит владельцу в Telegram, чтобы
+    «пора ли новый» отвечала отметка, а не память человека (pool #152).
+    Ответ не ждёт Telegram — сетевой сбой не должен задерживать приём вердиктов.
     """
     _check_enabled()
     raw_list = batch.get("verdicts") if isinstance(batch, dict) else None
@@ -116,7 +125,30 @@ async def verdicts(batch: dict, _auth: None = Depends(require_ingest_key)):
             source="routine",
             region_codes_fallback=get_region_allowlist() or None,
         )
+    if pilot_run.notify_enabled():
+        background_tasks.add_task(
+            _note_pilot_run,
+            recorded=int(counts.get("recorded") or 0),
+            verdicts=[dict(v) for v in good],
+        )
     return {"ok": True, "skipped_invalid": skipped_invalid, **counts}
+
+
+async def _note_pilot_run(*, recorded: int, verdicts: list) -> None:
+    """Фоновая отметка о прогоне.
+
+    Redis нужен только для «сколько прошло с прошлого»; его недоступность
+    не должна ни ломать прогон, ни мешать самой отметке — поэтому он
+    подставляется опционально. Ошибки внутри ``note_run`` глушатся там.
+    """
+    from utils.cache import get_cache
+
+    redis_client = None
+    try:
+        redis_client = await get_cache().get_client()
+    except Exception:  # noqa: BLE001 — отметка не обязана ломать прогон
+        logger.warning("pilot run: redis unavailable for note", exc_info=True)
+    await pilot_run.note_run(recorded=recorded, verdicts=verdicts, redis_client=redis_client)
 
 
 # --- Media-прокси: рутина смотрит фото/PDF постов без текста ---------------------
