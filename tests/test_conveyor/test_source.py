@@ -117,6 +117,94 @@ async def test_site_without_region_yields_nothing(db_session):
     assert await source.fetch_pending_for_site(db_session, broken) == []
 
 
+# ───────── повтор несбывшейся классификации (завал 402, 2026-10-06) ─────────
+#
+# Строка failed БЕЗ вердикта — «классификация не состоялась», а не решение:
+# она возвращается в отбор после паузы, пока не исчерпан лимит попыток.
+# С вердиктом, rejected, held — решения, их ведёт человек и retry_failed.
+
+
+async def _seed_delivery(
+    session, *, lip, status, reason="http_402", verdict=None, attempts=0, days_ago=0
+):
+    from datetime import datetime, timedelta
+
+    row = ConveyorDelivery(
+        site="vmalmyzhe",
+        lip=lip,
+        status=status,
+        reason=reason,
+        verdict=verdict,
+        attempts=attempts,
+        updated_at=datetime.utcnow() - timedelta(days=days_ago),
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+@pytest.mark.asyncio
+async def test_failed_without_verdict_returns_after_backoff(db_session):
+    """Упавшая две недели назад классификация (402) подбирается снова."""
+    await seed_pair(db_session, lip="1_10")
+    await _seed_delivery(db_session, lip="1_10", status="failed", attempts=2, days_ago=14)
+    out = await source.fetch_pending_for_site(db_session, SITE)
+    assert [p["lip"] for p in out] == ["1_10"]
+
+
+@pytest.mark.asyncio
+async def test_failed_without_verdict_rests_during_backoff(db_session):
+    """Пауза между попытками растёт: только что упавшее не долбится каждый прогон."""
+    await seed_pair(db_session, lip="1_10")
+    await _seed_delivery(db_session, lip="1_10", status="failed", attempts=2, days_ago=0)
+    assert await source.fetch_pending_for_site(db_session, SITE) == []
+
+
+@pytest.mark.asyncio
+async def test_failed_without_verdict_buried_after_max_attempts(db_session):
+    """Лимит попыток — предохранитель от вечного перебора ядовитой строки."""
+    await seed_pair(db_session, lip="1_10")
+    await _seed_delivery(
+        db_session,
+        lip="1_10",
+        status="failed",
+        attempts=source.CLASSIFY_RETRY_MAX,
+        days_ago=30,
+    )
+    assert await source.fetch_pending_for_site(db_session, SITE) == []
+
+
+@pytest.mark.asyncio
+async def test_failed_with_verdict_stays_buried(db_session):
+    """Классификация состоялась, упала доставка — это вотчина retry_failed."""
+    await seed_pair(db_session, lip="1_10")
+    await _seed_delivery(
+        db_session,
+        lip="1_10",
+        status="failed",
+        verdict={"action": "accept"},
+        days_ago=14,
+    )
+    assert await source.fetch_pending_for_site(db_session, SITE) == []
+
+
+@pytest.mark.asyncio
+async def test_orphan_selected_returns_after_a_day(db_session):
+    """Selected без движения сутки — сирота убитого воркера, а не «в работе»."""
+    await seed_pair(db_session, lip="1_10")
+    await _seed_delivery(db_session, lip="1_10", status="selected", days_ago=2)
+    out = await source.fetch_pending_for_site(db_session, SITE)
+    assert [p["lip"] for p in out] == ["1_10"]
+
+
+@pytest.mark.asyncio
+async def test_fresh_selected_is_not_stolen(db_session):
+    """Свежий selected — идущий прямо сейчас прогон, его не перехватываем."""
+    await seed_pair(db_session, lip="1_10")
+    await _seed_delivery(db_session, lip="1_10", status="selected", days_ago=0)
+    assert await source.fetch_pending_for_site(db_session, SITE) == []
+
+
 # ───────── record_selection ─────────
 
 

@@ -123,6 +123,17 @@ async def test_llm_network_failure_is_failed_not_rejected(db_session, wired, mon
 
 
 @pytest.mark.asyncio
+async def test_classify_failure_bumps_attempts_for_backoff(db_session, wired, monkeypatch):
+    """Несбывшаяся классификация считает попытки: без счётчика пауза не на чем держать."""
+    monkeypatch.setenv("VMALMYZHE_INGEST_KEY", "k")
+    wired["classify_result"] = {"ok": False, "reason": "http_402"}
+    await seed_pair(db_session, lip="1_10", text=LONG_TEXT)
+    await runner.run_site(db_session, SITE)
+    row = await _journal(db_session, "1_10")
+    assert row.status == "failed" and row.attempts == 1 and row.verdict is None
+
+
+@pytest.mark.asyncio
 async def test_invariant_holds_garbage_before_delivery(db_session, wired, monkeypatch):
     """Мусор задерживается ДО отправки и остаётся видимым человеку."""
     monkeypatch.setenv("VMALMYZHE_INGEST_KEY", "k")
