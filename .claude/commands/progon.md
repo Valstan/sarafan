@@ -44,6 +44,30 @@ argument-hint: ([регионы...] — по умолчанию mi ur klz podosi
 двух тысяч постов за раз невозможен: количество, превышающее ~120,
 режется лимитом, а не качеством.
 
+## Режим марафона (проба: покрыть все районы пачками)
+
+Замер 06.10: почти везде 40–50+ неразобранных, суммарно тысячи. Одна сессия
+всё не переварит — поэтому пачки по ~17 районов, **каждая в свежей сессии**
+(контекст не таскает прошлые разборы). Вызов: `/progon batch1` … `/progon
+batch4`. Лимит в марафоне — 10 на район. Вопросов — те же max 7 на сессию.
+
+- **batch1** (Кировская, север/запад): afanasyevo belholunitsa bogorodskoe
+  darovskoy falenki kiknur luza murashi nagorsk nema omutninsk oparino
+  podosinovets sanchursk shabalino svecha zuevka
+- **batch2** (Кировская, центр/восток): arbazh chepetsk klz kotelnich kumyony
+  leb mi nolinsk orichi orlov pizhanka slobodskoy sovetsk suna tuzha uni ur
+- **batch3** (Татарстан, север + остаток Кировской): aksubaevsky alekseevsky
+  apastovsky arsk atnya bal kukmor laishevo mamadysh novosheshminsky
+  pestretsy rybnaya_sloboda saby tyulyachi vysokaya_gora verhnekame
+  verhoshizhem vp yaransk yurya
+- **batch4** (Татарстан, юг): alkeevsky cheremshansky chistopolsky elabuga
+  kamsko_ustinsky kaybitsky mendeleevsk nizhnekamsk nurlatsky spassky
+  tetyushsky verhniy_uslon zelenodolsk
+
+Условия остановки пробы (любое): оператор устал отвечать; правки в
+`/classifier` пошли пачками против вердиктов сессий; за 2 дня очередь не
+убывает. Итог пробы — повторный замер очередей и сравнение с базой 06.10.
+
 `count=0` по всем — доложить «очередь пуста» и завершить (Telegram
 промолчит сам: `recorded=0` не отмечается).
 
