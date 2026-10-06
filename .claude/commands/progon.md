@@ -1,6 +1,6 @@
 ---
-description: Ручной разбор очереди классификатора вместо DeepSeek (пилот mi/ur/klz) — fetch, разбор по постулатам, вопросы оператору, submit, журнал решений для /distill.
-argument-hint: (без аргументов)
+description: Ручной разбор очереди классификатора вместо DeepSeek — fetch, разбор по постулатам, вопросы оператору, submit, журнал решений для /distill.
+argument-hint: ([регионы...] — по умолчанию mi ur klz podosinovets bogorodskoe nagorsk nema falenki)
 ---
 
 # /progon — разбор очереди классификатора вместо DeepSeek
@@ -13,8 +13,9 @@ argument-hint: (без аргументов)
 дописывать не надо.
 
 **Вызов:** пользователь пишет `/progon` (или «прогон», «делай ПРОГОН»).
-Агент без slash-команд открывает этот файл и выполняет шаги. Памятка
-vendor-neutral ([ADR-0011](../../../brain_matrica/adr/0011-vendor-neutral-agent-contract.md)):
+Можно перечислить районы явно (`/progon mi ur klz`) — иначе берётся
+дефолтный набор из Шага 1. Агент без slash-команд открывает этот файл и
+выполняет шаги. Памятка vendor-neutral ([ADR-0011](../../../brain_matrica/adr/0011-vendor-neutral-agent-contract.md)):
 `AskUserQuestion` ниже — «задай вопрос обычным сообщением и дождись явного
 ответа». Где у харнесса есть инструмент вопросов с кнопками — использовать
 его: оператор решает один кликом.
@@ -29,13 +30,21 @@ vendor-neutral ([ADR-0011](../../../brain_matrica/adr/0011-vendor-neutral-agent-
 
 ## Шаг 1. Забор
 
-Из корня репо:
+Набор по умолчанию (расширен 06.10 с трёх до восьми: замер очередей показал,
+что mi/ur/klz — самые чистые именно потому, что их разбирают, а везде
+остальном 40–50+; берём следующую пятёрку Кировской области с умеренными
+очередями, больше за раз вручную не тянем):
 
 ```powershell
-.\venv\Scripts\python.exe scripts/classifier_routine.py fetch --region mi --region ur --region klz --limit 30 --out C:\Users\valstan\AppData\Local\Temp\opencode\pilot_run<N> --no-media
+.\venv\Scripts\python.exe scripts/classifier_routine.py fetch --region mi --region ur --region klz --region podosinovets --region bogorodskoe --region nagorsk --region nema --region falenki --limit 15 --out C:\Users\valstan\AppData\Local\Temp\opencode\pilot_run<N> --no-media
 ```
 
-`count=0` по всем трём — доложить «очередь пуста» и завершить (Telegram
+**Правило объёма:** больше 3 регионов — лимит 15 на район (потолок ~120
+постов за прогон). Три региона и меньше — лимит 30. Внимательный разбор
+двух тысяч постов за раз невозможен: количество, превышающее ~120,
+режется лимитом, а не качеством.
+
+`count=0` по всем — доложить «очередь пуста» и завершить (Telegram
 промолчит сам: `recorded=0` не отмечается).
 
 ## Шаг 2. Разбор
