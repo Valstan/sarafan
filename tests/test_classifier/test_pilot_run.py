@@ -209,6 +209,67 @@ async def test_works_without_redis_at_all(monkeypatch):
     assert "прошлого прогона не было" in sent[0]
 
 
+# --- асинхронный клиент Redis: регрессия живого бага 06.10 ------------------------
+
+
+class AsyncFakeRedis:
+    """Клиент веб-приложения: ``get``/``set`` — корутины.
+
+    Именно он стоит в проде (``utils.cache.get_cache().get_client()``), и
+    именно на нём первый вызов отметки сломал «сколько прошло с прошлого»:
+    синхронный вызов возвращал непрочитанную корутину (она же truthy),
+    ``float()`` на ней падал, маркер не писался — а сообщение в Telegram
+    уходило как будто всё в порядке.
+    """
+
+    def __init__(self, initial=None):
+        self.store = {} if initial is None else dict(initial)
+        self.writes = []
+
+    async def get(self, key):
+        return self.store.get(key)
+
+    async def set(self, key, value):
+        self.writes.append((key, value))
+        self.store[key] = value
+
+
+@pytest.mark.asyncio
+async def test_async_redis_client_marker_is_actually_written(monkeypatch):
+    sent = []
+    monkeypatch.setattr(pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True))
+    redis = AsyncFakeRedis()
+    out = await pilot_run.note_run(
+        recorded=3, verdicts=[_v("mi")], redis_client=redis, now_ts=2000.0
+    )
+    assert out == "note-sent"
+    assert redis.writes == [(pilot_run.LAST_RUN_KEY, "2000.0")]
+
+
+@pytest.mark.asyncio
+async def test_async_redis_client_computes_elapsed(monkeypatch):
+    """Главный симптом бага: прошлое есть, а сообщение врало «не было»."""
+    sent = []
+    monkeypatch.setattr(pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True))
+    redis = AsyncFakeRedis({pilot_run.LAST_RUN_KEY: b"1000.0"})
+    await pilot_run.note_run(recorded=3, verdicts=[_v("mi")], redis_client=redis, now_ts=4600.0)
+    assert "С прошлого: 1ч" in sent[0]
+
+
+@pytest.mark.asyncio
+async def test_sync_client_still_supported(monkeypatch):
+    """Синхронный клиент из Celery (selection.py) — тоже рабочий, не ломаем."""
+    sent = []
+    monkeypatch.setattr(pilot_run, "send_to_owner", lambda text: _capture(sent, text, result=True))
+    redis = FakeRedis({pilot_run.LAST_RUN_KEY: "700.0"})
+    out = await pilot_run.note_run(
+        recorded=1, verdicts=[_v("mi")], redis_client=redis, now_ts=1000.0
+    )
+    assert out == "note-sent"
+    assert "С прошлого: 5м" in sent[0]
+    assert redis.writes == [(pilot_run.LAST_RUN_KEY, "1000.0")]
+
+
 def test_notify_flag_accepts_common_spellings(monkeypatch):
     for raw in ("1", "true", "YES", "on"):
         monkeypatch.setenv("CLASSIFIER_PILOT_NOTIFY", raw)

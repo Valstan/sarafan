@@ -29,6 +29,7 @@ Env:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import os
 import time
@@ -43,6 +44,26 @@ RUN_LABEL = "ПРОГОН"
 LAST_RUN_KEY = "setka:pilot_classifier:last_run"
 
 _TRUE_VALUES = ("1", "true", "yes", "on")
+
+
+async def _maybe_await(value):
+    """Дождаться результата, если он корутина, иначе вернуть как есть.
+
+    **Зачем.** В проекте ДВА клиента Redis: синхронный в Celery
+    (``modules/classifier/selection.py``) и асинхронный в веб-приложении
+    (``utils/cache.py``). Первый вызов отметки на живом прогоне 06.10 сделал
+    ``redis_client.get(...)`` синхронно на асинхронном клиенте: вернулся
+    непрочитанный корутин-объект (он же ``truthy``), ``float()`` на нём упал,
+    и «сколько прошло с прошлого» навсегда читалось как «прошлого прогона не
+    было» — при живом, доставленном сообщении в Telegram. Маркер не писался
+    вовсе. Признак в логе: ``RuntimeWarning: coroutine 'Redis.execute_command'
+    was never awaited``.
+
+    Отсюда правило: клиент сюда не зашивается, тип проверяется на лету.
+    """
+    if inspect.isawaitable(value):
+        return await value
+    return value
 
 
 def notify_enabled() -> bool:
@@ -187,7 +208,7 @@ async def note_run(
     previous = None
     if redis_client is not None:
         try:
-            previous = redis_client.get(LAST_RUN_KEY)
+            previous = await _maybe_await(redis_client.get(LAST_RUN_KEY))
         except Exception:  # noqa: BLE001 — метка не обязана ломать прогон
             logger.warning("pilot run: reading last run failed", exc_info=True)
     if previous:
@@ -209,7 +230,7 @@ async def note_run(
 
     if redis_client is not None:
         try:
-            redis_client.set(LAST_RUN_KEY, str(ts))
+            await _maybe_await(redis_client.set(LAST_RUN_KEY, str(ts)))
         except Exception:  # noqa: BLE001
             logger.warning("pilot run: writing last run failed", exc_info=True)
     return "note-sent" if sent else "note-failed"
