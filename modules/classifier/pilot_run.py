@@ -11,6 +11,20 @@
 оживут). Ответ уходит сразу, отметка — фоновой задачей после ответа:
 сетевой сбой Telegram не должен задерживать приём вердиктов.
 
+**Формат.** Только время ТЕКУЩЕГО прогона, явно по Москве — Telegram и есть
+журнал, владелец смотрит последнее сообщение и сам решает, пора ли новый:
+
+    ПРОГОН 06.10 08:19 МСК · 72 вердикта
+    Районы: mi, ur, klz
+    Решения: publish 24 / delete 48 / hold 0
+
+Строки «сколько прошло с прошлого» здесь НЕТ намеренно: интервал владелец
+считает в голове, а лишний расчёт — лишний повод соврать. Первая версия
+отметки его считала через Redis-ключ и на живом прогоне 06.10 соврала
+(синхронный вызов на асинхронном клиенте, ``RuntimeWarning: coroutine
+'Redis.execute_command' was never awaited``): ради одной строки тащить
+хранилище оказалось дороже самой строки. Redis из отметки убран полностью.
+
 **Почему только при ``recorded > 0``.** Ответ на повторный submit того же
 батча даёт ``recorded=0, skipped_existing=N`` — это не новый прогон. На
 живом прогоне 05.10 первый POST ушёл в таймаут чтения, а повтор показал
@@ -29,41 +43,22 @@ Env:
 from __future__ import annotations
 
 import asyncio
-import inspect
+import datetime
 import logging
 import os
 import time
-from typing import Any, Iterable, List, Optional, Sequence, Set
+import zoneinfo
+from typing import Any, Iterable, List, Sequence
 
 logger = logging.getLogger(__name__)
 
 # Имя прогона в сообщении. Одно слово — чтобы читалось с телефона одной строкой.
 RUN_LABEL = "ПРОГОН"
-# Отметка последнего прогона в Redis. Без TTL: хронология не должна
-# протухать, потеря ключа означает лишь «прошлого прогона не было».
-LAST_RUN_KEY = "setka:pilot_classifier:last_run"
+# Часовой пояс отметки. Явно, а не «локальное время сервера»: сервер сегодня
+# в Москве, а отметка должна пережить любой переезд бокса.
+MOSCOW_TZ = zoneinfo.ZoneInfo("Europe/Moscow")
 
 _TRUE_VALUES = ("1", "true", "yes", "on")
-
-
-async def _maybe_await(value):
-    """Дождаться результата, если он корутина, иначе вернуть как есть.
-
-    **Зачем.** В проекте ДВА клиента Redis: синхронный в Celery
-    (``modules/classifier/selection.py``) и асинхронный в веб-приложении
-    (``utils/cache.py``). Первый вызов отметки на живом прогоне 06.10 сделал
-    ``redis_client.get(...)`` синхронно на асинхронном клиенте: вернулся
-    непрочитанный корутин-объект (он же ``truthy``), ``float()`` на нём упал,
-    и «сколько прошло с прошлого» навсегда читалось как «прошлого прогона не
-    было» — при живом, доставленном сообщении в Telegram. Маркер не писался
-    вовсе. Признак в логе: ``RuntimeWarning: coroutine 'Redis.execute_command'
-    was never awaited``.
-
-    Отсюда правило: клиент сюда не зашивается, тип проверяется на лету.
-    """
-    if inspect.isawaitable(value):
-        return await value
-    return value
 
 
 def notify_enabled() -> bool:
@@ -73,7 +68,7 @@ def notify_enabled() -> bool:
 
 def regions_from(verdicts: Iterable[Any]) -> List[str]:
     """Регионы батча в порядке первого появления — для строки в сообщении."""
-    seen: Set[str] = set()
+    seen = set()
     out: List[str] = []
     for v in verdicts or []:
         code = str((v or {}).get("region_code") or "").strip() if isinstance(v, dict) else ""
@@ -84,10 +79,7 @@ def regions_from(verdicts: Iterable[Any]) -> List[str]:
 
 
 def actions_histogram(verdicts: Iterable[Any]) -> dict:
-    """Счётчик действий батча: ``{"publish": n, "delete": n, "hold": n}``.
-
-    Нулевые действия не печатаем — построим строку через :func:`format_actions`.
-    """
+    """Счётчик действий батча: ``{"publish": n, "delete": n, "hold": n}``."""
     hist: dict = {}
     for v in verdicts or []:
         if not isinstance(v, dict):
@@ -98,25 +90,10 @@ def actions_histogram(verdicts: Iterable[Any]) -> dict:
     return hist
 
 
-def format_elapsed(seconds: Optional[float]) -> str:
-    """Сколько прошло с прошлого прогона по-русски: ``2ч15м``, ``45м``, ``1д3ч``.
-
-    ``None``/отрицательное значение → «прошлого прогона не было»: так читается
-    честнее, чем ври��ка про ноль минут.
-    """
-    if seconds is None or seconds < 0:
-        return "прошлого прогона не было"
-    total = int(seconds)
-    minutes, sec = divmod(total, 60)
-    hours, minutes = divmod(minutes, 60)
-    days, hours = divmod(hours, 24)
-    if days:
-        return f"{days}д{hours}ч" if hours else f"{days}д"
-    if hours:
-        return f"{hours}ч{minutes}м" if minutes else f"{hours}ч"
-    if minutes:
-        return f"{minutes}м"
-    return f"{sec}с"
+def moscow_stamp(ts: float) -> str:
+    """Время прогона по Москве: ``06.10 08:19 МСК``. Суффикс — часть формата:
+    без него через полгода никто не вспомнит, в чьём поясе отметка."""
+    return datetime.datetime.fromtimestamp(ts, MOSCOW_TZ).strftime("%d.%m %H:%M МСК")
 
 
 def format_actions(hist: dict) -> str:
@@ -130,15 +107,13 @@ def build_message(
     recorded: int,
     regions: Sequence[str],
     actions: dict,
-    elapsed_seconds: Optional[float],
     stamp: str,
 ) -> str:
-    """Строка отметки. ``stamp`` — уже отформатированное локальное время."""
+    """Строка отметки. ``stamp`` — уже отформатированное московское время."""
     lines = [
         f"{RUN_LABEL} {stamp} · {recorded} вердиктов",
         f"Районы: {', '.join(regions) if regions else '—'}",
         f"Решения: {format_actions(actions)}",
-        f"С прошлого: {format_elapsed(elapsed_seconds)}",
     ]
     return "\n".join(lines)
 
@@ -182,67 +157,37 @@ async def note_run(
     *,
     recorded: int,
     verdicts: Iterable[Any],
-    redis_client: Any = None,
     now_ts: float = 0.0,
-    stamp: Optional[str] = None,
 ) -> str:
-    """Отметить прогон: прочитать прошлый, посчитать прошлое, отправить, записать.
+    """Отметить прогон: собрать сообщение с московским временем и отправить.
 
     ``recorded`` — только что записанные вердикты. Ноль означает повторный
-    submit того же батча (см. докстринг модуля) — тогда не отмечаемся вовсе,
-    но ключ всё равно дочитываем, чтобы не плодить запись.
+    submit того же батча (см. докстринг модуля) — тогда не отмечаемся вовсе.
 
-    ``stamp``/``now_ts`` — внедряются в тестах, чтобы не зависеть от часов.
+    ``now_ts`` — внедряется в тестах, чтобы не зависеть от часов.
     """
     if not notify_enabled():
         return "skipped:disabled"
     if recorded <= 0:
         return "skipped:no-new-verdicts"
 
-    regions = regions_from(verdicts)
-    actions = actions_histogram(verdicts)
-    ts = now_ts or time.time()
-    stamp = stamp or time.strftime("%d.%m %H:%M", time.localtime(ts))
-
-    elapsed: Optional[float] = None
-    previous = None
-    if redis_client is not None:
-        try:
-            previous = await _maybe_await(redis_client.get(LAST_RUN_KEY))
-        except Exception:  # noqa: BLE001 — метка не обязана ломать прогон
-            logger.warning("pilot run: reading last run failed", exc_info=True)
-    if previous:
-        try:
-            prev_ts = float(previous)
-        except (TypeError, ValueError):
-            prev_ts = None
-        if prev_ts is not None:
-            elapsed = max(0.0, ts - prev_ts)
-
     message = build_message(
         recorded=recorded,
-        regions=regions,
-        actions=actions,
-        elapsed_seconds=elapsed,
-        stamp=stamp,
+        regions=regions_from(verdicts),
+        actions=actions_histogram(verdicts),
+        stamp=moscow_stamp(now_ts or time.time()),
     )
     sent = await send_to_owner(message)
-
-    if redis_client is not None:
-        try:
-            await _maybe_await(redis_client.set(LAST_RUN_KEY, str(ts)))
-        except Exception:  # noqa: BLE001
-            logger.warning("pilot run: writing last run failed", exc_info=True)
     return "note-sent" if sent else "note-failed"
 
 
 __all__ = [
-    "LAST_RUN_KEY",
+    "MOSCOW_TZ",
     "RUN_LABEL",
     "actions_histogram",
     "build_message",
     "format_actions",
-    "format_elapsed",
+    "moscow_stamp",
     "note_run",
     "notify_enabled",
     "regions_from",
