@@ -135,20 +135,8 @@ async def verdicts(
 
 
 async def _note_pilot_run(*, recorded: int, verdicts: list) -> None:
-    """Фоновая отметка о прогоне.
-
-    Redis нужен только для «сколько прошло с прошлого»; его недоступность
-    не должна ни ломать прогон, ни мешать самой отметке — поэтому он
-    подставляется опционально. Ошибки внутри ``note_run`` глушатся там.
-    """
-    from utils.cache import get_cache
-
-    redis_client = None
-    try:
-        redis_client = await get_cache().get_client()
-    except Exception:  # noqa: BLE001 — отметка не обязана ломать прогон
-        logger.warning("pilot run: redis unavailable for note", exc_info=True)
-    await pilot_run.note_run(recorded=recorded, verdicts=verdicts, redis_client=redis_client)
+    """Фоновая отметка о прогоне. Ошибки внутри ``note_run`` глушатся там."""
+    await pilot_run.note_run(recorded=recorded, verdicts=verdicts)
 
 
 # --- Media-прокси: рутина смотрит фото/PDF постов без текста ---------------------
