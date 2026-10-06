@@ -10,6 +10,7 @@ shared mmap-файлах и агрегируются через ``MultiProcessCo
 
 import logging
 import os
+import re
 import time
 
 from prometheus_client import (
@@ -353,6 +354,122 @@ async def get_metrics():
         return generate_latest(registry), CONTENT_TYPE_LATEST
 
     return generate_latest(), CONTENT_TYPE_LATEST
+
+
+# =============================================================================
+# MULTIPROC-ЧИСТКА ПРИ СТАРТЕ
+# =============================================================================
+
+# Суффикс PID — единственный
+# способ отличить живые файлы от трупов, и он врёт в обе стороны, поэтому
+# проверяем два условия, а не одно (замер на проде 2026-10-06).
+_MULTIPROC_PID_SUFFIX = re.compile(r"_(\d+)\.db$")
+# Подстроки командной строки, по которым процесс опознаётся как наш. Проверено
+# на проде: `.../SETKA/venv/bin/python ... uvicorn/celery`, `.../SETKA/...bot`.
+_OWN_PROCESS_MARKERS = ("SETKA", "setka", "uvicorn", "celery")
+
+
+def _default_pid_alive(pid: int) -> bool:
+    """Жив ли процесс (``kill -0``; чужой UID без прав — считаем живым)."""
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _default_pid_cmdline(pid: int) -> str:
+    """Командная строка процесса одной строкой; нет доступа — пусто."""
+    try:
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            return f.read().replace(b"\0", b" ").decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def prune_stale_multiproc_files(
+    directory: str | None = None,
+    *,
+    _pid_alive=None,
+    _pid_cmdline=None,
+    _own_pid: int | None = None,
+) -> dict:
+    """Удалить mmap-файлы чужих и мёртвых процессов из multiproc-каталога.
+
+    **Зачем.** ``MultiProcessCollector`` агрегирует ВСЕ ``*.db`` каталога,
+    включая файлы процессов, умерших месяцы назад. 2026-10-06: 4 928 файлов с
+    мая (в т.ч. до-фиксовые серии ADR-0006 с сырыми путями сканеров) держали
+    экспозицию на 7 МБ и ~70 тыс. серий — prometheus ел 440 МБ и умирал от OOM
+    вместе с uvicorn. Ручная чистка «жив ли PID» недостаточна: файл мёртвого
+    процесса с суффиксом _353 переживает, если PID 353 meanwhile заняла
+    grafana (доказано на проде: файлы июня, живые по kill -0, cmdline чужой).
+
+    Поэтому правило двойное: файл живёт, только если PID жив **и** cmdline
+    процесса — наш (``_OWN_PROCESS_MARKERS``). Свой собственный PID не трогаем
+    никогда. Непарсящийся суффикс — не трогаем (консерватизм: чужой мусор
+    лучше, чем снос живого).
+
+    Вызывается на старте web (lifespan в ``main.py``): рестарт при каждом
+    деплое не даёт сиротам копиться. Ошибки не роняют старт — возвращается
+    счётчик, в лог пишется итог.
+    """
+    if directory is None:
+        directory = os.environ.get("PROMETHEUS_MULTIPROC_DIR", "")
+    summary: dict = {"dir": directory or None, "kept": 0, "removed": 0, "skipped": 0}
+    if not directory:
+        return summary
+    pid_alive = _pid_alive or _default_pid_alive
+    pid_cmdline = _pid_cmdline or _default_pid_cmdline
+    own_pid = _own_pid if _own_pid is not None else os.getpid()
+    try:
+        names = os.listdir(directory)
+    except OSError as e:
+        logger.warning("multiproc prune: cannot list %s: %s", directory, e)
+        return summary
+    for name in names:
+        if not name.endswith(".db"):
+            continue
+        match = _MULTIPROC_PID_SUFFIX.search(name)
+        if not match:
+            summary["skipped"] += 1
+            continue
+        pid = int(match.group(1))
+        if pid == own_pid:
+            summary["kept"] += 1
+            continue
+        try:
+            alive = pid_alive(pid)
+        except Exception:  # noqa: BLE001 — сомневаешься, не трогай
+            summary["skipped"] += 1
+            continue
+        if not alive:
+            _remove_quietly(directory, name, summary)
+            continue
+        try:
+            cmdline = pid_cmdline(pid)
+        except Exception:  # noqa: BLE001 — сомневаешься, не трогай
+            summary["skipped"] += 1
+            continue
+        if any(marker in cmdline for marker in _OWN_PROCESS_MARKERS):
+            summary["kept"] += 1
+        else:
+            _remove_quietly(directory, name, summary)
+    return summary
+
+
+def _remove_quietly(directory: str, name: str, summary: dict) -> None:
+    import os as _os
+
+    try:
+        _os.remove(_os.path.join(directory, name))
+        summary["removed"] += 1
+    except OSError as e:
+        logger.warning("multiproc prune: cannot remove %s: %s", name, e)
+        summary["skipped"] += 1
 
 
 if __name__ == "__main__":
