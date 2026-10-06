@@ -377,7 +377,7 @@ async def _process_one(
         # чтобы следующий прогон её не подобрал молча как новую.
         bucket = "rejected" if reason.startswith(_DECISION_PREFIXES) else "failed"
         await source_mod.update_delivery(
-            session, site=site_key, lip=lip, status=bucket, reason=reason
+            session, site=site_key, lip=lip, status=bucket, reason=reason, attempts_inc=True
         )
         return {
             "lip": lip,

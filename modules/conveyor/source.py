@@ -145,6 +145,68 @@ def _only_owners(lip_theme: Dict[str, str], owner_ids: Sequence[int]) -> Dict[st
     return {lip: theme for lip, theme in lip_theme.items() if lip.partition("_")[0] in wanted}
 
 
+# --- Повтор классификации после временного сбоя (завал 402, октябрь 2026) ----
+#
+# Строка ``failed`` БЕЗ вердикта означает «классификация не состоялась» (402,
+# сеть, падение), а не решение. Хоронить её навсегда — терять волну целиком:
+# двухнедельный простой движка превратил редкий край в основной поток (110
+# постов портала за 7 суток). Такие строки возвращаются в отбор, пока не
+# исчерпан лимит попыток и выдержана пауза между ними.
+#
+# Рядом лежит вторая половина той же дыры: ``selected`` без движения дольше
+# суток — сирота убитого посреди прогона воркера (OOM P164), а не «в работе».
+# Её тоже подбираем, иначе волна, не перехваченная парсингом, пропадает молча.
+#
+# Решения не трогаем: ``rejected``/``held`` и ``failed`` С вердиктом принадлежат
+# человеку и повтору доставки (``retry_failed``) — их пересмотр молча следующим
+# прогоном снова стоил бы вызова за вызовом.
+CLASSIFY_RETRY_MAX = 5
+# Пауза перед N-й попыткой (N = число уже сделанных): 1ч, 6ч, сутки, трое, неделя.
+CLASSIFY_RETRY_BACKOFF = (
+    timedelta(hours=1),
+    timedelta(hours=6),
+    timedelta(days=1),
+    timedelta(days=3),
+    timedelta(days=7),
+)
+# Возраст сироты ``selected``, после которого строка считается брошенной.
+SELECTED_ORPHAN_AFTER = timedelta(days=1)
+
+
+async def _requeueable_lips(session, *, site: str) -> set:
+    """lip'ы, которым положен повторный заход в отбор: несбывшаяся классификация
+    (``failed`` без вердикта) в пределах лимита попыток и после паузы, плюс
+    брошенные ``selected``-сироты. Пустое множество — нечего подбирать."""
+    site_key = (site or "").strip().lower()
+    if not site_key:
+        return set()
+    now = datetime.utcnow()
+    rows = (
+        await session.execute(
+            select(
+                ConveyorDelivery.lip,
+                ConveyorDelivery.status,
+                ConveyorDelivery.attempts,
+                ConveyorDelivery.updated_at,
+                ConveyorDelivery.verdict,
+            ).where(ConveyorDelivery.site == site_key)
+        )
+    ).all()
+    out = set()
+    for lip, status, attempts, updated, verdict in rows:
+        n = attempts or 0
+        if n >= CLASSIFY_RETRY_MAX:
+            continue
+        if status == "failed" and verdict is None:
+            wait = CLASSIFY_RETRY_BACKOFF[min(n, len(CLASSIFY_RETRY_BACKOFF) - 1)]
+            if updated is not None and updated <= now - wait:
+                out.add(lip)
+        elif status == "selected":
+            if updated is not None and updated <= now - SELECTED_ORPHAN_AFTER:
+                out.add(lip)
+    return out
+
+
 async def _delivered_lips(session, *, site: str) -> set:
     """lip'ы, у которых для этого сайта уже есть строка журнала — в любом статусе.
 
@@ -203,6 +265,9 @@ async def fetch_pending_for_site(
         return []
 
     done = await _delivered_lips(session, site=site_key)
+    # Несбывшаяся классификация и брошенный отбор — не «обработано»: такие строки
+    # возвращаются в игру (лимит попыток + пауза — внутри _requeueable_lips).
+    done -= await _requeueable_lips(session, site=site_key)
     wanted = [lip for lip in lip_theme if lip not in done]
     if not wanted:
         return []
@@ -425,6 +490,7 @@ async def update_delivery(
     reason: Optional[str] = None,
     verdict: Optional[Dict[str, Any]] = None,
     attempts: Optional[int] = None,
+    attempts_inc: bool = False,
     http_status: Optional[int] = None,
     remote_id: Optional[str] = None,
     clear_reason: bool = False,
@@ -454,7 +520,9 @@ async def update_delivery(
         row.reason = reason[:64]
     if verdict is not None:
         row.verdict = verdict
-    if attempts is not None:
+    if attempts_inc:
+        row.attempts = (row.attempts or 0) + 1
+    elif attempts is not None:
         row.attempts = attempts
     if http_status is not None:
         row.http_status = http_status
