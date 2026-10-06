@@ -103,6 +103,13 @@ async def lifespan(app: FastAPI):
     """Lifespan events"""
     # Startup
     logger.info("Starting SETKA application...")
+    try:
+        from monitoring.metrics import prune_stale_multiproc_files
+
+        pruned = prune_stale_multiproc_files()
+        logger.info("Multiproc metrics dir pruned on startup: %s", pruned)
+    except Exception:  # noqa: BLE001 — чистка метрик не роняет старт
+        logger.warning("Multiproc prune on startup failed", exc_info=True)
     await init_db()
     logger.info("Database initialized")
 

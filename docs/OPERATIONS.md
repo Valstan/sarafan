@@ -96,6 +96,18 @@ cd ~/САРАФАН
 - Метрики: `GET /metrics`
 - Prometheus config: `config/prometheus.yml`
 - Grafana подключается к Prometheus
+- **Прод-правки мониторинга (юниты НЕ в репо — живут только в
+  `/etc/systemd` и `/etc/default/prometheus`, поэтому записано здесь):**
+  - retention `5d → 2d` + `retention.size=512MB` в `/etc/default/prometheus`
+    (решение 2026-10-06: TSDB доросла до 1.4 ГБ на диске в 10 ГБ, RSS 440 МБ
+    → OOM-киллы; данные старше 2 дней из Grafana ушли сознательно);
+  - multiproc-каталог `$PROMETHEUS_MULTIPROC_DIR` (`/var/lib/setka/prom_multiproc`)
+    чистится кодом при старте web (`prune_stale_multiproc_files` в
+    `monitoring/metrics.py`): сироты мёртвых процессов иначе агрегируются в
+    экспозицию навсегда (2026-10-06: 4 928 файлов с мая держали 7 МБ и
+    ~70 тыс. серий). Правило двойное — жив PID **и** cmdline наш: файл с
+    суффиксом мёртвого PID переживает проверку `kill -0`, если номер тем
+    временем заняла grafana (доказано файлами июня).
 
 ## 7) Troubleshooting (коротко)
 
