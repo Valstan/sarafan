@@ -52,6 +52,26 @@ def extract_source_lips_from_target_group_posts(posts: Iterable[dict]) -> Set[st
     return out
 
 
+def partition_included_lips(results: Iterable[Any]) -> Tuple[List[str], List[str]]:
+    """
+    Split wave publish results into published vs failed lips.
+
+    Items are ``(kind, bulletin, publish_result)`` where ``publish_result``
+    is the ``publish_bulletin`` dict (``success`` bool). Only success lips
+    may enter the dedup cursor: a failed bulletin was never posted, and
+    recording its lips would mute the posts for later waves.
+    """
+    published: List[str] = []
+    failed: List[str] = []
+    for _, bulletin, pub in results or []:
+        lips = list(getattr(bulletin, "posts_included", None) or [])
+        if isinstance(pub, dict) and pub.get("success", False):
+            published.extend(lips)
+        else:
+            failed.extend(lips)
+    return published, failed
+
+
 def append_unique_limited(existing: List[str], additions: Iterable[str], limit: int) -> List[str]:
     """
     Append values preserving insertion order and keep only the tail `limit`.
