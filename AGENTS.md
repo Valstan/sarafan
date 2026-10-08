@@ -344,8 +344,10 @@ Brain-мандат [#027](../brain_matrica/cross-project-ideas/ideas/027-gate-re
 - VK-токены собираются по префиксу `VK_TOKEN_<NAME>` (см. `config/runtime.py`).
 - **Комната КАРМАНа `setka`** (D-102, строка от 30.09): bootstrap-токен — `/etc/setka/secrets-token.env`
   под именем `SECRETS_TOKEN`, **отдельным файлом** `600` и намеренно не в `setka.env` (свойство 5 в
-  [`modules/secrets_bootstrap.py`](modules/secrets_bootstrap.py)); адрес vault в env **не задаётся** — клиент
-  берёт встроенный `VAULT_URL` из того же модуля, переменной `SECRETS_VAULT_URL` на боксе нет. Что и как —
+  [`modules/secrets_bootstrap.py`](modules/secrets_bootstrap.py)); адрес vault — `SECRETS_VAULT_URL`
+  в env-файле приложения (в коде его нет намеренно: технический домен —
+  инфра-деталь, в модуле `VAULT_URL = ""`; наличие на боксе проверено 07.10 —
+  без подгрузки env `accept_secret_grants.py --list` падает с «адрес не задан»). Что и как —
   `brain_matrica/docs/KARMAN_ROOM.md`; приёмка и выдача грантов — [`scripts/accept_secret_grants.py`](scripts/accept_secret_grants.py).
   **Allowlist'ов два, и это ловушка (G353):** `ACCEPTED_NAMES` в `secrets_bootstrap` решает, что комната
   отдаёт **в процесс**, `GRANT_ALLOWLIST` в [`modules/secrets_grants.py`](modules/secrets_grants.py) — чью
