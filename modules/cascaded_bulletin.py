@@ -245,6 +245,7 @@ async def run_cascaded_bulletin(
         append_unique_limited,
         build_region_dedup_sets,
         extract_source_lips_from_target_group_posts,
+        partition_included_lips,
     )
     from modules.deduplication.fingerprints import (
         create_media_fingerprint,
@@ -650,9 +651,18 @@ async def run_cascaded_bulletin(
             except Exception:  # pragma: no cover
                 logger.warning("track_digest_published failed", exc_info=True)
 
-    all_included: List[str] = []
-    for _, d, _ in results:
-        all_included.extend(d.posts_included)
+    # Dedup cursor — only with actually published lips. A failed bulletin
+    # was never posted: recording its lips would mute the posts for later
+    # waves (silent loss).
+    all_included, failed_included = partition_included_lips(results)
+    if failed_included:
+        logger.warning(
+            "dedup cursor skips %d lips from failed bulletins " "(region=%s theme=%s): %s",
+            len(failed_included),
+            region.code,
+            theme,
+            ",".join(failed_included[:10]),
+        )
     if all_included:
         work_table.lip = append_unique_limited(
             work_table.lip or [],
