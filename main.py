@@ -50,6 +50,7 @@ from web.api import (  # noqa: E402
     gateway,
     gateway_stats,
     health,
+    ingest_contract,
     notifications,
     parsing,
     parsing_stats,
@@ -213,7 +214,9 @@ app.include_router(ad_outreach.router, prefix="/api/ad-outreach", tags=["Ad Outr
 app.include_router(advertiser_cabinet.router, prefix="/api/advertiser", tags=["Advertiser Cabinet"])
 app.include_router(broadcast.router, prefix="/api/broadcast", tags=["Network Broadcast"])
 app.include_router(
-    subscriber_growth.router, prefix="/api/subscriber-growth", tags=["Subscriber Growth"]
+    subscriber_growth.router,
+    prefix="/api/subscriber-growth",
+    tags=["Subscriber Growth"],
 )
 app.include_router(discovery.router, prefix="/api/discovery", tags=["Region Discovery"])
 app.include_router(gateway.router, prefix="/api/gateway", tags=["VK Gateway"])
@@ -229,8 +232,13 @@ app.include_router(ecosystem.router, prefix="/api/ecosystem", tags=["Ecosystem S
 # review — операторская сессия (как gateway / gateway-stats).
 app.include_router(classifier_ingest.router, prefix="/api/classifier", tags=["Classifier Ingest"])
 app.include_router(
-    classifier_review.router, prefix="/api/classifier-review", tags=["Classifier Review"]
+    classifier_review.router,
+    prefix="/api/classifier-review",
+    tags=["Classifier Review"],
 )
+# Карта ingest-контракта источника (пилот варианта B, pool #367): публичный
+# read-only ответ для приёмников конвейера, своя дверь в PUBLIC_EXACT.
+app.include_router(ingest_contract.router, prefix="/api/ingest", tags=["Ingest Contract"])
 
 
 def _radar_template_ctx(request: Request) -> dict:
@@ -252,7 +260,7 @@ def _radar_template_ctx(request: Request) -> dict:
     return {
         "request": request,
         "home": "/" if at_root else "/radar",
-        "manifest_url": "/manifest.webmanifest" if at_root else "/radar/manifest.webmanifest",
+        "manifest_url": ("/manifest.webmanifest" if at_root else "/radar/manifest.webmanifest"),
         "login_url": f"{get_issuer()}/login?next={quote(own, safe='')}",
         "services_url": f"{get_issuer()}/services",
     }
