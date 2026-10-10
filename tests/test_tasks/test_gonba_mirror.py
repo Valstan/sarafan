@@ -160,6 +160,54 @@ async def test_gonba_respects_cap(monkeypatch):
     assert res["stats"]["sent"] == 2  # capped
 
 
+async def test_gonba_partial_delivery_marks_seen(monkeypatch):
+    """Incident 2026-08-27: album failed, text landed — success=False kept the
+    post unseen and the beat re-sent the same text every 30 min. Anything that
+    reached the channel must advance the dedup cursor."""
+    now = int(time.time())
+    posts = [{"id": 7, "owner_id": VK_ID, "date": now - 60, "text": "Поездка в Йошкар-Олу"}]
+    wt = SimpleNamespace(lip=[], hash=[], failed_attempts=None)
+    sent = []
+    _patch_common(monkeypatch, posts, wt, sent)
+
+    async def _partial_repost(bot, channel, text, media, *, test_mode=False):
+        sent.append({"text": text})
+        return {"success": False, "delivered": True, "degraded": True}
+
+    monkeypatch.setattr("modules.publisher.telegram_repost.repost_to_telegram", _partial_repost)
+    session = _FakeSession([_Result(_community()), _Result(wt)])
+
+    res = await execute_gonba_telegram_mirror(session)
+
+    assert lip_of_post(VK_ID, 7) in wt.lip  # seen → no re-send next run
+    assert session.commits >= 1
+    assert res["stats"]["sent_partial"] == 1  # частичная доставка — свой счётчик
+    assert res["success"] is False  # partial delivery is still surfaced
+    assert any("partial" in e or "частичн" in e for e in res["errors"])
+
+
+async def test_gonba_total_failure_keeps_post_unseen(monkeypatch):
+    """Nothing reached the channel → do NOT mark seen; retry next run (bounded
+    by GONBA_MAX_POST_AGE_HOURS)."""
+    now = int(time.time())
+    posts = [{"id": 8, "owner_id": VK_ID, "date": now - 60, "text": "Новость"}]
+    wt = SimpleNamespace(lip=[], hash=[], failed_attempts=None)
+    sent = []
+    _patch_common(monkeypatch, posts, wt, sent)
+
+    async def _failed_repost(bot, channel, text, media, *, test_mode=False):
+        return {"success": False, "delivered": False, "error": "bot token revoked"}
+
+    monkeypatch.setattr("modules.publisher.telegram_repost.repost_to_telegram", _failed_repost)
+    session = _FakeSession([_Result(_community()), _Result(wt)])
+
+    res = await execute_gonba_telegram_mirror(session)
+
+    assert lip_of_post(VK_ID, 8) not in (wt.lip or [])
+    assert res["stats"]["sent"] == 0
+    assert res["success"] is False
+
+
 async def test_gonba_no_channel_configured(monkeypatch):
     session = _FakeSession([_Result(_community(telegram_channel=None, telegram_bot=None))])
     res = await execute_gonba_telegram_mirror(session)

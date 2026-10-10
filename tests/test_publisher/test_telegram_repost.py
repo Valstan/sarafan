@@ -326,6 +326,89 @@ async def test_repost_single_video_oversize_degrades_to_text(monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
+# Partial-failure delivery accounting (fix/telegram-mirror-partial-delivery-loop)
+#
+# Incident 2026-08-27: sendMediaGroup failed persistently for one post while
+# the follow-up text succeeded; the caller saw success=False, never marked the
+# post seen and re-sent the text every beat run (@gonba_life spam). These tests
+# pin the contract: media-group failure degrades to per-item sends, caption
+# text is never silently lost, and `delivered` reports whether ANYTHING landed.
+# --------------------------------------------------------------------------- #
+class _SelectiveFailPost:
+    """requests.post stand-in that fails configured API methods with HTTP 400."""
+
+    def __init__(self, fail_methods):
+        self.calls = []
+        self.fail = set(fail_methods)
+
+    def __call__(self, url, json=None, timeout=None, **kwargs):
+        method = url.rsplit("/", 1)[-1]
+        self.calls.append((method, json))
+        if method in self.fail:
+            return _FakeResp(400, {"ok": False, "description": "Bad Request"})
+        return _FakeResp(200)
+
+    def methods(self):
+        return [m for m, _ in self.calls]
+
+
+async def test_repost_media_group_failure_falls_back_to_singles(monkeypatch):
+    monkeypatch.setattr(runtime, "TELEGRAM_TOKENS", {"AFONYA": "tok"})
+    poster = _SelectiveFailPost({"sendMediaGroup"})
+    monkeypatch.setattr("requests.post", poster)
+    long_text = "x" * (tr.TG_CAPTION_LIMIT + 50)
+    media = ResolvedMedia(photos=["p1", "p2"])
+    res = await repost_to_telegram("AFONYA", "@c", long_text, media)
+    # Group failed → each photo sent individually, then the text message.
+    assert poster.methods() == ["sendMediaGroup", "sendPhoto", "sendPhoto", "sendMessage"]
+    assert res["delivered"] is True
+    assert res["degraded"] is True
+    assert res["success"] is True  # all content landed, presentation degraded
+
+
+async def test_repost_media_group_and_singles_fail_text_still_delivered(monkeypatch):
+    monkeypatch.setattr(runtime, "TELEGRAM_TOKENS", {"AFONYA": "tok"})
+    poster = _SelectiveFailPost({"sendMediaGroup", "sendPhoto"})
+    monkeypatch.setattr("requests.post", poster)
+    # Short text would have been the album caption — it must not be lost when
+    # the album (and every photo) fails: deliver it as a plain message.
+    media = ResolvedMedia(photos=["p1", "p2"])
+    res = await repost_to_telegram("AFONYA", "@c", "короткая подпись", media)
+    assert poster.methods() == ["sendMediaGroup", "sendPhoto", "sendPhoto", "sendMessage"]
+    assert res["delivered"] is True
+    assert res["degraded"] is True
+    assert res["success"] is False  # photos were lost
+
+
+async def test_repost_single_photo_failure_delivers_caption_as_text(monkeypatch):
+    monkeypatch.setattr(runtime, "TELEGRAM_TOKENS", {"AFONYA": "tok"})
+    poster = _SelectiveFailPost({"sendPhoto"})
+    monkeypatch.setattr("requests.post", poster)
+    res = await repost_to_telegram("AFONYA", "@c", "cap", ResolvedMedia(photos=["p1"]))
+    assert poster.methods() == ["sendPhoto", "sendMessage"]
+    assert res["delivered"] is True
+    assert res["success"] is False
+
+
+async def test_repost_text_only_failure_reports_undelivered(monkeypatch):
+    monkeypatch.setattr(runtime, "TELEGRAM_TOKENS", {"AFONYA": "tok"})
+    poster = _SelectiveFailPost({"sendMessage"})
+    monkeypatch.setattr("requests.post", poster)
+    res = await repost_to_telegram("AFONYA", "@c", "текст", ResolvedMedia())
+    assert res["success"] is False
+    assert res["delivered"] is False
+
+
+async def test_repost_clean_paths_report_delivered(monkeypatch):
+    monkeypatch.setattr(runtime, "TELEGRAM_TOKENS", {"AFONYA": "tok"})
+    poster = _RecordingPost()
+    monkeypatch.setattr("requests.post", poster)
+    res = await repost_to_telegram("AFONYA", "@c", "hi", ResolvedMedia(photos=["p1"]))
+    assert res["success"] is True
+    assert res["delivered"] is True
+
+
+# --------------------------------------------------------------------------- #
 # _download_to_temp size guard
 # --------------------------------------------------------------------------- #
 class _StreamResp:
@@ -394,7 +477,7 @@ async def test_media_group_fails_but_text_delivered_reports_delivered(monkeypatc
 
     def fake_post(url, json=None, timeout=None, **kwargs):
         method = url.rsplit("/", 1)[-1]
-        if method == "sendMediaGroup":
+        if method in {"sendMediaGroup", "sendPhoto", "sendVideo"}:
             return _FakeResp(400, _CURL_FAILED_BODY)
         return _FakeResp(200)
 
