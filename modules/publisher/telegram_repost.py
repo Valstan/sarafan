@@ -337,7 +337,10 @@ async def repost_to_telegram(
     """
     Send a single repost (text + media) to a Telegram channel using bot
     ``bot_name`` (token resolved from env). Honors ``test_mode`` (no network).
-    Degrades media-group → photos → single → text gracefully.
+    Degrades media-group → per-item singles → text gracefully: an album refused
+    by Telegram (typically one URL it cannot fetch) is re-sent item by item, so
+    one bad URL does not sink the whole post; the caption text is re-sent as a
+    plain message when its media carrier fails and is never silently lost.
 
     Возвращает ДВА разных флага, и путать их нельзя:
 
@@ -379,59 +382,72 @@ async def repost_to_telegram(
 
     success = True
     delivered = False
+    text_as_caption = False
     group = _media_group_items(media)
+    caption = text if (text and len(text) <= TG_CAPTION_LIMIT) else None
 
     if len(group) >= 2:
-        caption = text if (text and len(text) <= TG_CAPTION_LIMIT) else None
         items = _media_group_items(media, caption=caption)
         ok = await _call(token, "sendMediaGroup", {"chat_id": channel, "media": items})
-        success = success and ok
-        delivered = delivered or ok
-        if text and caption is None:
-            ok = await _send_text(token, channel, text)
-            success = success and ok
-            delivered = delivered or ok
+        if ok:
+            delivered = True
+            text_as_caption = caption is not None
+        else:
+            # Album refused (typically one URL Telegram can't fetch) — fall back
+            # to per-item sends so one bad URL doesn't sink the whole post. The
+            # text goes as a separate message below, never as a caption here.
+            media.degraded = True
+            item_failed = False
+            for url in media.photos[:TG_MEDIA_GROUP_MAX]:
+                ok_item = await _call(token, "sendPhoto", {"chat_id": channel, "photo": url})
+                delivered = delivered or ok_item
+                item_failed = item_failed or not ok_item
+            for url in media.videos[: max(0, TG_MEDIA_GROUP_MAX - len(media.photos))]:
+                ok_item = await _send_video(token, channel, url, None)
+                delivered = delivered or ok_item
+                item_failed = item_failed or not ok_item
+            success = success and not item_failed
     elif len(group) == 1:
         item = group[0]
-        caption = text if (text and len(text) <= TG_CAPTION_LIMIT) else None
         if item["type"] == "photo":
             payload: Dict[str, Any] = {"chat_id": channel, "photo": item["media"]}
             if caption:
                 payload["caption"] = caption
             ok = await _call(token, "sendPhoto", payload)
             success = success and ok
-            delivered = delivered or ok
-            if text and caption is None:
-                ok = await _send_text(token, channel, text)
-                success = success and ok
-                delivered = delivered or ok
+            if ok:
+                delivered = True
+                text_as_caption = caption is not None
+            else:
+                media.degraded = True
         else:  # video — try URL, then file upload (≤50MB); degrade to text if both fail
             ok = await _send_video(token, channel, item["media"], caption)
             if ok:
                 delivered = True
-                if text and caption is None:
-                    ok = await _send_text(token, channel, text)
-                    success = success and ok
-                    delivered = delivered or ok
+                text_as_caption = caption is not None
             else:
                 # Video unsendable (player-only / >50MB / upload error). Keep the
-                # post: deliver its text so nothing is silently lost; flag degraded.
+                # post: its text still goes out below; flag degraded. Deliberately
+                # NOT a failure — matches the historical graceful-degradation
+                # contract (an undeliverable video must not fail the repost).
                 media.degraded = True
-                if text:
-                    ok = await _send_text(token, channel, text)
-                    success = success and ok
-                    delivered = delivered or ok
-                else:
-                    success = False
-    elif text:
+
+    # Text goes out as its own message whenever it wasn't delivered as a
+    # caption — including when its intended media carrier failed above.
+    if text and not text_as_caption:
         ok = await _send_text(token, channel, text)
         success = success and ok
         delivered = delivered or ok
 
     # Documents cannot share a photo/video media group — send separately.
     for doc in media.docs[:TG_MEDIA_GROUP_MAX]:
-        if await _call(token, "sendDocument", {"chat_id": channel, "document": doc["url"]}):
-            delivered = True
+        ok_doc = await _call(token, "sendDocument", {"chat_id": channel, "document": doc["url"]})
+        delivered = delivered or ok_doc
+        if not ok_doc:
+            media.degraded = True
+
+    if not delivered:
+        success = False
 
     return {"success": success, "delivered": delivered, "degraded": media.degraded}
 
