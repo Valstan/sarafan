@@ -31,11 +31,7 @@ from typing import Any, Dict, List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from config.classifier import (  # noqa: E402
-    classifier_disabled,
-    get_pending_max,
-    get_source_days,
-)
+from config.classifier import classifier_disabled, get_pending_max, get_source_days  # noqa: E402
 from config.opencode import engine_enabled, get_model_chain  # noqa: E402
 
 DOUBT_CONFIDENCE = 60  # порог «сомнительно»: ниже — в очередь приёмки
