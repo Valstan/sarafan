@@ -44,10 +44,26 @@ import time
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from config.opencode import engine_enabled
 from modules.classifier.schema import ClassifierVerdict, parse_verdict_loose
-from modules.deepseek_client import chat
+from modules.deepseek_client import chat as _deepseek_chat
 
 logger = logging.getLogger(__name__)
+
+
+def chat(**kwargs: Any) -> Dict[str, Any]:
+    """Вызов модели текущим движком. ``CLASSIFIER_ENGINE=opencode`` → харнесс.
+
+    Переключатель стоит здесь, а не в ``classify_posts``/тасках: один рубеж на
+    все пути классификации (фоновая таска, prepublish внутри волны, кнопка в
+    UI), а DeepSeek остаётся дефолтом — откат пилота без деплоя кода.
+    """
+    if engine_enabled():
+        from modules.opencode_engine import chat as _opencode_chat
+
+        return _opencode_chat(**kwargs)
+    return _deepseek_chat(**kwargs)
+
 
 # Сколько постов уходит в один вызов. Больше — дешевле (постулаты не
 # переплачиваются), но длиннее ответ и выше риск, что модель начнёт экономить на
