@@ -305,17 +305,17 @@ def test_default_chain_excludes_geo_dead_muse():
 def test_serve_limits_from_env(monkeypatch):
     from config import opencode as oc
 
-    assert oc.get_serve_rlimit_as() == 512 * 1024 * 1024
+    assert oc.get_serve_rss_kill_mb() == 450
     assert oc.get_serve_max_lifetime() == 15 * 60
-    monkeypatch.setenv("OPENCODE_SERVE_RLIMIT_AS", str(256 * 1024 * 1024))
+    monkeypatch.setenv("OPENCODE_SERVE_RSS_KILL_MB", "300")
     monkeypatch.setenv("OPENCODE_SERVE_MAX_LIFETIME", "600")
-    assert oc.get_serve_rlimit_as() == 256 * 1024 * 1024
+    assert oc.get_serve_rss_kill_mb() == 300
     assert oc.get_serve_max_lifetime() == 600.0
 
 
-def test_harness_server_passes_rlimit_and_timer(monkeypatch):
-    """Ребёнок получает preexec_fn с лимитом памяти; таймер убийства
-    ставится и отменяется при нормальном выходе."""
+def test_harness_server_starts_rss_monitor(monkeypatch):
+    """Ребёнок без preexec_fn (RLIMIT_AS ломает старт bun); RSS-монитор
+    запускается и останавливается при выходе."""
     from modules import opencode_engine
 
     monkeypatch.setattr(opencode_engine, "server_alive", lambda: False)
@@ -335,10 +335,23 @@ def test_harness_server_passes_rlimit_and_timer(monkeypatch):
 
     with opencode_engine.harness_server():
         pass
-    assert callable(seen["preexec_fn"])
+    assert seen["preexec_fn"] is None
+    assert seen["start_new_session"] is True
     assert _FakeTimer.started is True
     assert _FakeTimer.cancelled is True
     assert child.terminated is True
+
+
+def test_child_rss_mb_reads_proc():
+    import os
+
+    from modules.opencode_engine import _child_rss_mb
+
+    if not os.path.exists("/proc/self/status"):  # pragma: no cover — Windows
+        pytest.skip("/proc доступен только на Linux")
+    rss = _child_rss_mb(os.getpid())
+    assert rss is not None and rss > 0
+    assert _child_rss_mb(999999) is None
 
 
 class _FakeTimer:

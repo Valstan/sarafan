@@ -34,11 +34,12 @@ DEFAULT_MODEL_CHAIN = [
 
 DEFAULT_BASE_URL = "http://127.0.0.1:4096"
 
-# Потолок памяти ребёнка serve (OOM-аудит 14.10: ядро убивало opencode при
-# RSS 507–619 МБ — сессии и SSE-буферы копятся на длинных батчах). Лимит
-# адресного пространства: упрётся — ребёнок падает, следующий чанк поднимет
-# свежего (fail-open сохраняется, бокс не топит).
-SERVE_RLIMIT_AS_BYTES = 512 * 1024 * 1024
+# Потолок RSS ребёнка serve, МБ (OOM-аудит 14.10: ядро убивало opencode при
+# RSS 507–619 МБ — сессии и SSE-буферы копятся на длинных батчах). Ребёнок
+# мониторится в процессе: превысил — убит, следующий чанк поднимет свежого
+# (fail-open сохраняется, бокс не топит). RLIMIT_AS не подходит: bun
+# резервирует ~74 ГБ виртуальной памяти на старте, лимит рубит exec.
+SERVE_RSS_KILL_MB = 450
 
 # Страховочное убийство ребёнка: длинный батч (200 постов = 72 чанка) может
 # идти часами; если ребёнок жив, но разрастается — убиваем по таймеру,
@@ -83,14 +84,12 @@ def get_model_chain() -> List[str]:
     return chain or list(DEFAULT_MODEL_CHAIN)
 
 
-def get_serve_rlimit_as() -> int:
-    """Потолок адресного пространства ребёнка serve (OOM-аудит 14.10)."""
+def get_serve_rss_kill_mb() -> int:
+    """Потолок RSS ребёнка serve в МБ (OOM-аудит 14.10)."""
     try:
-        return max(
-            64 * 1024 * 1024, int(os.getenv("OPENCODE_SERVE_RLIMIT_AS", str(SERVE_RLIMIT_AS_BYTES)))
-        )
+        return max(64, int(os.getenv("OPENCODE_SERVE_RSS_KILL_MB", str(SERVE_RSS_KILL_MB))))
     except ValueError:
-        return SERVE_RLIMIT_AS_BYTES
+        return SERVE_RSS_KILL_MB
 
 
 def get_serve_max_lifetime() -> float:
