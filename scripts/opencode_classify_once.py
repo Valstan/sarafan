@@ -44,6 +44,8 @@ async def _run(args: argparse.Namespace) -> Dict[str, Any]:
     from database.connection import AsyncSessionLocal
     from modules.classifier import headless, rules, service
 
+    import database.models  # noqa: F401 — конфигурация мапперов (relationship('Region') и пр.)
+
     async with AsyncSessionLocal() as session:
         posts = await service.fetch_pending(
             session,
