@@ -108,16 +108,23 @@ def harness_server() -> Iterator[bool]:
         "OPENCODE_BIN",
         str(Path.home() / ".opencode" / "bin" / "opencode"),
     )
+    # Прод-диагностика (14.10): в prefork-воркере Celery ребёнок serve молча
+    # умирал, DEVNULL скрывал причину. OPENCODE_SERVE_LOG задан — пишем
+    # stderr туда; иначе тишина (прод — шум не нужен).
+    serve_log = os.environ.get("OPENCODE_SERVE_LOG", "").strip()
+    stderr_target: Any = open(serve_log, "ab") if serve_log else subprocess.DEVNULL  # noqa: SIM115
     child = subprocess.Popen(
         [binary, "serve", "--port", str(port), "--hostname", host],
         env={k: v for k, v in os.environ.items() if v},
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=stderr_target,
+        stderr=stderr_target,
         start_new_session=True,
     )
     try:
         yield _wait_port(host, port)
     finally:
+        if stderr_target is not subprocess.DEVNULL:
+            stderr_target.close()
         child.terminate()
         try:
             child.wait(timeout=10)
