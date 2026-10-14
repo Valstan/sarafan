@@ -27,13 +27,23 @@ import os
 from typing import List
 
 DEFAULT_MODEL_CHAIN = [
-    "muse-spark-1.3-contributor-free",
     "longcat-2.5-preview-free",
     "space-bunny-free",
     "mimo-v2.6-flash-free",
 ]
 
 DEFAULT_BASE_URL = "http://127.0.0.1:4096"
+
+# Потолок памяти ребёнка serve (OOM-аудит 14.10: ядро убивало opencode при
+# RSS 507–619 МБ — сессии и SSE-буферы копятся на длинных батчах). Лимит
+# адресного пространства: упрётся — ребёнок падает, следующий чанк поднимет
+# свежего (fail-open сохраняется, бокс не топит).
+SERVE_RLIMIT_AS_BYTES = 512 * 1024 * 1024
+
+# Страховочное убийство ребёнка: длинный батч (200 постов = 72 чанка) может
+# идти часами; если ребёнок жив, но разрастается — убиваем по таймеру,
+# следующий чанк поднимет свежего с чистыми сессиями.
+SERVE_MAX_LIFETIME_SEC = 15 * 60
 
 
 def engine_enabled() -> bool:
@@ -71,3 +81,23 @@ def get_model_chain() -> List[str]:
         return list(DEFAULT_MODEL_CHAIN)
     chain = [m.strip() for m in raw.replace(";", ",").split(",") if m.strip()]
     return chain or list(DEFAULT_MODEL_CHAIN)
+
+
+def get_serve_rlimit_as() -> int:
+    """Потолок адресного пространства ребёнка serve (OOM-аудит 14.10)."""
+    try:
+        return max(
+            64 * 1024 * 1024, int(os.getenv("OPENCODE_SERVE_RLIMIT_AS", str(SERVE_RLIMIT_AS_BYTES)))
+        )
+    except ValueError:
+        return SERVE_RLIMIT_AS_BYTES
+
+
+def get_serve_max_lifetime() -> float:
+    """Страховочное убийство ребёнка, сек (0 = выключено)."""
+    try:
+        return max(
+            0.0, float(os.getenv("OPENCODE_SERVE_MAX_LIFETIME", str(SERVE_MAX_LIFETIME_SEC)))
+        )
+    except ValueError:
+        return SERVE_MAX_LIFETIME_SEC
