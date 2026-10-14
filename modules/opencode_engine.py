@@ -102,6 +102,36 @@ def _child_rss_mb(pid: int) -> Optional[float]:
     return None
 
 
+def _systemctl_run(action: str, timeout: float = 30.0) -> bool:
+    """start/stop oneshot-юнита харнесса (автоматический путь из воркера).
+
+    Popen из prefork-воркера Celery нестабилен (ребёнок умирает молча —
+    боевой замер 14.10: 72/72 чанков Connection refused при живом
+    ручном serve). systemd-oneshot надёжнее: serve под сервисом с
+    EnvironmentFile, движок только зовёт systemctl (sudo -n, NOPASSWD
+    только на этот юнит). Возвращает False, если команда не прошла.
+    """
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "systemctl", action, "setka-opencode-run"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+    except Exception as e:  # noqa: BLE001 — таймаут/сеть системы
+        logger.warning("opencode-engine: systemctl %s не удался: %s", action, e)
+        return False
+    if result.returncode != 0:
+        logger.warning(
+            "opencode-engine: systemctl %s rc=%s stderr=%s",
+            action,
+            result.returncode,
+            (result.stderr or "")[:200],
+        )
+        return False
+    return True
+
+
 @contextmanager
 def harness_server() -> Iterator[bool]:
     """Serve ровно на время прогона (oneshot, решение владельца 14.10).
@@ -120,6 +150,21 @@ def harness_server() -> Iterator[bool]:
         return
 
     host, port = "127.0.0.1", _port_of(get_base_url())
+
+    # Автоматический путь (воркер/таска): systemd-oneshot вместо Popen.
+    # Popen из prefork-воркера Celery нестабилен (боевой замер 14.10).
+    # OPENCODE_SYSTEMD_RUN=1 — включается в env приложения; иначе —
+    # прежний Popen-путь (ручные прогоны, отладка).
+    if os.getenv("OPENCODE_SYSTEMD_RUN") == "1":
+        if not _systemctl_run("start"):
+            yield False
+            return
+        try:
+            yield _wait_port(host, port)
+        finally:
+            _systemctl_run("stop")
+        return
+
     binary = os.environ.get(
         "OPENCODE_BIN",
         str(Path.home() / ".opencode" / "bin" / "opencode"),
