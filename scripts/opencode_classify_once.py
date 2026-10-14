@@ -41,6 +41,7 @@ async def _run(args: argparse.Namespace) -> Dict[str, Any]:
     if classifier_disabled():
         return {"status": "skipped:classifier-disabled"}
 
+    import database.models  # noqa: F401 — конфигурация мапперов (relationship('Region') и пр.)
     from database.connection import AsyncSessionLocal
     from modules.classifier import headless, rules, service
 
