@@ -1,65 +1,48 @@
 # Session Handoff
 
-> Sticky-note для непрерывности между сессиями разработки САРАФАН. Перезаписывается через [`/close_session`](../.claude/commands/close_session.md) — историю смотри через `git log --follow -- docs/SESSION_HANDOFF.md`.
+> Sticky-note для непрерывности между сессиями разработки SETKA. Перезаписывается через [`/close_session`](../.claude/commands/close_session.md) — историю смотри через `git log --follow -- docs/SESSION_HANDOFF.md`.
 
 **Status:** ACTIVE
-**Updated:** 2026-10-12
-**Branch:** `main`
-**Last release in prod:** `de3aae7` (#875) — код прода не менялся с 09.10; все операции шли поверх него.
+**Updated:** 2026-10-15
+**Branch:** `chore/handoff-2026-10-15`
+**Last release in prod:** `72457d9` (#894, движок классификатора) — `git pull` на боксе, `CLASSIFIER_ENGINE=opencode` в `setka.env`, воркер перезапущен; `origin/main` — `9fa612f` (#896).
 
 ---
 
 ## Текущая нитка
 
-Сессия 11–12.10: три закрытых PR под гейтами + ре-триаж PENDING.
-
-1. **PR #878** — фикс Telegram-зеркала Гоньбы (`fix/telegram-mirror-partial-delivery-loop`): ребейз на актуальный `main` (база 28.08 → ~331 коммит), разрешение конфликтов: убраны дубли зеркала (`delivered` cursor уже в #545), дубль PENDING (инцидент 28.08 закрыт #547/#548), предотвращён откат транспорта (`_call` с `WEBPAGE_CURL_FAILED` ретраем #617/G307). Функционал: `sendMediaGroup` refusal → per-item sends + caption text как отдельное сообщение → `delivered`/`degraded` контракт. **CI Pass → merged `be73893`**.
-2. **PR #882** — строка мозгу по RS256/HS256: ответ `mailbox/to-brain/2026-10-11-esa-kazanskaya-rs256-answer.md` — настоящий токен для Казанской подпишем RS256, JWKS из discovery, HS256 не будет. Три пункта для снятия fail-closed у Казанской: pin `alg=RS256`, матчинг по `kid` с докачкой, сверка `iss` punycode-строкой. **CI Pass → merged `736891e`**.
-3. **PR #883** — ре-триаж протухшего PENDING (pool #033, D-096): Closed 4 → CLOSED.md (P152 Калинино доходит, P145 ESA шаг 3 выкачен, P131 notext батч, P123 слит в P121); Parked 31 с явными условиями (P144, P114, P150, P121, P124, P128, P135, P136, P109, P115, P142, P140, P132, P170, P169, P176, P175, P174, P173, P172, P168, P167, P166, P165, P037, P036, P094, P096, P098, P102, P108, P117, P130, P099); Watch 1 (P141 Казанская CONVEYOR_SITES). Gate: 194 записи, 49.7 KB < 51.2 KB. **CI Pass → merged `6c38c42`**.
-
----
+Пилот движка OpenCode завершён и влит: 7 PR (#886, #888–#894) — вердикты классификатора выносит харнесс `opencode serve` вместо мёртвого DeepSeek (402 с 22.09, P177). В проде движок включён (`CLASSIFIER_ENGINE=opencode`, systemd-oneshot), free-tier отвечает (longcat/space-bunny), muse geo-заблокирована (P195, parked). Первая живая волна с вердиктами ещё не подтверждена — это мониторинг следующей сессии.
 
 ## Следующий шаг
 
-1. **Визитки день 2** (12.10, бюджет VALSTAN сбросится): 24 перевыпуска + закреп `uni` — скрипт `/tmp/pin_repost.py` на боксе (⚠️ сгорает с ребутом). Районы: `rybnaya_sloboda,spassky,tetyushsky,tyulyachi,verhniy_uslon,vysokaya_gora,zelenodolsk,chepetsk,luza,bogorodskoe,orlov,svecha,slobodskoy,yurya,suna,zuevka,kumyony,falenki,nagorsk,kotelnich,orichi,darovskoy,murashi,shabalino`.
-2. **Ревью PR #878** — уже смержен, оставлено для истории.
-3. **RS256/HS256** — строка мозгу отправлена, ждём ack от Казанской.
-4. **D-096 срок 16.10** — `immutable` с версией в пути + таблица путей.
-
----
+Проверить следующую волну в логе воркера на боксе: `grep "classifier headless: posts=" ~/SETKA/logs/celery-worker.log | tail -3` — нужны `verdicts>0` (а не `failures=72`). Если всё ещё нули — смотреть `opencode-engine` строки там же и `/home/valstan/opencode-serve-child.log`. Сверка БД: `SELECT count(*), max(created_at) FROM content_classifications WHERE source='headless' AND created_at > now() - interval '30 min'`.
 
 ## Контекст
 
-- **План:** нет активного плана (ad-hoc: визитки → ре-триаж → письма мозгу).
-- **Связанные коммиты сессии:** `be73893` (#878 telegram fix), `736891e` (#882 RS256), `6c38c42` (#883 retriage).
-- **Прод:** `setka*` 4×active, health 200, код `de3aae7` (#875). Новые `sarafan*` имена — inactive (переименование не делалось). Все ssh-вызовы с teardown hang (G455) — успех по маркеру, не по exit-коду.
-- **Открытых PR:** #880 (handoff 10.10 — кандидат на закрытие), #878/882/883 смержены.
-
----
+- **План:** нет активного плана (ad-hoc пилот по заказу владельца 14.10).
+- **Связанные коммиты сессии:** #886 (движок + цепочка фолбэков), #888 (прогон-скрипт), #889 (harness_server oneshot), #890 (батч в менеджере), #891 (SERVE_LOG), #892 (RSS-монитор, без muse), #893 (systemd-oneshot), #894 (systemd-путь из воркера). Детали — в телах PR.
+- **Прод:** `setka`, `setka-celery-worker`, `setka-celery-beat`, `setka-vk-bot` — active, health 200 (проверено 14.10); `setka-opencode` снят с автозапуска (oneshot); `memcached`/`grafana-server` выключены (аудит памяти, +~360 МБ, доступно ~600).
+- **Открытых PR:** нет.
 
 ## Failed approaches (этой нитки)
 
-- **Worktree rebase teardown** — PowerShell `Wait-Process -Timeout` иногда не убивает процесс, оставляет orphan. Решено: `Start-Process -RedirectStandardOutput` + явный `Kill()` по таймауту.
-- **Многострочные ssh-команды** — CRLF ломает bash. Только однострочные.
-- **Ребейз конфликтующей ветки через worktree** — удаление worktree после rebase требует `git worktree remove --force`.
-
----
+- **`opencode run` (CLI headless)** — стабильно висит после `init` (~170 c, ноль байт). **Не использовать** для автоматики; правильный режим — `opencode serve`.
+- **Always-on `serve`** — держит ~264 МБ на боксе 1.5 ГБ, лёг OOM'ом трижды. **Не держать**; oneshot на прогон (`harness_server`).
+- **`RLIMIT_AS` на ребёнка serve** — bun резервирует ~74 ГБ VM на старте, лимит рубит exec (SIGABRT). **Не ставить**; вместо него RSS-монитор (`/proc/<pid>/status`, потолок 450 МБ).
+- **`Popen` serve из prefork-воркера Celery** — ребёнок умирает молча, 72/72 чанков `Connection refused` при живом ручном serve. **Не полагаться**; автоматический путь — systemd-oneshot (`OPENCODE_SYSTEMD_RUN=1`, юнит `setka-opencode-run`).
+- **Muse в дефолтной цепочке** — geo-мертва с IP бокса (403 RegionError), каждый чанк съедал таймаут. Убрана из дефолта до расконсервации P195.
 
 ## Открытые вопросы для пользователя
 
-- **bal/kukmor:** переименовать под код региона (`baltasi_info16`)? Необратимо.
-- **P194:** добор медиа или постоянный пропуск безтекстовых?
-- **DeepSeek 402 (P177):** оплата/пауза.
-- **P124:** засев сёл 41 районам (без них хвост мест не появится)?
-
----
+- **P195 (Muse):** донорский VPS под `ssh -D` (~200–400 ₽/мес) / платный прокси / отказ от Muse (цепочка покрывает)?
+- **P194 (безтекстовые, 88 шт.):** добор медиа по `lip` или постоянный пропуск?
+- **P177:** проверить `DEEPSEEK_API_KEY` в KАРМАН-выдаче воркера (`no_api_key`, не 402)?
 
 ## Не забыть (low-priority)
 
-- 2 held-строки конвейера (`120893935_2386`, `207481860_1429`, `text_too_short`).
-- laishevo журнал `error` при живом ✓✓ (источник правды — audit).
-- `/tmp` бокса: `sites-111-*`, `debts_*`, `pin_repost.py`, `group_snap.py` (сгорят с ребутом).
-- Локальный `pytest`: брать только при коде; эта сессия — доки (сборка 4165 проверена на `/start`).
+- Ранги мест batch8 (TICKLER 13.10, просрочен) и batch9 (15.10).
+- D-096 к 16.10 (`immutable` + таблица путей).
+- Дистилляция из чата (`/distill`), верх DISTILL_LOG — 06.10.
 
 ---
 
