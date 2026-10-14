@@ -293,6 +293,68 @@ def test_harness_server_terminates_on_exception(monkeypatch):
     assert child.terminated is True
 
 
+def test_default_chain_excludes_geo_dead_muse():
+    """muse geo-мертва с IP бокса (P195) — в дефолтной цепочке её нет,
+    иначе каждый чанк съедает таймаут впустую."""
+    from config.opencode import DEFAULT_MODEL_CHAIN
+
+    assert "muse-spark-1.3-contributor-free" not in DEFAULT_MODEL_CHAIN
+    assert DEFAULT_MODEL_CHAIN[0] == "longcat-2.5-preview-free"
+
+
+def test_serve_limits_from_env(monkeypatch):
+    from config import opencode as oc
+
+    assert oc.get_serve_rlimit_as() == 512 * 1024 * 1024
+    assert oc.get_serve_max_lifetime() == 15 * 60
+    monkeypatch.setenv("OPENCODE_SERVE_RLIMIT_AS", str(256 * 1024 * 1024))
+    monkeypatch.setenv("OPENCODE_SERVE_MAX_LIFETIME", "600")
+    assert oc.get_serve_rlimit_as() == 256 * 1024 * 1024
+    assert oc.get_serve_max_lifetime() == 600.0
+
+
+def test_harness_server_passes_rlimit_and_timer(monkeypatch):
+    """Ребёнок получает preexec_fn с лимитом памяти; таймер убийства
+    ставится и отменяется при нормальном выходе."""
+    from modules import opencode_engine
+
+    monkeypatch.setattr(opencode_engine, "server_alive", lambda: False)
+    monkeypatch.setattr(opencode_engine, "_wait_port", lambda *a, **kw: True)
+    monkeypatch.setenv("OPENCODE_BIN", "/tmp/fake-opencode")
+
+    seen = {}
+    child = _FakeChild()
+
+    def fake_popen(cmd, env=None, **kwargs):  # noqa: ARG001
+        seen["preexec_fn"] = kwargs.get("preexec_fn")
+        seen["start_new_session"] = kwargs.get("start_new_session")
+        return child
+
+    monkeypatch.setattr(opencode_engine.subprocess, "Popen", fake_popen)
+    monkeypatch.setattr(opencode_engine.threading, "Timer", _FakeTimer)
+
+    with opencode_engine.harness_server():
+        pass
+    assert callable(seen["preexec_fn"])
+    assert _FakeTimer.started is True
+    assert _FakeTimer.cancelled is True
+    assert child.terminated is True
+
+
+class _FakeTimer:
+    started = False
+    cancelled = False
+
+    def __init__(self, delay, fn):  # noqa: ARG002
+        type(self).started = True
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        type(self).cancelled = True
+
+
 def test_classify_posts_wraps_harness_for_opencode_engine(monkeypatch):
     """Батч под opencode идёт внутри harness_server — воркеру не надо ничего знать."""
     from modules import opencode_engine

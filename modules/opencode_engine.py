@@ -39,6 +39,7 @@ import logging
 import os
 import socket
 import subprocess
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -50,6 +51,8 @@ from config.opencode import (
     engine_enabled,
     get_base_url,
     get_model_chain,
+    get_serve_max_lifetime,
+    get_serve_rlimit_as,
     get_server_password,
     get_server_username,
     get_timeout,
@@ -86,6 +89,20 @@ def _wait_port(host: str, port: int, timeout: float = 45.0) -> bool:
     return False
 
 
+def _rlimit_as() -> None:
+    """preexec_fn: жёсткий потолок адресного пространства ребёнка.
+
+    OOM-аудит 14.10 (dmesg): ядро убивало opencode при RSS 507–619 МБ —
+    сессии и SSE-буферы копятся на длинных батчах. Лимит 512 МБ: упрётся —
+    ребёнок падает, следующий чанк поднимет свежего (fail-open сохраняется,
+    бокс не топит). Вызывается в ребёнке ДО exec — наследования нет.
+    """
+    import resource
+
+    limit = get_serve_rlimit_as()
+    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+
+
 @contextmanager
 def harness_server() -> Iterator[bool]:
     """Serve ровно на время прогона (oneshot, решение владельца 14.10).
@@ -119,10 +136,21 @@ def harness_server() -> Iterator[bool]:
         stdout=stderr_target,
         stderr=stderr_target,
         start_new_session=True,
+        preexec_fn=_rlimit_as,
     )
+    # Страховочное убийство: длинный батч идёт часами; если ребёнок жив, но
+    # разрастается — убиваем по таймеру, следующий чанк поднимет свежего.
+    max_lifetime = get_serve_max_lifetime()
+    killer: Optional[threading.Timer] = None
+    if max_lifetime > 0:
+        killer = threading.Timer(max_lifetime, child.kill)
+        killer.daemon = True
+        killer.start()
     try:
         yield _wait_port(host, port)
     finally:
+        if killer is not None:
+            killer.cancel()
         if stderr_target is not subprocess.DEVNULL:
             stderr_target.close()
         child.terminate()
