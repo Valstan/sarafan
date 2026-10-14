@@ -468,6 +468,7 @@ Brain-мандат [#027](../brain_matrica/cross-project-ideas/ideas/027-gate-re
 - Python: `py -3.11` локально для тестов (preferred), `py -3.12` тоже OK (=прод). `scripts/setup-dev.ps1` сам выбирает 3.11 → 3.12 → дефолтный `py`. venv в корне worktree.
 - Запуск тестов: `.\venv\Scripts\python.exe -m pytest tests/ -q` (или через активированный venv).
 - **`main.py` локально** — логи идут в stderr через `logging.basicConfig` (LOG_LEVEL env, дефолт `INFO`). На проде systemd редиректит stdout/stderr в `~/SETKA/logs/uvicorn_production.log`. Полный запуск всё равно требует Postgres + Redis локально; обычно достаточно тестов.
+- **PostgreSQL локальный** (машина владельца, 17.5): `postgresql://setka:<пароль>@127.0.0.1:5432/setka` — пароль в `%USERPROFILE%\pg-local-credentials.json` (значений в репо нет); подробности — `brain_matrica/docs/machines/COMPUTER.md`. Не прод и не замена прод-БД — только разработка и смоук (recommend brain 2026-10-12).
 
 ---
 
