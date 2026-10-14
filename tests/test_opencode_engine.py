@@ -214,3 +214,80 @@ def test_headless_router_follows_engine_flag(monkeypatch, engine_on):
 
     monkeypatch.setenv("CLASSIFIER_ENGINE", "deepseek")
     assert headless.chat(user="u") is sentinel
+
+
+class _FakeChild:
+    def __init__(self):
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self):
+        self.terminated = True
+
+    def wait(self, timeout=None):  # noqa: ARG002
+        return 0
+
+    def kill(self):
+        self.killed = True
+
+
+def test_port_of_parses_base_url(monkeypatch):
+    from modules.opencode_engine import _port_of
+
+    assert _port_of("http://127.0.0.1:4096") == 4096
+    assert _port_of("http://127.0.0.1:4099/base") == 4099
+    assert _port_of("мусор") == 4096
+
+
+def test_harness_server_reuses_live_serve(monkeypatch):
+    """Порт занят живым serve — своего ребёнка не плодим."""
+    from modules import opencode_engine
+
+    monkeypatch.setattr(opencode_engine, "server_alive", lambda: True)
+
+    def boom(*a, **kw):  # pragma: no cover — Popen не должен вызываться
+        raise AssertionError("Popen вызван при живом serve")
+
+    monkeypatch.setattr(opencode_engine.subprocess, "Popen", boom)
+    with opencode_engine.harness_server() as alive:
+        assert alive is True
+
+
+def test_harness_server_spawns_and_terminates(monkeypatch):
+    """Порт свободен — serve поднят ребёнком и убит в finally."""
+    from modules import opencode_engine
+
+    monkeypatch.setattr(opencode_engine, "server_alive", lambda: False)
+    monkeypatch.setattr(opencode_engine, "_wait_port", lambda *a, **kw: True)
+    monkeypatch.setenv("OPENCODE_BIN", "/tmp/fake-opencode")
+
+    seen = {}
+    child = _FakeChild()
+
+    def fake_popen(cmd, env=None, **kwargs):  # noqa: ARG001
+        seen["cmd"] = cmd
+        seen["start_new_session"] = kwargs.get("start_new_session")
+        return child
+
+    monkeypatch.setattr(opencode_engine.subprocess, "Popen", fake_popen)
+    with opencode_engine.harness_server() as alive:
+        assert alive is True
+    assert "serve" in seen["cmd"]
+    assert seen["start_new_session"] is True
+    assert child.terminated is True
+
+
+def test_harness_server_terminates_on_exception(monkeypatch):
+    """Падение прогона внутри блока не оставляет serve-сироты."""
+    from modules import opencode_engine
+
+    monkeypatch.setattr(opencode_engine, "server_alive", lambda: False)
+    monkeypatch.setattr(opencode_engine, "_wait_port", lambda *a, **kw: True)
+    monkeypatch.setenv("OPENCODE_BIN", "/tmp/fake-opencode")
+    child = _FakeChild()
+    monkeypatch.setattr(opencode_engine.subprocess, "Popen", lambda *a, **kw: child)
+
+    with pytest.raises(RuntimeError):
+        with opencode_engine.harness_server():
+            raise RuntimeError("прогон упал")
+    assert child.terminated is True

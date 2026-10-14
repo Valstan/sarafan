@@ -44,6 +44,7 @@ async def _run(args: argparse.Namespace) -> Dict[str, Any]:
     import database.models  # noqa: F401 — конфигурация мапперов (relationship('Region') и пр.)
     from database.connection import AsyncSessionLocal
     from modules.classifier import headless, rules, service
+    from modules.opencode_engine import harness_server
 
     async with AsyncSessionLocal() as session:
         posts = await service.fetch_pending(
@@ -56,7 +57,11 @@ async def _run(args: argparse.Namespace) -> Dict[str, Any]:
         if not posts:
             return {"status": "ok", "posts": 0}
         postulates = await rules.render_effective_postulates(session)
-        run = headless.classify_posts(posts, postulates=postulates)
+        # Смысл oneshot: serve живёт только внутри этой скобки. Порт уже занят
+        # живым serve (ручная отладка) — используем его; свободен — поднимем
+        # ребёнком на прогон и тушим в finally (1.5 ГБ на боксе дороги).
+        with harness_server():
+            run = headless.classify_posts(posts, postulates=postulates)
 
         verdicts = run.get("verdicts") or []
         histogram = headless.actions_histogram(verdicts)

@@ -21,10 +21,14 @@
   ``network`` | ``http_<код>`` | ``empty_response`` | ``engine_all_failed``.
   Классификатор fail-open: нет вердикта — пост идёт по обычным фильтрам.
 
-Почему HTTP-сервер, а не CLI ``opencode run``: на этом боксе ``run`` стабильно
-висит после ``init`` (проверено 14.10, ~170 c, ноль байт вывода), а ``serve``
-поднимается и отвечает за секунду. Серверный режим — он же правильный для
-автоматизации: один процесс на все прогоны, без старта бинарника на чанк.
+Почему HTTP-сервер, а не CLI `opencode run`: на этом боксе `run` стабильно
+висит после `init` (проверено 14.10, ~170 c, ноль байт вывода), а `serve`
+поднимается и отвечает за секунду.
+
+Почему oneshot, а не всегда живой сервис (решение владельца 14.10): бокс —
+1.5 ГБ с постоянно живущими uvicorn/celery/postgres; always-on serve держит
+~264 МБ и в учебном прогоне 14.10 трижды ложился OOM'ом. Теперь `serve`
+поднимается на время прогона и тушится сразу (``harness_server``).
 """
 
 from __future__ import annotations
@@ -32,9 +36,15 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import os
+import socket
+import subprocess
+import time
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional, Tuple
+from contextlib import contextmanager
+from pathlib import Path
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from config.opencode import (
     engine_enabled,
@@ -46,6 +56,74 @@ from config.opencode import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _port_of(base_url: str) -> int:
+    try:
+        return int(base_url.rsplit(":", 1)[1].split("/")[0])
+    except (IndexError, ValueError):
+        return 4096
+
+
+def server_alive(host: str = "127.0.0.1", port: Optional[int] = None) -> bool:
+    """Поднят ли уже serve на порту — тогда свой не поднимаем."""
+    port = port if port is not None else _port_of(get_base_url())
+    try:
+        with socket.create_connection((host, port), timeout=2):
+            return True
+    except OSError:
+        return False
+
+
+def _wait_port(host: str, port: int, timeout: float = 45.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        try:
+            with socket.create_connection((host, port), timeout=2):
+                return True
+        except OSError:
+            time.sleep(0.5)
+    return False
+
+
+@contextmanager
+def harness_server() -> Iterator[bool]:
+    """Serve ровно на время прогона (oneshot, решение владельца 14.10).
+
+    Бокс — 1.5 ГБ с всегда живущими uvicorn/celery/postgres; постоянно
+    запущенный serve держит ~264 МБ и давно ел OOM'ом остальное (учебный
+    прогон 14.10: три рестарта serve). Поэтому: порт уже занят живым
+    serve — работаем с ним (ручной/отладочный режим); порт свободен —
+    поднимаем serve ребёнком на время блока и тушим в finally. Кто
+    поднял — тот и тушит: осиротевший процесс не остаётся.
+
+    Yield: True — serve на этом порту ответил (можно звать модели).
+    """
+    if server_alive():
+        yield True
+        return
+
+    host, port = "127.0.0.1", _port_of(get_base_url())
+    binary = os.environ.get(
+        "OPENCODE_BIN",
+        str(Path.home() / ".opencode" / "bin" / "opencode"),
+    )
+    child = subprocess.Popen(
+        [binary, "serve", "--port", str(port), "--hostname", host],
+        env={k: v for k, v in os.environ.items() if v},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+    try:
+        yield _wait_port(host, port)
+    finally:
+        child.terminate()
+        try:
+            child.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            child.kill()
+
 
 # Причины, при которых имеет смысл пробовать следующую модель цепочки.
 # 403 может быть как geo (muse), так и перегрев free-tier — оба лечатся
