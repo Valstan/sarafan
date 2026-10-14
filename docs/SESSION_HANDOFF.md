@@ -1,48 +1,67 @@
 # Session Handoff
 
-> Sticky-note для непрерывности между сессиями разработки SETKA. Перезаписывается через [`/close_session`](../.claude/commands/close_session.md) — историю смотри через `git log --follow -- docs/SESSION_HANDOFF.md`.
+> Sticky-note для непрерывности между сессиями разработки САРАФАН. Перезаписывается через [`/close_session`](../.claude/commands/close_session.md) — историю смотри через `git log --follow -- docs/SESSION_HANDOFF.md`.
 
 **Status:** ACTIVE
 **Updated:** 2026-10-15
-**Branch:** `chore/handoff-2026-10-15`
-**Last release in prod:** `72457d9` (#894, движок классификатора) — `git pull` на боксе, `CLASSIFIER_ENGINE=opencode` в `setka.env`, воркер перезапущен; `origin/main` — `9fa612f` (#896).
+**Branch:** `chore/handoff-2026-10-15` (handoff-PR; код обеих ниток уже в `main`)
+**Last release in prod:** `9fa612f` (#896 — pull сделан соседней сессией вместе с включением движка; проверить код и health первым делом, P196).
 
 ---
 
-## Текущая нитка
+## Текущая нитка (две, от двух агентов 14–15.10)
 
-Пилот движка OpenCode завершён и влит: 7 PR (#886, #888–#894) — вердикты классификатора выносит харнесс `opencode serve` вместо мёртвого DeepSeek (402 с 22.09, P177). В проде движок включён (`CLASSIFIER_ENGINE=opencode`, systemd-oneshot), free-tier отвечает (longcat/space-bunny), muse geo-заблокирована (P195, parked). Первая живая волна с вердиктами ещё не подтверждена — это мониторинг следующей сессии.
+**Нитка А — пилот движка OpenCode (соседний агент, влито):** 8 PR (#886, #888–#894, ADR-0007) — вердикты классификатора выносит харнесс `opencode serve` вместо мёртвого DeepSeek (402 с 22.09, P177). В проде движок включён (`CLASSIFIER_ENGINE=opencode`, systemd-oneshot), free-tier отвечает (longcat/space-bunny), muse geo-заблокирована (P195, parked). Первая живая волна с вердиктами ещё не подтверждена — мониторинг следующей сессии.
+
+**Нитка Б — моя сессия:** `/start` с двухканальным mailbox → **PR #895** (`docs(agents)`: указатель локального PG 17.5 + feedback мозгу, SHOULD из письма 2026-10-12 закрыт) → **PR #896** (`feat(static)`: 45 `/static/`-ссылок 21 шаблона + иконки PWA → `?v={{ STATIC_VERSION }}` от git-sha; сторож `tests/test_static_versioning.py`; 4161 passed) + отчёт D-096 к 16.10 досрочно (сборка #324 — законный остаток, таблица #015: 0 критических + 5 hygiene с датами 30.10, остаток uploads — 30.10). TICKLER 16.10 закрыт ✅.
+
+---
 
 ## Следующий шаг
 
-Проверить следующую волну в логе воркера на боксе: `grep "classifier headless: posts=" ~/SETKA/logs/celery-worker.log | tail -3` — нужны `verdicts>0` (а не `failures=72`). Если всё ещё нули — смотреть `opencode-engine` строки там же и `/home/valstan/opencode-serve-child.log`. Сверка БД: `SELECT count(*), max(created_at) FROM content_classifications WHERE source='headless' AND created_at > now() - interval '30 min'`.
+На другой машине: `git pull`, затем по порядку:
+
+1. **P196**: проверить SSH с терминала владельца (висящие sshd/git, `uptime`/`free`, короткий `git log`). Тишина и с терминала → письмо мозгу (расширение G455).
+2. **Сверить прод**: код `9fa612f`? (`git log --oneline -1`), health 200, `curl -I` статики (замер для отчёта: `immutable` на версионированных адресах), короткая строка мозгу. Если прод старше — докатить `reliz` шагами 6–10 (restart только `setka`).
+3. **Волна классификатора** (нитка А): `grep "classifier headless: posts=" ~/SETKA/logs/celery-worker.log | tail -3` — нужны `verdicts>0`. Нули → `opencode-engine` строки там же и `/home/valstan/opencode-serve-child.log`; сверка БД `content_classifications` за 30 мин.
+4. **Нитка batch10**: оформление групп `full` → `COMM_242237584/242237596/241967383` → `setup_groups.py --audit` → beat-тест.
+5. Тикальник-просрочки: ранги мест (10/13/15.10), каталог /services, ежедневный ПРОГОН.
+
+---
 
 ## Контекст
 
-- **План:** нет активного плана (ad-hoc пилот по заказу владельца 14.10).
-- **Связанные коммиты сессии:** #886 (движок + цепочка фолбэков), #888 (прогон-скрипт), #889 (harness_server oneshot), #890 (батч в менеджере), #891 (SERVE_LOG), #892 (RSS-монитор, без muse), #893 (systemd-oneshot), #894 (systemd-путь из воркера). Детали — в телах PR.
-- **Прод:** `setka`, `setka-celery-worker`, `setka-celery-beat`, `setka-vk-bot` — active, health 200 (проверено 14.10); `setka-opencode` снят с автозапуска (oneshot); `memcached`/`grafana-server` выключены (аудит памяти, +~360 МБ, доступно ~600).
-- **Открытых PR:** нет.
+- **План:** нет активного плана (ad-hoc: пилот движка + mailbox/D-096).
+- **Связанные коммиты:** нитка А — #886–#894 + #897 (handoff пилота); нитка Б — `565a25d` (#895), `9fa612f` (#896). Все в `main`.
+- **Прод (по чужому handoff, перепроверить по P196):** `setka*` 4×active, health 200; `setka-opencode` снят с автозапуска (oneshot); `memcached`/`grafana-server` выключены (+~360 МБ).
+- **Открытых PR:** #885 (марафон ПРОГОН 13.10), #880 (handoff 10.10) — чужие, не трогать; мой — #898 (этот handoff).
+
+---
 
 ## Failed approaches (этой нитки)
 
-- **`opencode run` (CLI headless)** — стабильно висит после `init` (~170 c, ноль байт). **Не использовать** для автоматики; правильный режим — `opencode serve`.
-- **Always-on `serve`** — держит ~264 МБ на боксе 1.5 ГБ, лёг OOM'ом трижды. **Не держать**; oneshot на прогон (`harness_server`).
-- **`RLIMIT_AS` на ребёнка serve** — bun резервирует ~74 ГБ VM на старте, лимит рубит exec (SIGABRT). **Не ставить**; вместо него RSS-монитор (`/proc/<pid>/status`, потолок 450 МБ).
-- **`Popen` serve из prefork-воркера Celery** — ребёнок умирает молча, 72/72 чанков `Connection refused` при живом ручном serve. **Не полагаться**; автоматический путь — systemd-oneshot (`OPENCODE_SYSTEMD_RUN=1`, юнит `setka-opencode-run`).
-- **Muse в дефолтной цепочке** — geo-мертва с IP бокса (403 RegionError), каждый чанк съедал таймаут. Убрана из дефолта до расконсервации P195.
+- **Деплой вслепую (нитка Б)** — SSH перестал возвращать вывод, соблазн «pull+restart без проверки». Отклонено: прод оставлен нетронутым (соседняя сессия докатила сама), заведено P196. **Не повторять.**
+- **Ручные `?v=`-даты в шаблонах** — часть протухла. Заменены автоматической версией + тест-сторож; руками не поднимать.
+- **`_version.__version__` как кэш-бастер** — отвергнуто: `1.5.0` застыла (решение владельца 26.07). Взят git-sha на старте.
+- Нитка А (из чужого handoff): `opencode run` виснет — только `serve`; always-on `serve` лёг OOM'ом — только oneshot; `RLIMIT_AS` рубит bun — только RSS-монитор; `Popen` serve из prefork-воркера умирает молча — только systemd-oneshot; muse в дефолте — geo-мертва (P195).
+
+---
 
 ## Открытые вопросы для пользователя
 
-- **P195 (Muse):** донорский VPS под `ssh -D` (~200–400 ₽/мес) / платный прокси / отказ от Muse (цепочка покрывает)?
-- **P194 (безтекстовые, 88 шт.):** добор медиа по `lip` или постоянный пропуск?
-- **P177:** проверить `DEEPSEEK_API_KEY` в KАРМАН-выдаче воркера (`no_api_key`, не 402)?
+- **P196:** тишина SSH — всплеск или чистить висящие сессии?
+- **P195:** донорский VPS/proxy для Muse или остаться на longcat?
+- **P177:** `DEEPSEEK_API_KEY` в выдаче воркера — `no_api_key`, не 402 (замер соседней сессии)?
+- **P194:** добор медиа (88 шт.) или постоянный пропуск?
+- **P124:** засев сёл 41 району? **bal/kukmor:** переименование (необратимо)?
+
+---
 
 ## Не забыть (low-priority)
 
-- Ранги мест batch8 (TICKLER 13.10, просрочен) и batch9 (15.10).
-- D-096 к 16.10 (`immutable` + таблица путей).
-- Дистилляция из чата (`/distill`), верх DISTILL_LOG — 06.10.
+- Остаток D-096 с датой **30.10**: `/static/broadcast/*`, `/static/ad_offers/*` под `immutable` + Ф1 (`GET /postulates` без ключа).
+- `/tmp` бокса: `sites-111-*`, `debts_*`, `pin_repost.py`, `group_snap.py` (сгорят с ребутом).
+- Локальный `pytest`: только при коде.
 
 ---
 
