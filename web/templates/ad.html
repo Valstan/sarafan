@@ -728,9 +728,9 @@
 {% endblock %}
 
 {% block extra_scripts %}
-<script src="/static/vendor/chartjs/chart.umd.min.js"></script>
-<script src="/static/js/ad_cabinet.js?v=20260906_schedhash"></script>
-<script src="/static/js/ad_crm.js?v=20260902_cabinet_row2"></script>
+<script src="/static/vendor/chartjs/chart.umd.min.js?v={{ STATIC_VERSION }}"></script>
+<script src="/static/js/ad_cabinet.js?v={{ STATIC_VERSION }}"></script>
+<script src="/static/js/ad_crm.js?v={{ STATIC_VERSION }}"></script>
 <script>
 // Единый рекламный кабинет: логика вкладок (С1).
 const AD_HASH_TABS = {

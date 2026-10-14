@@ -6,8 +6,8 @@
     <title>Радар</title>
     <meta name="theme-color" content="#0d6efd">
     <link rel="manifest" href="{{ manifest_url | default('/radar/manifest.webmanifest') }}">
-    <link rel="icon" href="/static/radar/icon.svg" type="image/svg+xml">
-    <link rel="apple-touch-icon" href="/static/radar/icon-192.png">
+    <link rel="icon" href="/static/radar/icon.svg?v={{ STATIC_VERSION }}" type="image/svg+xml">
+    <link rel="apple-touch-icon" href="/static/radar/icon-192.png?v={{ STATIC_VERSION }}">
     <script>
         (function () {
             try {
@@ -16,8 +16,8 @@
             } catch (e) { /* localStorage недоступен — остаёмся в light */ }
         })();
     </script>
-    <link href="/static/vendor/bootstrap/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.css">
+    <link href="/static/vendor/bootstrap/bootstrap.min.css?v={{ STATIC_VERSION }}" rel="stylesheet">
+    <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.css?v={{ STATIC_VERSION }}">
     <style>
         .radar-card img.radar-photo { max-height: 360px; object-fit: cover; width: 100%; border-radius: .375rem; }
         .radar-text { white-space: pre-wrap; word-break: break-word; }
@@ -257,7 +257,7 @@
             ).catch(() => {});
         }
     </script>
-    <script src="/static/vendor/bootstrap/bootstrap.bundle.min.js"></script>
-    <script src="/static/js/radar.js"></script>
+    <script src="/static/vendor/bootstrap/bootstrap.bundle.min.js?v={{ STATIC_VERSION }}"></script>
+    <script src="/static/js/radar.js?v={{ STATIC_VERSION }}"></script>
 </body>
 </html>

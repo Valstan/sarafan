@@ -4,11 +4,11 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>VK Publisher - SETKA</title>
-    <link href="/static/vendor/bootstrap/bootstrap.min.css" rel="stylesheet">
-    <link href="/static/vendor/bootstrap-icons/bootstrap-icons.css" rel="stylesheet">
+    <link href="/static/vendor/bootstrap/bootstrap.min.css?v={{ STATIC_VERSION }}" rel="stylesheet">
+    <link href="/static/vendor/bootstrap-icons/bootstrap-icons.css?v={{ STATIC_VERSION }}" rel="stylesheet">
     <!-- Quill Editor -->
-    <link href="/static/vendor/quill/quill.snow.css" rel="stylesheet">
-    <script src="/static/vendor/quill/quill.js"></script>
+    <link href="/static/vendor/quill/quill.snow.css?v={{ STATIC_VERSION }}" rel="stylesheet">
+    <script src="/static/vendor/quill/quill.js?v={{ STATIC_VERSION }}"></script>
     <style>
         .publisher-card {
             transition: transform 0.2s;
@@ -216,7 +216,7 @@
         </div>
     </div>
 
-    <script src="/static/vendor/bootstrap/bootstrap.bundle.min.js"></script>
+    <script src="/static/vendor/bootstrap/bootstrap.bundle.min.js?v={{ STATIC_VERSION }}"></script>
     <script>
         // Global variables
         let availableGroups = [];
