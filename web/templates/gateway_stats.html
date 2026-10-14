@@ -92,6 +92,6 @@
 {% endblock %}
 
 {% block extra_scripts %}
-<script src="/static/vendor/chartjs/chart.umd.min.js"></script>
-<script src="/static/js/gateway_stats.js?v=20260626"></script>
+<script src="/static/vendor/chartjs/chart.umd.min.js?v={{ STATIC_VERSION }}"></script>
+<script src="/static/js/gateway_stats.js?v={{ STATIC_VERSION }}"></script>
 {% endblock %}

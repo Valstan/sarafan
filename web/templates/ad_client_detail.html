@@ -24,7 +24,7 @@
 {% endblock %}
 
 {% block extra_scripts %}
-<script src="/static/js/ad_crm.js?v=20260808_copytext"></script>
+<script src="/static/js/ad_crm.js?v={{ STATIC_VERSION }}"></script>
 <script>
 document.addEventListener('DOMContentLoaded', () => {
     const clientId = parseInt('{{ client_id }}');

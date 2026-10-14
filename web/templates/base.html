@@ -17,11 +17,11 @@
     </script>
 
     <!-- Bootstrap 5 CSS -->
-    <link href="/static/vendor/bootstrap/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/vendor/bootstrap/bootstrap.min.css?v={{ STATIC_VERSION }}" rel="stylesheet">
     <!-- Bootstrap Icons -->
-    <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.css">
+    <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.css?v={{ STATIC_VERSION }}">
     <!-- Custom CSS -->
-    <link rel="stylesheet" href="/static/css/style.css">
+    <link rel="stylesheet" href="/static/css/style.css?v={{ STATIC_VERSION }}">
     <!-- Quill Editor CSS (optional, load only when needed) -->
     {% block editor_css %}{% endblock %}
     
@@ -196,7 +196,7 @@
     </script>
 
     <!-- Bootstrap 5 JS -->
-    <script src="/static/vendor/bootstrap/bootstrap.bundle.min.js"></script>
+    <script src="/static/vendor/bootstrap/bootstrap.bundle.min.js?v={{ STATIC_VERSION }}"></script>
 
     <!-- Место под закреплённый navbar: меряем, а не угадываем.
          Высота навбара зависит от ширины окна, подставленного шрифта и того,
@@ -234,11 +234,11 @@
         })();
     </script>
     <!-- API Client -->
-    <script src="/static/js/api.js?v=20260905_pay"></script>
+    <script src="/static/js/api.js?v={{ STATIC_VERSION }}"></script>
     <!-- Универсальный tiered-поиск (pool #035) — общий для всех полей поиска -->
-    <script src="/static/js/search_match.js?v=20260610"></script>
+    <script src="/static/js/search_match.js?v={{ STATIC_VERSION }}"></script>
     <!-- Main JS -->
-    <script src="/static/js/main.js"></script>
+    <script src="/static/js/main.js?v={{ STATIC_VERSION }}"></script>
     <!-- Quill Editor JS (optional, load only when needed) -->
     {% block editor_js %}{% endblock %}
     

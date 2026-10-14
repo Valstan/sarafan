@@ -13,8 +13,8 @@
             } catch (e) { /* localStorage недоступен — остаёмся в light */ }
         })();
     </script>
-    <link href="/static/vendor/bootstrap/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.css">
+    <link href="/static/vendor/bootstrap/bootstrap.min.css?v={{ STATIC_VERSION }}" rel="stylesheet">
+    <link rel="stylesheet" href="/static/vendor/bootstrap-icons/bootstrap-icons.css?v={{ STATIC_VERSION }}">
     <style>
         .cab-text { white-space: pre-wrap; word-break: break-word; }
         .cab-photo-thumb { width: 72px; height: 72px; object-fit: cover; border-radius: .375rem; }
@@ -236,6 +236,6 @@
         beacon('visit', '', location.pathname);
     })();
     </script>
-    <script src="/static/js/advertiser_cabinet.js?v=20260902_number"></script>
+    <script src="/static/js/advertiser_cabinet.js?v={{ STATIC_VERSION }}"></script>
 </body>
 </html>

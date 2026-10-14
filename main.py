@@ -69,7 +69,7 @@ from web.api import (  # noqa: E402
 )
 from web.api import templates as templates_api  # noqa: E402
 from web.api import theme_quotas, token_management, vk_monitoring  # noqa: E402
-from web.static_files import RevalidatingStaticFiles  # noqa: E402
+from web.static_files import STATIC_VERSION, RevalidatingStaticFiles  # noqa: E402
 
 # Setup logging
 #
@@ -174,6 +174,10 @@ templates = Jinja2Templates(directory=str(BASE_DIR / "web" / "templates"))
 # не отдаётся: учёт версий в проекте не ведётся, и подвал их не показывает
 # (решение владельца 2026-07-26). Глобал убран, чтобы не воскрешать «1.5.0»,
 # которое давно ничего не значит.
+# STATIC_VERSION — другое: не «версия продукта», а метка деплоя (git-sha) для
+# кэш-бастера `?v=` статики. Считается сама, руками не поднимается (идея #250).
+templates.env.globals["STATIC_VERSION"] = STATIC_VERSION
+logger.info("Static version for cache-busting: %s", STATIC_VERSION)
 
 # RevalidatingStaticFiles, а не StaticFiles: без Cache-Control браузер вправе
 # показать копию из кэша не спрашивая сервер, и после деплоя выдаёт новый HTML
@@ -266,22 +270,24 @@ def _radar_template_ctx(request: Request) -> dict:
     }
 
 
-# Иконки PWA — статика, одна на оба манифеста.
+# Иконки PWA — статика, одна на оба манифеста. Адреса версионированы тем же
+# STATIC_VERSION, что и шаблоны: иначе перерисованная иконка застревает под
+# nginx-`immutable` на 30 дней (идея пула #250).
 _RADAR_MANIFEST_ICONS = [
     {
-        "src": "/static/radar/icon-192.png",
+        "src": f"/static/radar/icon-192.png?v={STATIC_VERSION}",
         "sizes": "192x192",
         "type": "image/png",
         "purpose": "any maskable",
     },
     {
-        "src": "/static/radar/icon-512.png",
+        "src": f"/static/radar/icon-512.png?v={STATIC_VERSION}",
         "sizes": "512x512",
         "type": "image/png",
         "purpose": "any maskable",
     },
     {
-        "src": "/static/radar/icon.svg",
+        "src": f"/static/radar/icon.svg?v={STATIC_VERSION}",
         "sizes": "any",
         "type": "image/svg+xml",
         "purpose": "any maskable",
