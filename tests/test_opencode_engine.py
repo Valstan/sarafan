@@ -342,6 +342,45 @@ def test_harness_server_starts_rss_monitor(monkeypatch):
     assert child.terminated is True
 
 
+def test_harness_server_systemd_oneshot(monkeypatch):
+    """Автоматический путь: systemctl start/stop вместо Popen."""
+    from modules import opencode_engine
+
+    monkeypatch.setattr(opencode_engine, "server_alive", lambda: False)
+    monkeypatch.setattr(opencode_engine, "_wait_port", lambda *a, **kw: True)
+    monkeypatch.setenv("OPENCODE_SYSTEMD_RUN", "1")
+
+    calls = []
+
+    def fake_systemctl(action, timeout=30.0):  # noqa: ARG002
+        calls.append(action)
+        return True
+
+    monkeypatch.setattr(opencode_engine, "_systemctl_run", fake_systemctl)
+
+    def boom(*a, **kw):  # pragma: no cover — Popen не должен вызываться
+        raise AssertionError("Popen вызван в systemd-режиме")
+
+    monkeypatch.setattr(opencode_engine.subprocess, "Popen", boom)
+    with opencode_engine.harness_server() as alive:
+        assert alive is True
+    assert calls == ["start", "stop"]
+
+
+def test_harness_server_systemd_start_failure(monkeypatch):
+    """systemctl start не прошёл — yield False, stop не зовём."""
+    from modules import opencode_engine
+
+    monkeypatch.setattr(opencode_engine, "server_alive", lambda: False)
+    monkeypatch.setenv("OPENCODE_SYSTEMD_RUN", "1")
+    monkeypatch.setattr(
+        opencode_engine, "_systemctl_run", lambda action, timeout=30.0: action == "stop"
+    )
+
+    with opencode_engine.harness_server() as alive:
+        assert alive is False
+
+
 def test_child_rss_mb_reads_proc():
     import os
 
