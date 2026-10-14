@@ -52,7 +52,7 @@ from config.opencode import (
     get_base_url,
     get_model_chain,
     get_serve_max_lifetime,
-    get_serve_rlimit_as,
+    get_serve_rss_kill_mb,
     get_server_password,
     get_server_username,
     get_timeout,
@@ -89,18 +89,17 @@ def _wait_port(host: str, port: int, timeout: float = 45.0) -> bool:
     return False
 
 
-def _rlimit_as() -> None:
-    """preexec_fn: жёсткий потолок адресного пространства ребёнка.
-
-    OOM-аудит 14.10 (dmesg): ядро убивало opencode при RSS 507–619 МБ —
-    сессии и SSE-буферы копятся на длинных батчах. Лимит 512 МБ: упрётся —
-    ребёнок падает, следующий чанк поднимет свежего (fail-open сохраняется,
-    бокс не топит). Вызывается в ребёнке ДО exec — наследования нет.
-    """
-    import resource
-
-    limit = get_serve_rlimit_as()
-    resource.setrlimit(resource.RLIMIT_AS, (limit, limit))
+def _child_rss_mb(pid: int) -> Optional[float]:
+    """RSS ребёнка в МБ из /proc; None — процесса уже нет."""
+    try:
+        with open(f"/proc/{pid}/status", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    kb = int(line.split()[1])
+                    return kb / 1024.0
+    except OSError:
+        return None
+    return None
 
 
 @contextmanager
@@ -136,7 +135,6 @@ def harness_server() -> Iterator[bool]:
         stdout=stderr_target,
         stderr=stderr_target,
         start_new_session=True,
-        preexec_fn=_rlimit_as,
     )
     # Страховочное убийство: длинный батч идёт часами; если ребёнок жив, но
     # разрастается — убиваем по таймеру, следующий чанк поднимет свежего.
@@ -146,9 +144,33 @@ def harness_server() -> Iterator[bool]:
         killer = threading.Timer(max_lifetime, child.kill)
         killer.daemon = True
         killer.start()
+    # RSS-монитор (OOM-аудит 14.10): ядро убивало opencode при RSS 507–619 МБ.
+    # RLIMIT_AS не подходит (bun резервирует ~74 ГБ VM на старте) — вместо
+    # лимита в момент exec следим за RSS в процессе: превысил потолок —
+    # убит, следующий чанк поднимет свежего.
+    rss_kill_mb = get_serve_rss_kill_mb()
+    stop_monitor = threading.Event()
+
+    def _watch_rss() -> None:
+        while not stop_monitor.wait(10):
+            if child.poll() is not None:
+                return
+            rss = _child_rss_mb(child.pid)
+            if rss is not None and rss > rss_kill_mb:
+                logger.warning(
+                    "opencode-engine: ребёнок serve RSS %.0f МБ > порога %.0f — убиваем",
+                    rss,
+                    rss_kill_mb,
+                )
+                child.kill()
+                return
+
+    monitor = threading.Thread(target=_watch_rss, daemon=True)
+    monitor.start()
     try:
         yield _wait_port(host, port)
     finally:
+        stop_monitor.set()
         if killer is not None:
             killer.cancel()
         if stderr_target is not subprocess.DEVNULL:
