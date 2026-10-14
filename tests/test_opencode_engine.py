@@ -291,3 +291,44 @@ def test_harness_server_terminates_on_exception(monkeypatch):
         with opencode_engine.harness_server():
             raise RuntimeError("прогон упал")
     assert child.terminated is True
+
+
+def test_classify_posts_wraps_harness_for_opencode_engine(monkeypatch):
+    """Батч под opencode идёт внутри harness_server — воркеру не надо ничего знать."""
+    from modules import opencode_engine
+    from modules.classifier import headless
+
+    posts = [{"lip": "-1_1", "region_code": "mi", "text": "тест"}]
+
+    class _Ctx:
+        entered = False
+
+        def __enter__(self):
+            type(self).entered = True
+            return True
+
+        def __exit__(self, *a):
+            return False
+
+    monkeypatch.setattr(opencode_engine, "harness_server", lambda: _Ctx())
+    verdict_json = (
+        '{"verdicts": [{"lip": "-1_1", "theme": "новости", '
+        '"action": "publish", "confidence": 90}]}'
+    )
+    monkeypatch.setattr(
+        opencode_engine,
+        "chat",
+        lambda **kw: {
+            "ok": True,
+            "content": verdict_json,
+            "model": "opencode/x",
+            "usage": {"total_tokens": 10, "prompt_tokens": 6, "completion_tokens": 4},
+        },
+    )
+    monkeypatch.setattr(headless, "engine_enabled", lambda: True)
+
+    run = headless.classify_posts(posts, postulates="p")
+    assert _Ctx.entered is True
+    assert len(run["verdicts"]) == 1
+    assert run["failures"] == []
+    assert run["tokens"] == 10
