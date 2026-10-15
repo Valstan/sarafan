@@ -19,6 +19,9 @@ Env vars:
                                  # Когда бокс получит нужный geo (прокси/донор),
                                  # muse автоматически встаёт первой — порядок
                                  # цепочки уже под этим написан.
+  OPENCODE_SPILL_GLOB            # маска temp-мусора opencode; дефолт .bcdf*.so
+  OPENCODE_SPILL_MAX_AGE         # возраст, после которого свипер удаляет
+                                 # найденный мусор, сек; дефолт 1800 (P197)
 """
 
 from __future__ import annotations
@@ -45,6 +48,17 @@ SERVE_RSS_KILL_MB = 450
 # идти часами; если ребёнок жив, но разрастается — убиваем по таймеру,
 # следующий чанк поднимет свежего с чистыми сессиями.
 SERVE_MAX_LIFETIME_SEC = 15 * 60
+
+# Гигиена temp-мусора (P197, инцидент 15.10). opencode при каждом запуске
+# распаковывает в temp нативный модуль `.bcdf*-00000000.so` (~5.5 МБ) и не
+# убирает его за собой; в цикле отказов волн это забило /tmp прода (552 файла
+# ≈ 2.9 ГБ, диск 100 %, asyncpg.DiskFullError на submit). Ступеней две: свои
+# Popen-запуски получают приватный TMPDIR (мусор уходит вместе с каталогом),
+# остальные пути (systemd-oneshot, ручные прогоны) подчищает свипер. Моложе
+# порога не трогаем: живой serve (потолок жизни — SERVE_MAX_LIFETIME_SEC)
+# может ещё держать свой распакованный модуль.
+SPILL_GLOB = ".bcdf*.so"
+SPILL_MAX_AGE_SEC = 30 * 60
 
 
 def engine_enabled() -> bool:
@@ -100,3 +114,16 @@ def get_serve_max_lifetime() -> float:
         )
     except ValueError:
         return SERVE_MAX_LIFETIME_SEC
+
+
+def get_spill_glob() -> str:
+    """Маска temp-мусора opencode (P197)."""
+    return (os.getenv("OPENCODE_SPILL_GLOB") or "").strip() or SPILL_GLOB
+
+
+def get_spill_max_age_sec() -> float:
+    """Возраст, после которого temp-мусор opencode удаляется, сек (P197)."""
+    try:
+        return max(60.0, float(os.getenv("OPENCODE_SPILL_MAX_AGE", str(SPILL_MAX_AGE_SEC))))
+    except ValueError:
+        return float(SPILL_MAX_AGE_SEC)
