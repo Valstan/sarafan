@@ -44,10 +44,26 @@ import time
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
+from config.opencode import engine_enabled
 from modules.classifier.schema import ClassifierVerdict, parse_verdict_loose
-from modules.deepseek_client import chat
+from modules.deepseek_client import chat as _deepseek_chat
 
 logger = logging.getLogger(__name__)
+
+
+def chat(**kwargs: Any) -> Dict[str, Any]:
+    """Вызов модели текущим движком. ``CLASSIFIER_ENGINE=opencode`` → харнесс.
+
+    Переключатель стоит здесь, а не в ``classify_posts``/тасках: один рубеж на
+    все пути классификации (фоновая таска, prepublish внутри волны, кнопка в
+    UI), а DeepSeek остаётся дефолтом — откат пилота без деплоя кода.
+    """
+    if engine_enabled():
+        from modules.opencode_engine import chat as _opencode_chat
+
+        return _opencode_chat(**kwargs)
+    return _deepseek_chat(**kwargs)
+
 
 # Сколько постов уходит в один вызов. Больше — дешевле (постулаты не
 # переплачиваются), но длиннее ответ и выше риск, что модель начнёт экономить на
@@ -347,15 +363,28 @@ def classify_posts(
     tokens = 0
     chunks = chunk_posts(with_text, chunk_size)
 
-    for chunk in chunks:
-        res = classify_chunk(chunk, postulates=postulates, model=model)
-        usage = res.get("usage") or {}
-        tokens += int(usage.get("total_tokens") or 0)
-        if not res.get("ok"):
-            failures.append(str(res.get("reason")))
-            continue
-        all_verdicts.extend(res["verdicts"])
-        problems.extend(res["problems"])
+    def _drain() -> None:
+        nonlocal tokens
+        for chunk in chunks:
+            res = classify_chunk(chunk, postulates=postulates, model=model)
+            usage = res.get("usage") or {}
+            tokens += int(usage.get("total_tokens") or 0)
+            if not res.get("ok"):
+                failures.append(str(res.get("reason")))
+                continue
+            all_verdicts.extend(res["verdicts"])
+            problems.extend(res["problems"])
+
+    if engine_enabled():
+        # Serve живёт ровно на батч (oneshot): воркер/таска его не носит
+        # постоянно — боксу 1.5 ГБ (аудит 14.10). Порт уже занят живым
+        # serve — переиспользуем; свободен — ребёнок, гасится в finally.
+        from modules.opencode_engine import harness_server
+
+        with harness_server():
+            _drain()
+    else:
+        _drain()
 
     return {
         "verdicts": all_verdicts,

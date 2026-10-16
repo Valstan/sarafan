@@ -41,18 +41,65 @@
 Заголовок ставится и на ``200``, и на ``304``: ``Cache-Control`` входит в набор,
 который Starlette переносит в ``NotModifiedResponse``, поэтому директива не
 теряется при перепроверке.
+
+Поправка 2026-10-14 (идея пула #250, D-096): «версии только когда человек
+вспомнил» выше — про **ручные** метки, и они тем же коммитом убраны: все
+``/static/``-ссылки шаблонов несут ``?v={{ STATIC_VERSION }}``, а версия
+считается сама (``get_static_version``). Два слоя теперь честны каждый:
+nginx отдаёт ``immutable`` по адресу, который меняется на каждом деплое,
+а этот mount отдаёт ``no-cache`` для прямого доступа в обход nginx
+(локальная разработка, ``:8000`` напрямую). За remnant'ы — загружаемые
+файлы ``/static/broadcast/`` и ``/static/ad_offers/`` (имена те же,
+содержимое меняется вне деплоев) — отвечает дата в отчёте D-096 16.10,
+а не этот модуль.
 """
 
 from __future__ import annotations
 
 import os
+import subprocess
 from typing import Any
 
 from starlette.responses import Response
 from starlette.staticfiles import StaticFiles
 from starlette.types import Scope
 
-__all__ = ["RevalidatingStaticFiles"]
+__all__ = ["RevalidatingStaticFiles", "STATIC_VERSION", "get_static_version"]
+
+
+def get_static_version() -> str:
+    """Версия статики для кэш-бастера ``?v=`` — из самого пакета, не руками.
+
+    Порядок: env ``SETKA_STATIC_VERSION`` → короткий sha HEAD рабочего
+    дерева → ``"dev"``. Ручные метки вида ``?v=20260831`` в шаблонах
+    запрещены: константу, которую надо не забыть поднять, однажды не
+    поднимают (замер — протухшие ``?v=20260522_4b`` и ``api.js?v=20260808``
+    при изменённом файле). Эта функция делает адрес новым на каждом
+    деплое сама — тогда ``immutable`` на nginx честен: по адресу навсегда
+    те же байты и те же заголовки (идея пула #250).
+    """
+    forced = os.environ.get("SETKA_STATIC_VERSION", "").strip()
+    if forced:
+        return forced
+    try:
+        here = os.path.dirname(os.path.abspath(__file__))
+        sha = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=here,
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if sha.returncode == 0 and sha.stdout.strip():
+            return sha.stdout.strip()
+    except Exception:
+        pass
+    return "dev"
+
+
+#: Посчитан один раз на старте процесса — все адреса статики этого
+#: деплоя одинаковы, следующий деплой даст другой sha и другие адреса.
+STATIC_VERSION = get_static_version()
 
 
 class RevalidatingStaticFiles(StaticFiles):
