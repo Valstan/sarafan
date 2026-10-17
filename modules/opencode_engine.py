@@ -37,8 +37,10 @@ import base64
 import json
 import logging
 import os
+import shutil
 import socket
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -55,6 +57,8 @@ from config.opencode import (
     get_serve_rss_kill_mb,
     get_server_password,
     get_server_username,
+    get_spill_glob,
+    get_spill_max_age_sec,
     get_timeout,
 )
 
@@ -174,13 +178,25 @@ def harness_server() -> Iterator[bool]:
     # stderr туда; иначе тишина (прод — шум не нужен).
     serve_log = os.environ.get("OPENCODE_SERVE_LOG", "").strip()
     stderr_target: Any = open(serve_log, "ab") if serve_log else subprocess.DEVNULL  # noqa: SIM115
-    child = subprocess.Popen(
-        [binary, "serve", "--port", str(port), "--hostname", host],
-        env={k: v for k, v in os.environ.items() if v},
-        stdout=stderr_target,
-        stderr=stderr_target,
-        start_new_session=True,
-    )
+    # Приватный TMPDIR на запуск (P197): opencode распаковывает в temp нативный
+    # модуль `.bcdf*.so` (~5.5 МБ) и не убирает его за собой — в общем /tmp это
+    # копится по файлу на запуск (инцидент 15.10: 552 шт. ≈ 2.9 ГБ, диск 100 %).
+    # Свой каталог уносит мусор этого запуска вместе с собой (rmtree в finally);
+    # если opencode пишет мимо TMPDIR — подчистит свипер sweep_opencode_spill.
+    child_tmp = tempfile.mkdtemp(prefix="setka-opencode-")
+    child_env = {k: v for k, v in os.environ.items() if v}
+    child_env["TMPDIR"] = child_tmp
+    try:
+        child = subprocess.Popen(
+            [binary, "serve", "--port", str(port), "--hostname", host],
+            env=child_env,
+            stdout=stderr_target,
+            stderr=stderr_target,
+            start_new_session=True,
+        )
+    except BaseException:
+        shutil.rmtree(child_tmp, ignore_errors=True)
+        raise
     # Страховочное убийство: длинный батч идёт часами; если ребёнок жив, но
     # разрастается — убиваем по таймеру, следующий чанк поднимет свежего.
     max_lifetime = get_serve_max_lifetime()
@@ -225,6 +241,74 @@ def harness_server() -> Iterator[bool]:
             child.wait(timeout=10)
         except subprocess.TimeoutExpired:
             child.kill()
+        shutil.rmtree(child_tmp, ignore_errors=True)
+
+
+def sweep_opencode_spill(
+    directory: Optional[str] = None,
+    *,
+    pattern: Optional[str] = None,
+    max_age_sec: Optional[float] = None,
+    now: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Убрать temp-мусор opencode старше возраста (страховка P197).
+
+    opencode распаковывает в temp нативный модуль (``.bcdf*.so``, ~5.5 МБ) при
+    каждом запуске и не удаляет его; в цикле отказов волн это заполнило ``/tmp``
+    прода (15.10: 552 файла ≈ 2.9 ГБ, диск 100 %, ``asyncpg.DiskFullError``).
+    Приватный ``TMPDIR`` (Popen-путь в ``harness_server``) убирает мусор своих
+    запусков сразу; здесь — вторая ступень для путей, где наш код каталог не
+    выбирает (systemd-oneshot-юнит, ручные прогоны).
+
+    Удаляем только старше ``max_age_sec``: живой serve (потолок жизни —
+    ``SERVE_MAX_LIFETIME_SEC``) может ещё держать распакованный модуль. Заодно
+    подчищаются каталоги прерванных запусков ``setka-opencode-*``. Никогда не
+    бросает: свипер, падающий на каждом тике, — это молчащий свипер.
+    """
+    base = Path(directory) if directory else Path(tempfile.gettempdir())
+    mask = pattern or get_spill_glob()
+    age = max_age_sec if max_age_sec is not None else get_spill_max_age_sec()
+    moment = time.time() if now is None else now
+    stats: Dict[str, Any] = {
+        "dir": str(base),
+        "deleted": 0,
+        "freed_bytes": 0,
+        "removed_dirs": 0,
+        "failed": 0,
+    }
+    try:
+        entries = sorted(set(base.glob(mask)) | set(base.glob("setka-opencode-*")))
+    except OSError as e:  # каталога нет / нет прав на чтение
+        stats["error"] = f"{type(e).__name__}: {e}"
+        return stats
+
+    for path in entries:
+        try:
+            if not path.exists() or moment - path.stat().st_mtime <= age:
+                continue
+            if path.is_dir():
+                shutil.rmtree(path)
+                stats["removed_dirs"] += 1
+            elif path.is_file():
+                size = path.stat().st_size
+                path.unlink()
+                stats["deleted"] += 1
+                stats["freed_bytes"] += size
+        except OSError as e:
+            stats["failed"] += 1
+            logger.warning("opencode-engine: temp-мусор %s не убран: %s", path, e)
+
+    if stats["deleted"] or stats["removed_dirs"] or stats["failed"]:
+        logger.info(
+            "opencode-engine: temp-мусор opencode в %s: файлов %d (%.1f МБ),"
+            " каталогов %d, ошибок %d",
+            base,
+            stats["deleted"],
+            stats["freed_bytes"] / 1024 / 1024,
+            stats["removed_dirs"],
+            stats["failed"],
+        )
+    return stats
 
 
 # Причины, при которых имеет смысл пробовать следующую модель цепочки.

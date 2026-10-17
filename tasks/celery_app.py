@@ -1103,6 +1103,27 @@ def ad_photo_retention():
         return {"success": False, "timestamp": datetime.now().isoformat(), "error": str(e)}
 
 
+@app.task(name="tasks.celery_app.sweep_opencode_tmp")
+def sweep_opencode_tmp():
+    """Свипер temp-мусора opencode (P197, инцидент 15.10).
+
+    opencode при каждом запуске распаковывает в temp нативный модуль
+    (``.bcdf*.so``, ~5.5 МБ) и не убирает его; в цикле отказов волн это
+    заполнило /tmp прода (552 файла ≈ 2.9 ГБ, диск 100 %,
+    ``asyncpg.DiskFullError`` на submit). Свои Popen-запуски движка мусорят в
+    приватный TMPDIR и убирают за собой сами; эта таска — вторая ступень для
+    путей, где каталог выбираем не мы (systemd-oneshot, ручные прогоны).
+    """
+    try:
+        from modules.opencode_engine import sweep_opencode_spill
+
+        result = sweep_opencode_spill()
+        return {"success": True, "timestamp": datetime.now().isoformat(), **result}
+    except Exception as e:
+        logger.error(f"sweep_opencode_tmp failed: {e}", exc_info=True)
+        return {"success": False, "timestamp": datetime.now().isoformat(), "error": str(e)}
+
+
 @app.task(name="tasks.celery_app.check_ad_repost_heartbeat")
 def check_ad_repost_heartbeat():
     """Watchdog планировщика предложки: алёрт, если просроченные строки не взяты."""
@@ -2831,6 +2852,18 @@ app.conf.beat_schedule = {
         "task": "tasks.broadcast_tasks.check_broadcast_heartbeat",
         "schedule": crontab(minute=22),
         "options": {"expires": 1800, "catchup": False},
+    },
+    # Гигиена temp-мусора opencode (P197, инцидент 15.10): при каждом запуске
+    # serve распаковывает в temp нативный модуль `.bcdf*.so` (~5.5 МБ) и не
+    # убирает его; в цикле отказов волн это забило /tmp прода 552 файлами ≈
+    # 2.9 ГБ (диск 100 %, asyncpg.DiskFullError на submit). Свои Popen-запуски
+    # движка мусорят в приватный TMPDIR и убирают за собой сами; таска —
+    # вторая ступень для остальных путей запуска. Минуты :02/:32 свободны от
+    # тяжёлых волн (сближать их обратно не нужно — расписание есть гигиена).
+    "sweep-opencode-tmp": {
+        "task": "tasks.celery_app.sweep_opencode_tmp",
+        "schedule": crontab(minute="2,32"),
+        "options": {"expires": 1500, "catchup": False},
     },
 }
 

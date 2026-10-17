@@ -446,3 +446,100 @@ def test_classify_posts_wraps_harness_for_opencode_engine(monkeypatch):
     assert len(run["verdicts"]) == 1
     assert run["failures"] == []
     assert run["tokens"] == 10
+
+
+def test_sweep_opencode_spill_removes_only_old_matching(tmp_path):
+    """P197: старый `.bcdf*.so` убран, свежий и посторонние файлы — нет."""
+    import os
+    import time
+
+    from modules.opencode_engine import sweep_opencode_spill
+
+    old = tmp_path / ".bcdf1234abcd-00000000.so"
+    old.write_bytes(b"x" * 1024)
+    fresh = tmp_path / ".bcdf5678efgh-00000000.so"
+    fresh.write_bytes(b"y" * 1024)
+    other = tmp_path / "keep.txt"
+    other.write_bytes(b"z")
+    now = time.time()
+    os.utime(old, (now - 3600, now - 3600))
+    os.utime(other, (now - 3600, now - 3600))
+
+    stats = sweep_opencode_spill(str(tmp_path), max_age_sec=1800, now=now)
+
+    assert not old.exists()
+    assert fresh.exists()
+    assert other.exists()
+    assert stats["deleted"] == 1
+    assert stats["freed_bytes"] == 1024
+    assert stats["failed"] == 0
+
+
+def test_sweep_opencode_spill_removes_stale_run_dir(tmp_path):
+    """Каталог запуска, прерванного до finally, не живёт вечно."""
+    import os
+    import time
+
+    from modules.opencode_engine import sweep_opencode_spill
+
+    stale = tmp_path / "setka-opencode-stale"
+    stale.mkdir()
+    (stale / ".bcdf0000-00000000.so").write_bytes(b"x" * 10)
+    live = tmp_path / "setka-opencode-live"
+    live.mkdir()
+    now = time.time()
+    os.utime(stale, (now - 3600, now - 3600))
+
+    stats = sweep_opencode_spill(str(tmp_path), max_age_sec=1800, now=now)
+
+    assert not stale.exists()
+    assert live.exists()
+    assert stats["removed_dirs"] == 1
+
+
+def test_sweep_opencode_spill_missing_dir_is_silent(tmp_path):
+    """Свипер не бросает: падающий на каждом тике свипер — молчащий свипер."""
+    from modules.opencode_engine import sweep_opencode_spill
+
+    stats = sweep_opencode_spill(str(tmp_path / "нет-каталога"))
+
+    assert stats["deleted"] == 0
+    assert stats["failed"] == 0
+
+
+def test_harness_server_popen_gets_private_tmpdir(monkeypatch):
+    """P197: ребёнок получает приватный TMPDIR, каталог исчезает после блока."""
+    import os
+    from pathlib import Path
+
+    from modules import opencode_engine
+
+    monkeypatch.setattr(opencode_engine, "server_alive", lambda: False)
+    monkeypatch.setattr(opencode_engine, "_wait_port", lambda *a, **kw: True)
+    monkeypatch.setenv("OPENCODE_BIN", "/tmp/fake-opencode")
+
+    seen = {}
+    child = _FakeChild()
+
+    def fake_popen(cmd, env=None, **kwargs):  # noqa: ARG001
+        seen["env"] = env
+        return child
+
+    monkeypatch.setattr(opencode_engine.subprocess, "Popen", fake_popen)
+    with opencode_engine.harness_server():
+        tmpdir = seen["env"]["TMPDIR"]
+        assert os.path.isdir(tmpdir)
+        # Мусор запуска оседает внутри приватного каталога...
+        Path(tmpdir, ".bcdf0000-00000000.so").write_bytes(b"x")
+    # ...и уходит вместе с ним.
+    assert not Path(tmpdir).exists()
+
+
+def test_beat_schedule_has_opencode_tmp_sweep():
+    """Страховка P197 зарегистрирована в beat — иначе она молчит."""
+    from tasks.celery_app import app
+
+    entry = app.conf.beat_schedule.get("sweep-opencode-tmp")
+    assert entry is not None
+    assert entry["task"] == "tasks.celery_app.sweep_opencode_tmp"
+    assert entry["options"]["catchup"] is False
