@@ -1,42 +1,42 @@
-"""Тесты движка OpenCode-классификации (пилот 14.10).
+"""Тесты движка OpenCode-классификации (v2, единый serve; 17.10).
 
-Мокаем транспорт ``urllib`` — сеть не нужна. Проверяем три вещи, которые
-дороже всего ломаются молча: сбор текста из потока json-lines, фолбэк по
-цепочке при geo-отказе (музейный RegionError) и граница «все модели молчат»
-(контракт ``engine_all_failed``, чтобы классификатор получил тихий отказ,
-а не исключение).
+Мокаем транспорт ``urllib`` — сеть не нужна. Проверяем то, что дороже всего
+ломается молча: сбор ответа из ленты сессии v2
+(create -> prompt -> wait -> message -> delete), фолбэк по цепочке при отказе
+модели, границу «все модели молчат» (контракт ``engine_all_failed`` — чтобы
+классификатор получил тихий отказ, а не исключение) и запрет инстанса-двойника
+(``OPENCODE_NO_SPAWN``): на боксе живёт один serve на два дела, и движок не
+имеет права поднимать второй.
 """
 
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pytest
 
 from modules import opencode_engine
-from modules.opencode_engine import chat, parse_stream
+from modules.opencode_engine import chat, parse_messages
 
 
 class _FakeResponse:
-    """Файл-подобный ответ urlopen: read() для JSON и итерация для потока."""
+    """Файл-подобный ответ urlopen: read() плюс контекстный менеджер."""
 
-    def __init__(self, status: int, payload: Any, lines: Optional[List[bytes]] = None):
+    def __init__(self, status: int, payload: Any = None):
         self._status = status
         self._payload = payload
-        self._lines = lines or []
 
     @property
     def status(self) -> int:
         return self._status
 
     def read(self) -> bytes:
+        if self._payload is None:
+            return b""
         if isinstance(self._payload, (dict, list)):
             return json.dumps(self._payload, ensure_ascii=False).encode("utf-8")
-        return str(self._payload or "").encode("utf-8")
-
-    def __iter__(self):
-        return iter(self._lines)
+        return str(self._payload).encode("utf-8")
 
     def __enter__(self) -> "_FakeResponse":
         return self
@@ -45,146 +45,280 @@ class _FakeResponse:
         return False
 
 
-def _stream_lines(*events: Dict[str, Any]) -> List[bytes]:
-    return [json.dumps(e, ensure_ascii=False).encode("utf-8") for e in events]
+# План маршрутов: (метод, суффикс пути, ответ либо исключение). Ответ берётся
+# один раз — повторный незапланированный запрос роняет тест громко.
+_Plan = List[Tuple[str, str, Any]]
 
 
-def _text_event(text: str) -> Dict[str, Any]:
+class _Transport:
+    """urlopen-маршрутизатор: помнит запросы (метод, URL, тело), отдаёт план."""
+
+    def __init__(self, plan: _Plan):
+        self.remaining = list(plan)
+        self.calls: List[Dict[str, Any]] = []
+
+    def __call__(self, req, timeout: Optional[float] = None):  # noqa: ARG002
+        path = req.full_url.split("?", 1)[0]
+        body = None
+        if getattr(req, "data", None):
+            try:
+                body = json.loads(req.data.decode("utf-8"))
+            except Exception:  # pragma: no cover — тела наших запросов всегда JSON
+                body = req.data
+        self.calls.append({"method": req.get_method(), "url": req.full_url, "body": body})
+        for i, (method, suffix, resp) in enumerate(self.remaining):
+            if method == req.get_method() and path.endswith(suffix):
+                self.remaining.pop(i)
+                if isinstance(resp, Exception):
+                    raise resp
+                return resp
+        raise AssertionError(f"незапланированный запрос: {req.get_method()} {req.full_url}")
+
+
+def _session_route(sid: str = "ses_t1") -> Tuple[str, str, _FakeResponse]:
+    return ("POST", "/api/session", _FakeResponse(200, {"data": {"id": sid}}))
+
+
+def _prompt_route() -> Tuple[str, str, _FakeResponse]:
+    return ("POST", "/prompt", _FakeResponse(200, {"data": {"id": "msg_t1"}}))
+
+
+def _wait_route() -> Tuple[str, str, _FakeResponse]:
+    return ("POST", "/wait", _FakeResponse(204, None))
+
+
+def _message_route(*messages: Dict[str, Any]) -> Tuple[str, str, _FakeResponse]:
+    return ("GET", "/message", _FakeResponse(200, {"data": list(messages)}))
+
+
+def _delete_route(sid: str) -> Tuple[str, str, _FakeResponse]:
+    return ("DELETE", f"/{sid}", _FakeResponse(204, None))
+
+
+def _assistant_msg(text: str, tokens: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     return {
-        "info": {"tokens": {"input": 10, "output": 5, "reasoning": 0}},
-        "parts": [{"type": "text", "text": text}],
+        "type": "assistant",
+        "agent": "build",
+        "model": {"id": "longcat-2.5-preview-free", "providerID": "opencode"},
+        "content": [
+            {"type": "reasoning", "text": "размышление"},
+            {"type": "text", "text": text},
+        ],
+        "tokens": tokens if tokens is not None else {"input": 100, "output": 20, "reasoning": 5},
+        "finish": "stop",
     }
 
 
-def _error_event(model: str, status_code: int, message: str) -> Dict[str, Any]:
-    return {
-        "info": {
-            "error": {
-                "name": "APIError",
-                "data": {"message": message, "statusCode": status_code},
-            }
-        },
-        "parts": [],
-    }
+def _idle_msg(outcome: str = "succeeded", error: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    msg: Dict[str, Any] = {"type": "idle", "outcome": outcome}
+    if error is not None:
+        msg["error"] = error
+    return msg
 
 
 @pytest.fixture
 def engine_on(monkeypatch):
     monkeypatch.setenv("CLASSIFIER_ENGINE", "opencode")
-    monkeypatch.setenv("OPENCODE_BASE_URL", "http://127.0.0.1:4099")
+    monkeypatch.setenv("OPENCODE_BASE_URL", "http://127.0.0.1:4999")
     monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "")
 
 
-def _patch_transport(monkeypatch, responses: List[_FakeResponse]) -> None:
-    """urlopen по очереди отдаёт подготовленные ответы."""
-    calls: List[_FakeResponse] = list(responses)
-
-    def fake_urlopen(req, timeout=None):  # noqa: ARG001
-        return calls.pop(0)
-
-    monkeypatch.setattr(opencode_engine.urllib.request, "urlopen", fake_urlopen)
+@pytest.fixture
+def spawn_allowed(monkeypatch):
+    """Спавн-пути живут только вне запрета OPENCODE_NO_SPAWN (прод)."""
+    monkeypatch.delenv("OPENCODE_NO_SPAWN", raising=False)
 
 
-def test_parse_stream_collects_text_and_usage():
-    text, usage, error = parse_stream([_text_event("первый "), _text_event("второй")])
-    assert text == "первый второй"
-    assert usage == {"input": 10, "output": 5, "reasoning": 0}
-    assert error is None
+def _use_transport(monkeypatch, plan: _Plan) -> _Transport:
+    transport = _Transport(plan)
+    monkeypatch.setattr(opencode_engine.urllib.request, "urlopen", transport)
+    return transport
 
 
-def test_normalize_content_unwraps_markdown_and_array():
-    """longcat отдаёт ```json + топ-level массив — движок приводит к контракту."""
-    from modules.opencode_engine import _normalize_content
-
-    assert json.loads(_normalize_content('```json\n[{"a": 1}]\n```')) == {"verdicts": [{"a": 1}]}
-    # Объект с нужным ключом проходит как есть.
-    raw = '{"verdicts": [{"a": 1}]}'
-    assert _normalize_content(raw) == raw
-    # Не-JSON не трогаем: пусть классификатор получит llm_unparseable.
-    assert _normalize_content(" boltox ") == " boltox "
-
-
-def test_normalize_usage_maps_serve_counters():
-    from modules.opencode_engine import _normalize_usage
-
-    usage = _normalize_usage({"input": 4254, "output": 181, "reasoning": 251, "total": 4435})
-    assert usage == {"total_tokens": 4435, "prompt_tokens": 4254, "completion_tokens": 181}
-    assert _normalize_usage(None) is None
-
-
-def test_parse_stream_extracts_error():
-    text, usage, error = parse_stream([_error_event("muse", 403, "RegionError")])
-    assert text == ""
-    assert error is not None and "403" in error and "RegionError" in error
-
-
-def test_chat_first_model_answers(monkeypatch, engine_on):
-    _patch_transport(
+def test_chat_answers_v2(monkeypatch, engine_on):
+    """Полный цикл v2: сессия с моделью -> prompt -> wait -> message -> delete."""
+    transport = _use_transport(
         monkeypatch,
         [
-            _FakeResponse(200, {"id": "ses_1"}),
-            _FakeResponse(200, None, lines=_stream_lines(_text_event('{"verdicts": []}'))),
+            _session_route("ses_a"),
+            _prompt_route(),
+            _wait_route(),
+            _message_route(_idle_msg(), _assistant_msg('{"verdicts": []}'), {"type": "user"}),
+            _delete_route("ses_a"),
         ],
     )
     result = chat(user="посты", system="постулаты", label="test")
     assert result["ok"] is True
     assert result["content"] == '{"verdicts": []}'
-    assert result["model"].startswith("opencode/")
+    assert result["model"] == "opencode/longcat-2.5-preview-free"
+    assert result["usage"] == {"total_tokens": 120, "prompt_tokens": 100, "completion_tokens": 20}
+
+    create = transport.calls[0]
+    assert create["method"] == "POST" and create["url"].endswith("/api/session")
+    assert create["body"]["model"] == {
+        "id": "longcat-2.5-preview-free",
+        "providerID": "opencode",
+    }
+    assert {"action": "shell", "resource": "*", "effect": "deny"} in create["body"]["permissions"]
+    prompt = transport.calls[1]
+    assert prompt["body"]["text"] == "постулаты\n\nпосты"
+    assert [c["method"] for c in transport.calls] == ["POST", "POST", "POST", "GET", "DELETE"]
+    assert transport.remaining == []
 
 
-def test_chat_falls_back_when_first_model_geo_blocked(monkeypatch, engine_on):
-    """muse → 403 RegionError → следующая в цепочке отвечает — вызов зелёный."""
-    _patch_transport(
+def test_classify_session_permissions_deny_tools_but_not_read_all():
+    """Инструменты запрещены; read на ``*`` — нет: он ломает free-tier (проба).
+
+    При этом узкие read-запреты есть — они проверены живьём: точечное чтение
+    anon.env отклоняется, контрольное чтение живо, вызов не ломается.
+    """
+    rules = opencode_engine.CLASSIFY_SESSION_PERMISSIONS
+    actions = {rule["action"] for rule in rules}
+    assert {"shell", "edit", "webfetch", "subagent", "execute"} <= actions
+    assert not any(r["action"] == "read" and r["resource"] == "*" for r in rules)
+    assert any(r == {"action": "read", "resource": "*anon.env*", "effect": "deny"} for r in rules)
+    assert any(r == {"action": "read", "resource": "*/.ssh/*", "effect": "deny"} for r in rules)
+
+
+def test_parse_messages_collects_text_usage_and_error():
+    text, usage, error = parse_messages(
+        [
+            _idle_msg(),
+            _assistant_msg("вердикты", tokens={"input": 10, "output": 5}),
+            {"type": "user", "text": "посты"},
+        ]
+    )
+    assert text == "вердикты"
+    assert usage == {"input": 10, "output": 5}
+    assert error is None
+
+    text, _, error = parse_messages(
+        [
+            _idle_msg("failed", {"type": "provider.no-route", "message": "Model unavailable"}),
+            {"type": "user", "text": "посты"},
+        ]
+    )
+    assert text == ""
+    assert error == "Model unavailable"
+
+
+def test_reason_from_error_maps_http_codes_and_model_errors():
+    from modules.opencode_engine import _reason_from_error
+
+    assert _reason_from_error("http_429: too many requests") == "http_429"
+    assert _reason_from_error("Model unavailable: opencode/x") == "model_error"
+
+
+def test_chat_falls_back_when_model_unavailable(monkeypatch, engine_on):
+    """provider.no-route у первой модели — отвечает вторая, вызов зелёный."""
+    monkeypatch.setenv("OPENCODE_MODEL_CHAIN", "muse-dead-free,longcat-2.5-preview-free")
+    transport = _use_transport(
         monkeypatch,
         [
-            _FakeResponse(200, {"id": "ses_1"}),
-            _FakeResponse(
-                200,
-                None,
-                lines=_stream_lines(
-                    _error_event("muse", 403, "This model is not available in your country")
+            _session_route("ses_1"),
+            _prompt_route(),
+            _wait_route(),
+            _message_route(
+                _idle_msg(
+                    "failed",
+                    {
+                        "type": "provider.no-route",
+                        "message": "Model unavailable: opencode/muse-dead-free",
+                    },
                 ),
+                {"type": "user"},
             ),
-            _FakeResponse(200, {"id": "ses_2"}),
-            _FakeResponse(200, None, lines=_stream_lines(_text_event("OK"))),
+            _delete_route("ses_1"),
+            _session_route("ses_2"),
+            _prompt_route(),
+            _wait_route(),
+            _message_route(_idle_msg(), _assistant_msg("OK"), {"type": "user"}),
+            _delete_route("ses_2"),
         ],
     )
-    monkeypatch.setenv(
-        "OPENCODE_MODEL_CHAIN",
-        "muse-spark-1.3-contributor-free,longcat-2.5-preview-free",
+    result = chat(user="посты", label="test")
+    assert result["ok"] is True
+    assert result["content"] == "OK"
+    assert result["model"] == "opencode/longcat-2.5-preview-free"
+    assert transport.remaining == []
+
+
+def test_chat_falls_back_when_session_create_rejected(monkeypatch, engine_on):
+    """400 на создании сессии (модели нет в пуле) — пробуем следующую."""
+    monkeypatch.setenv("OPENCODE_MODEL_CHAIN", "ghost-free,longcat-2.5-preview-free")
+    transport = _use_transport(
+        monkeypatch,
+        [
+            ("POST", "/api/session", _FakeResponse(400, {"error": "model not found"})),
+            _session_route("ses_ok"),
+            _prompt_route(),
+            _wait_route(),
+            _message_route(_idle_msg(), _assistant_msg("OK"), {"type": "user"}),
+            _delete_route("ses_ok"),
+        ],
     )
     result = chat(user="посты", label="test")
     assert result["ok"] is True
     assert result["model"] == "opencode/longcat-2.5-preview-free"
+    assert transport.remaining == []
+
+
+def test_chat_treats_silent_session_as_empty_response(monkeypatch, engine_on):
+    """Модель промолчала (ни текста, ни ошибки) — шанс следующей модели."""
+    monkeypatch.setenv("OPENCODE_MODEL_CHAIN", "silent-free,longcat-2.5-preview-free")
+    transport = _use_transport(
+        monkeypatch,
+        [
+            _session_route("ses_silent"),
+            _prompt_route(),
+            _wait_route(),
+            _message_route(_idle_msg(), {"type": "user"}),
+            _delete_route("ses_silent"),
+            _session_route("ses_ok"),
+            _prompt_route(),
+            _wait_route(),
+            _message_route(_idle_msg(), _assistant_msg("OK"), {"type": "user"}),
+            _delete_route("ses_ok"),
+        ],
+    )
+    result = chat(user="посты", label="test")
+    assert result["ok"] is True
+    assert result["model"] == "opencode/longcat-2.5-preview-free"
+    assert transport.remaining == []
 
 
 def test_chat_all_models_fail_gives_engine_all_failed(monkeypatch, engine_on):
     """Транспорт мёртв (serve не поднят) — тихий отказ, не исключение."""
     monkeypatch.setenv("OPENCODE_MODEL_CHAIN", "longcat-2.5-preview-free,space-bunny-free")
-
-    def boom(req, timeout=None):  # noqa: ARG001
-        raise OSError("Connection refused")
-
-    monkeypatch.setattr(opencode_engine.urllib.request, "urlopen", boom)
+    _use_transport(
+        monkeypatch,
+        [
+            ("POST", "/api/session", OSError("Connection refused")),
+            ("POST", "/api/session", OSError("Connection refused")),
+        ],
+    )
     result = chat(user="посты", label="test")
     assert result["ok"] is False
     assert result["reason"] == "engine_all_failed"
     assert result["detail"].count("network") == 2
 
 
-def test_chat_skips_retry_when_reason_not_retryable(monkeypatch, engine_on):
+def test_chat_skips_retry_when_no_base_url(monkeypatch, engine_on):
     """no_base_url не лечится следующей моделью — выходим сразу."""
-    monkeypatch.setenv("OPENCODE_BASE_URL", "")
+    monkeypatch.setenv("OPENCODE_BASE_URL", "   ")
+    monkeypatch.setenv("OPENCODE_MODEL_CHAIN", "a-free,b-free,c-free")
+    transport = _use_transport(monkeypatch, [])
     result = chat(user="посты", label="test")
     assert result["ok"] is False
     assert result["reason"] == "engine_all_failed"
+    assert result["detail"].count("no_base_url") == 1
+    assert transport.calls == []
 
 
 def test_chat_engine_disabled(monkeypatch):
     monkeypatch.setenv("CLASSIFIER_ENGINE", "deepseek")
     result = chat(user="посты", label="test")
-    assert result["ok"] is False
-    assert result["reason"] == "engine_disabled"
+    assert result == {"ok": False, "reason": "engine_disabled"}
 
 
 def test_chat_empty_prompt(monkeypatch, engine_on):
@@ -216,6 +350,26 @@ def test_headless_router_follows_engine_flag(monkeypatch, engine_on):
     assert headless.chat(user="u") is sentinel
 
 
+def test_normalize_content_unwraps_markdown_and_array():
+    """longcat отдаёт ```json + топ-level массив — движок приводит к контракту."""
+    from modules.opencode_engine import _normalize_content
+
+    assert json.loads(_normalize_content('```json\n[{"a": 1}]\n```')) == {"verdicts": [{"a": 1}]}
+    # Объект с нужным ключом проходит как есть.
+    raw = '{"verdicts": [{"a": 1}]}'
+    assert _normalize_content(raw) == raw
+    # Не-JSON не трогаем: пусть классификатор получит llm_unparseable.
+    assert _normalize_content(" boltox ") == " boltox "
+
+
+def test_normalize_usage_maps_serve_counters():
+    from modules.opencode_engine import _normalize_usage
+
+    usage = _normalize_usage({"input": 4254, "output": 181, "reasoning": 251, "total": 4435})
+    assert usage == {"total_tokens": 4435, "prompt_tokens": 4254, "completion_tokens": 181}
+    assert _normalize_usage(None) is None
+
+
 class _FakeChild:
     def __init__(self):
         self.terminated = False
@@ -239,6 +393,17 @@ def test_port_of_parses_base_url(monkeypatch):
     assert _port_of("мусор") == 4096
 
 
+def test_no_spawn_flag_reads_env(monkeypatch):
+    from config import opencode as oc
+
+    monkeypatch.delenv("OPENCODE_NO_SPAWN", raising=False)
+    assert oc.no_spawn() is False
+    monkeypatch.setenv("OPENCODE_NO_SPAWN", "1")
+    assert oc.no_spawn() is True
+    monkeypatch.setenv("OPENCODE_NO_SPAWN", "0")
+    assert oc.no_spawn() is False
+
+
 def test_harness_server_reuses_live_serve(monkeypatch):
     """Порт занят живым serve — своего ребёнка не плодим."""
     from modules import opencode_engine
@@ -253,7 +418,46 @@ def test_harness_server_reuses_live_serve(monkeypatch):
         assert alive is True
 
 
-def test_harness_server_spawns_and_terminates(monkeypatch):
+def test_harness_server_no_spawn_waits_for_restart(monkeypatch):
+    """Прод-режим: своего serve не поднимаем — даём юниту фору на рестарт."""
+    from modules import opencode_engine
+
+    monkeypatch.setattr(opencode_engine, "server_alive", lambda: False)
+    monkeypatch.setenv("OPENCODE_NO_SPAWN", "1")
+    waits: List[float] = []
+
+    def fake_wait(host, port, timeout=45.0):  # noqa: ARG001
+        waits.append(timeout)
+        return True
+
+    monkeypatch.setattr(opencode_engine, "_wait_port", fake_wait)
+
+    def boom(*a, **kw):  # pragma: no cover — Popen не должен вызываться
+        raise AssertionError("Popen вызван в режиме OPENCODE_NO_SPAWN")
+
+    monkeypatch.setattr(opencode_engine.subprocess, "Popen", boom)
+    with opencode_engine.harness_server() as alive:
+        assert alive is True
+    assert waits == [opencode_engine.NO_SPAWN_WAIT_SEC]
+
+
+def test_harness_server_no_spawn_dead_serve_fails_open(monkeypatch):
+    """Сервис лежит и спавн запрещён — чанки идут без нейро-фильтра, не падаем."""
+    from modules import opencode_engine
+
+    monkeypatch.setattr(opencode_engine, "server_alive", lambda: False)
+    monkeypatch.setenv("OPENCODE_NO_SPAWN", "1")
+    monkeypatch.setattr(opencode_engine, "_wait_port", lambda *a, **kw: False)
+
+    def boom(*a, **kw):  # pragma: no cover — Popen не должен вызываться
+        raise AssertionError("Popen вызван в режиме OPENCODE_NO_SPAWN")
+
+    monkeypatch.setattr(opencode_engine.subprocess, "Popen", boom)
+    with opencode_engine.harness_server() as alive:
+        assert alive is False
+
+
+def test_harness_server_spawns_and_terminates(monkeypatch, spawn_allowed):
     """Порт свободен — serve поднят ребёнком и убит в finally."""
     from modules import opencode_engine
 
@@ -277,7 +481,7 @@ def test_harness_server_spawns_and_terminates(monkeypatch):
     assert child.terminated is True
 
 
-def test_harness_server_terminates_on_exception(monkeypatch):
+def test_harness_server_terminates_on_exception(monkeypatch, spawn_allowed):
     """Падение прогона внутри блока не оставляет serve-сироты."""
     from modules import opencode_engine
 
@@ -293,9 +497,8 @@ def test_harness_server_terminates_on_exception(monkeypatch):
     assert child.terminated is True
 
 
-def test_default_chain_excludes_geo_dead_muse():
-    """muse geo-мертва с IP бокса (P195) — в дефолтной цепочке её нет,
-    иначе каждый чанк съедает таймаут впустую."""
+def test_default_chain_excludes_geo_dead_models():
+    """Мёртвая голова цепочки съедает таймаут на каждом чанке — её там нет."""
     from config.opencode import DEFAULT_MODEL_CHAIN
 
     assert "muse-spark-1.3-contributor-free" not in DEFAULT_MODEL_CHAIN
@@ -313,7 +516,21 @@ def test_serve_limits_from_env(monkeypatch):
     assert oc.get_serve_max_lifetime() == 600.0
 
 
-def test_harness_server_starts_rss_monitor(monkeypatch):
+class _FakeTimer:
+    started = False
+    cancelled = False
+
+    def __init__(self, delay, fn):  # noqa: ARG002
+        type(self).started = True
+
+    def start(self):
+        pass
+
+    def cancel(self):
+        type(self).cancelled = True
+
+
+def test_harness_server_starts_rss_monitor(monkeypatch, spawn_allowed):
     """Ребёнок без preexec_fn (RLIMIT_AS ломает старт bun); RSS-монитор
     запускается и останавливается при выходе."""
     from modules import opencode_engine
@@ -342,8 +559,8 @@ def test_harness_server_starts_rss_monitor(monkeypatch):
     assert child.terminated is True
 
 
-def test_harness_server_systemd_oneshot(monkeypatch):
-    """Автоматический путь: systemctl start/stop вместо Popen."""
+def test_harness_server_systemd_oneshot(monkeypatch, spawn_allowed):
+    """Legacy-путь ручных прогонов: systemctl start/stop вместо Popen."""
     from modules import opencode_engine
 
     monkeypatch.setattr(opencode_engine, "server_alive", lambda: False)
@@ -367,7 +584,7 @@ def test_harness_server_systemd_oneshot(monkeypatch):
     assert calls == ["start", "stop"]
 
 
-def test_harness_server_systemd_start_failure(monkeypatch):
+def test_harness_server_systemd_start_failure(monkeypatch, spawn_allowed):
     """systemctl start не прошёл — yield False, stop не зовём."""
     from modules import opencode_engine
 
@@ -391,20 +608,6 @@ def test_child_rss_mb_reads_proc():
     rss = _child_rss_mb(os.getpid())
     assert rss is not None and rss > 0
     assert _child_rss_mb(999999) is None
-
-
-class _FakeTimer:
-    started = False
-    cancelled = False
-
-    def __init__(self, delay, fn):  # noqa: ARG002
-        type(self).started = True
-
-    def start(self):
-        pass
-
-    def cancel(self):
-        type(self).cancelled = True
 
 
 def test_classify_posts_wraps_harness_for_opencode_engine(monkeypatch):
@@ -507,7 +710,7 @@ def test_sweep_opencode_spill_missing_dir_is_silent(tmp_path):
     assert stats["failed"] == 0
 
 
-def test_harness_server_popen_gets_private_tmpdir(monkeypatch):
+def test_harness_server_popen_gets_private_tmpdir(monkeypatch, spawn_allowed):
     """P197: ребёнок получает приватный TMPDIR, каталог исчезает после блока."""
     import os
     from pathlib import Path

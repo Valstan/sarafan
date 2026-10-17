@@ -1,24 +1,30 @@
-"""Конфиг нейро-движка харнесса OpenCode (вариант B пилота классификатора).
+"""Конфиг нейро-движка харнесса OpenCode (единый v2-сервер, 17.10).
 
-Движок — headless-сервер ``opencode serve`` на том же боксе (systemd-юнит
-``setka-opencode.service``, слушает 127.0.0.1). Классификатор общается с ним
-по HTTP тем же контрактом, что и с DeepSeek (``modules/opencode_engine.py``),
-поэтому переключение — одна env-переменная, без правок вызывающего кода.
+Движок — всегда живущий ``opencode serve`` v2 на том же боксе (systemd-юнит
+``opencode-web``, 127.0.0.1:49374): он же веб-кабинет владельца для кодинга,
+он же и фильтрация постов (один сервер на два дела, решение 17.10). Движок к
+нему только прикрепляется (``OPENCODE_NO_SPAWN=1``), свой serve не поднимает.
+Классификатор общается с ним по HTTP тем же контрактом, что и с DeepSeek
+(``modules/opencode_engine.py``), поэтому переключение — одна env-переменная,
+без правок вызывающего кода.
 
 Env vars:
   CLASSIFIER_ENGINE=deepseek     # deepseek | opencode; дефолт deepseek
                                  # (прежнее поведение, пока пилот не включён)
-  OPENCODE_BASE_URL              # адрес serve; дефолт http://127.0.0.1:4096
+  OPENCODE_BASE_URL              # адрес serve; прод — http://127.0.0.1:49374
+                                 # (единый opencode-web); дефолт — 4096
+  OPENCODE_NO_SPAWN=1            # запретить движку поднимать свой serve:
+                                 # единственный сервер на боксе держит
+                                 # systemd, движок к нему прикрепляется
   OPENCODE_SERVER_USERNAME       # basic-auth serve (опц.; дефолт opencode)
   OPENCODE_SERVER_PASSWORD       # basic-auth serve; пусто = без пароля
   OPENCODE_TIMEOUT=120           # потолок одного вызова модели, сек
   OPENCODE_MODEL_CHAIN           # CSV цепочка фолбэков: первая живая модель
-                                 # отвечает. Дефолт — замер 2026-10-14 с VPS:
-                                 # muse geo-заблокирована (RegionError с IP
-                                 # бокса), longcat/space-bunny/mimo отвечают.
-                                 # Когда бокс получит нужный geo (прокси/донор),
-                                 # muse автоматически встаёт первой — порядок
-                                 # цепочки уже под этим написан.
+                                 # отвечает. Дефолт — замер 14.10 с VPS,
+                                 # перепроверен на v2 (17.10): longcat/mimo
+                                 # отвечают. Заведомо мёртвой головы в цепочке
+                                 # быть не должно — она съедает таймаут на
+                                 # каждом чанке.
   OPENCODE_SPILL_GLOB            # маска temp-мусора opencode; дефолт .bcdf*.so
   OPENCODE_SPILL_MAX_AGE         # возраст, после которого свипер удаляет
                                  # найденный мусор, сек; дефолт 1800 (P197)
@@ -80,6 +86,17 @@ def get_server_username() -> str:
 
 def get_server_password() -> str:
     return (os.getenv("OPENCODE_SERVER_PASSWORD") or "").strip()
+
+
+def no_spawn() -> bool:
+    """True → движку запрещено поднимать свой serve (единый сервер на боксе).
+
+    Решение владельца 17.10: один всегда живой ``opencode-web`` (v2) работает
+    и на кодинг владельца, и на фильтрацию постов; свой serve движка встал бы
+    на тот же порт и подрался с systemd за него. Выключено (дефолт) — прежние
+    пути спавна для ручных прогонов и отладки.
+    """
+    return (os.getenv("OPENCODE_NO_SPAWN") or "").strip() == "1"
 
 
 def get_timeout() -> float:

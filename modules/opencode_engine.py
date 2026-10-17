@@ -1,11 +1,29 @@
-"""Движок классификации через харнесс OpenCode (пилот, решение владельца 14.10).
+"""Движок классификации через харнесс OpenCode (v2, единый serve; 17.10).
 
 Зачем. DeepSeek-контур мёртв с 22.09 (402, P177), и сеть публикует без
 нейро-фильтра. Владелец поставил задачу: вердикты выносит харнесс OpenCode на
 том же VPS. Здесь — мост между классификатором (контракт
 ``modules/deepseek_client.chat``: ``{ok, content, model, usage}`` либо
-``{ok: False, reason, detail}``) и headless-сервером ``opencode serve``
-(systemd-юнит ``setka-opencode.service``, 127.0.0.1).
+``{ok: False, reason, detail}``) и headless-сервером ``opencode serve`` v2.
+
+Один сервер на два дела (решение владельца 17.10). На боксе живёт ровно один
+``serve`` — systemd-юнит ``opencode-web`` (v2.0.32, 127.0.0.1:49374, всегда
+включён): он же веб-кабинет владельца для кодинга, он же движок фильтрации.
+Движок НЕ поднимает собственный serve: ``OPENCODE_NO_SPAWN=1`` в проде, иначе
+свой экземпляр встал бы на тот же порт и подрался с systemd за него. Прежняя
+oneshot-схема (``setka-opencode.service``, v1.19) выведена из эксплуатации.
+
+Контракт v2 (замер 17.10 — ``/openapi.json`` сервера плюс пробы):
+
+1. ``POST /api/session`` — сессия сразу с моделью
+   (``{"model": {"id", "providerID"}}``) и запретами инструментов (текст
+   постов — недоверенный вход; классификатору инструменты не нужны);
+2. ``POST /api/session/{id}/prompt`` — сообщение в очередь (асинхронно);
+3. ``POST /api/experimental/session/{id}/wait`` — дождаться тишины сессии;
+4. ``GET /api/session/{id}/message`` — собрать ответ: текст в
+   ``content[type=text]``, счётчики в ``tokens``, отказ — ``idle.outcome``
+   != ``succeeded`` с ``error`` (``provider.no-route`` и пр.); сессия
+   удаляется за собой (иначе пул и данные сервера растут молча).
 
 Архитектура намеренно тонкая:
 
@@ -13,22 +31,16 @@
   зовёт этот ``chat`` при ``CLASSIFIER_ENGINE=opencode``; DeepSeek остаётся
   дефолтом, поэтому откат — одна env-переменная, без деплоя кода.
 - **Цепочка моделей с фолбэком** (``OPENCODE_MODEL_CHAIN``). Бесплатный тариф
-  Zen ротирует модели (владелец 14.10): сегодня отвечают
-  longcat/space-bunny/mimo, muse отдаёт ``RegionError`` с IP бокса. Порядок
-  цепочки уже написан под будущее: когда бокс получит нужный geo, muse встаёт
-  первой сама. Первая модель, ответившая текстом, закрывает вызов.
+  Zen ротирует модели; первая модель, ответившая текстом, закрывает вызов.
+  Отказ одной модели не роняет батч: следующая берёт на себя.
 - **Никогда не бросает** — тот же контракт отказов, что у DeepSeek-клиента:
-  ``network`` | ``http_<код>`` | ``empty_response`` | ``engine_all_failed``.
-  Классификатор fail-open: нет вердикта — пост идёт по обычным фильтрам.
+  ``network`` | ``http_<код>`` | ``model_error`` | ``empty_response`` |
+  ``engine_all_failed``. Классификатор fail-open: нет вердикта — пост идёт по
+  обычным фильтрам.
 
 Почему HTTP-сервер, а не CLI `opencode run`: на этом боксе `run` стабильно
 висит после `init` (проверено 14.10, ~170 c, ноль байт вывода), а `serve`
 поднимается и отвечает за секунду.
-
-Почему oneshot, а не всегда живой сервис (решение владельца 14.10): бокс —
-1.5 ГБ с постоянно живущими uvicorn/celery/postgres; always-on serve держит
-~264 МБ и в учебном прогоне 14.10 трижды ложился OOM'ом. Теперь `serve`
-поднимается на время прогона и тушится сразу (``harness_server``).
 """
 
 from __future__ import annotations
@@ -60,9 +72,52 @@ from config.opencode import (
     get_spill_glob,
     get_spill_max_age_sec,
     get_timeout,
+    no_spawn,
 )
 
 logger = logging.getLogger(__name__)
+
+# Запреты инструментов для сессий классификатора: текст постов — недоверенный
+# вход, а вердикты — чистый текст, инструменты движку не нужны вовсе (замер
+# 17.10: без запрета модель по просьбе из поста реально запускает shell).
+# ``execute`` — вторая дверь: с запрещённым shell модель пробует JS-песочницу
+# (проба 17.10: внутри неё командной двери нет — «Unknown tool», маркер не
+# создан); закрыта тем же списком.
+# ``read`` — особый случай: запрет на ``*`` ломает сам вызов free-tier (пробы
+# 17–18.10: модель отдаёт provider.auth «free tier can only be used from
+# within OpenCode»), а узкие запреты работают и вызов не ломают. Поэтому две
+# чувствительные двери закрыты точечно: пароль веб-сервера и ssh-ключи (проба
+# 18.10: чтение anon.env → permission.rejected; /etc/hostname как контроль —
+# читается; /etc/setka/* держит политика конфига).
+CLASSIFY_SESSION_PERMISSIONS: List[Dict[str, str]] = [
+    {"action": action, "resource": "*", "effect": "deny"}
+    for action in (
+        "shell",
+        "edit",
+        "webfetch",
+        "websearch",
+        "subagent",
+        "browser",
+        "grep",
+        "glob",
+        "todowrite",
+        "skill",
+        "question",
+        "execute",
+    )
+] + [
+    {"action": "read", "resource": "*anon.env*", "effect": "deny"},
+    {"action": "read", "resource": "*/.ssh/*", "effect": "deny"},
+]
+
+# Фора живому юниту на рестарт в режиме запрета спавна (OPENCODE_NO_SPAWN):
+# короткий цикл перезапуска systemd (RestartSec=5) укладывается с запасом,
+# а затянувшийся простой не превращает волну в ожидание (fail-open).
+NO_SPAWN_WAIT_SEC = 30.0
+
+# Причины, после которых следующая модель цепочки ничем не поможет: это
+# отказ контура (нет адреса serve), а не свойство конкретной модели.
+_FATAL_REASONS = ("no_base_url",)
 
 
 def _port_of(base_url: str) -> int:
@@ -107,13 +162,15 @@ def _child_rss_mb(pid: int) -> Optional[float]:
 
 
 def _systemctl_run(action: str, timeout: float = 30.0) -> bool:
-    """start/stop oneshot-юнита харнесса (автоматический путь из воркера).
+    """start/stop oneshot-юнита харнесса (legacy-путь ручных прогонов).
 
     Popen из prefork-воркера Celery нестабилен (ребёнок умирает молча —
     боевой замер 14.10: 72/72 чанков Connection refused при живом
-    ручном serve). systemd-oneshot надёжнее: serve под сервисом с
-    EnvironmentFile, движок только зовёт systemctl (sudo -n, NOPASSWD
-    только на этот юнит). Возвращает False, если команда не прошла.
+    ручном serve). В единой схеме (17.10) этот путь продом не используется:
+    сервер держит systemd-юнит ``opencode-web``, а движок прикрепляется к
+    нему (``OPENCODE_NO_SPAWN``). Оставлен для отладочных прогонов на других
+    боксах, где oneshot-юнит ещё живёт. Возвращает False, если команда не
+    прошла.
     """
     try:
         result = subprocess.run(
@@ -138,14 +195,16 @@ def _systemctl_run(action: str, timeout: float = 30.0) -> bool:
 
 @contextmanager
 def harness_server() -> Iterator[bool]:
-    """Serve ровно на время прогона (oneshot, решение владельца 14.10).
+    """Serve, с которым работает прогон: чужой всегда лучше своего.
 
-    Бокс — 1.5 ГБ с всегда живущими uvicorn/celery/postgres; постоянно
-    запущенный serve держит ~264 МБ и давно ел OOM'ом остальное (учебный
-    прогон 14.10: три рестарта serve). Поэтому: порт уже занят живым
-    serve — работаем с ним (ручной/отладочный режим); порт свободен —
-    поднимаем serve ребёнком на время блока и тушим в finally. Кто
-    поднял — тот и тушит: осиротевший процесс не остаётся.
+    Единый v2-сервер (``opencode-web``) держит systemd постоянно; движок к
+    нему только прикрепляется. Если сервера нет, а ``OPENCODE_NO_SPAWN=1``
+    (прод) — это отказ контура, а не повод поднять второй serve на тот же
+    порт: даём юниту фору на рестарт (``NO_SPAWN_WAIT_SEC``) и сдаёмся тихо
+    (fail-open волны). Без запрета (ручные прогоны, отладка) — прежние пути:
+    systemd-oneshot (``OPENCODE_SYSTEMD_RUN=1``) или ребёнок Popen, который
+    тушится в finally. Кто поднял — тот и тушит: осиротевший процесс не
+    остаётся.
 
     Yield: True — serve на этом порту ответил (можно звать модели).
     """
@@ -154,6 +213,18 @@ def harness_server() -> Iterator[bool]:
         return
 
     host, port = "127.0.0.1", _port_of(get_base_url())
+
+    if no_spawn():
+        alive = _wait_port(host, port, timeout=NO_SPAWN_WAIT_SEC)
+        if not alive:
+            logger.warning(
+                "opencode-engine: serve %s:%s не ответил, спавн запрещён "
+                "(OPENCODE_NO_SPAWN) — чанки волны идут без нейро-фильтра",
+                host,
+                port,
+            )
+        yield alive
+        return
 
     # Автоматический путь (воркер/таска): systemd-oneshot вместо Popen.
     # Popen из prefork-воркера Celery нестабилен (боевой замер 14.10).
@@ -178,11 +249,12 @@ def harness_server() -> Iterator[bool]:
     # stderr туда; иначе тишина (прод — шум не нужен).
     serve_log = os.environ.get("OPENCODE_SERVE_LOG", "").strip()
     stderr_target: Any = open(serve_log, "ab") if serve_log else subprocess.DEVNULL  # noqa: SIM115
-    # Приватный TMPDIR на запуск (P197): opencode распаковывает в temp нативный
-    # модуль `.bcdf*.so` (~5.5 МБ) и не убирает его за собой — в общем /tmp это
-    # копится по файлу на запуск (инцидент 15.10: 552 шт. ≈ 2.9 ГБ, диск 100 %).
-    # Свой каталог уносит мусор этого запуска вместе с собой (rmtree в finally);
-    # если opencode пишет мимо TMPDIR — подчистит свипер sweep_opencode_spill.
+    # Приватный TMPDIR на запуск (P197): opencode v1 распаковывает в temp
+    # нативный модуль `.bcdf*.so` (~5.5 МБ) и не убирает его за собой — в общем
+    # /tmp это копится по файлу на запуск (инцидент 15.10: 552 шт. ≈ 2.9 ГБ,
+    # диск 100 %). Свой каталог уносит мусор этого запуска вместе с собой
+    # (rmtree в finally); если opencode пишет мимо TMPDIR — подчистит свипер
+    # sweep_opencode_spill.
     child_tmp = tempfile.mkdtemp(prefix="setka-opencode-")
     child_env = {k: v for k, v in os.environ.items() if v}
     child_env["TMPDIR"] = child_tmp
@@ -311,20 +383,6 @@ def sweep_opencode_spill(
     return stats
 
 
-# Причины, при которых имеет смысл пробовать следующую модель цепочки.
-# 403 может быть как geo (muse), так и перегрев free-tier — оба лечатся
-# следующей моделью. 429 — квота конкретной модели. 5xx/сеть — сбой транспорта.
-_RETRYABLE_REASONS = (
-    "network",
-    "http_403",
-    "http_429",
-    "http_500",
-    "http_502",
-    "http_503",
-    "empty_response",
-)
-
-
 def _auth_headers() -> Dict[str, str]:
     headers = {"Content-Type": "application/json; charset=utf-8"}
     password = get_server_password()
@@ -336,11 +394,15 @@ def _auth_headers() -> Dict[str, str]:
     return headers
 
 
-def _post_json(path: str, body: Dict[str, Any], timeout: float) -> Tuple[int, Any]:
-    """POST на serve. Сеть/протокол → ``(0, {"error": ...})``, как у DeepSeek."""
+def _post_json(path: str, body: Optional[Dict[str, Any]], timeout: float) -> Tuple[int, Any]:
+    """POST на serve (``body=None`` — POST без тела, endpoint ``wait``).
+
+    Сеть/протокол → ``(0, {"error": ...})``, как у DeepSeek.
+    """
+    data = json.dumps(body, ensure_ascii=False).encode("utf-8") if body is not None else b""
     req = urllib.request.Request(
         f"{get_base_url()}{path}",
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
+        data=data,
         method="POST",
         headers=_auth_headers(),
     )
@@ -359,100 +421,166 @@ def _post_json(path: str, body: Dict[str, Any], timeout: float) -> Tuple[int, An
         return 0, {"error": f"{type(e).__name__}: {e}"[:300]}
 
 
-def _post_json_lines(path: str, body: Dict[str, Any]) -> Tuple[int, List[Dict[str, Any]]]:
-    """POST с потоком JSON-lines (ответ ``/message``).
-
-    Поток читается по строкам; мусорные строки пропускаются. Сетевой сбой
-    до первого байта → ``(0, [...])``: различение с «пустым потоком» важно,
-    первое — транспорт (следующая модель), второе — модель промолчала.
-    """
-    req = urllib.request.Request(
-        f"{get_base_url()}{path}",
-        data=json.dumps(body, ensure_ascii=False).encode("utf-8"),
-        method="POST",
-        headers=_auth_headers(),
-    )
-    events: List[Dict[str, Any]] = []
+def _get_json(path: str, timeout: float) -> Tuple[int, Any]:
+    """GET с serve. Сеть/протокол → ``(0, {"error": ...})``, как у DeepSeek."""
+    req = urllib.request.Request(f"{get_base_url()}{path}", method="GET", headers=_auth_headers())
     try:
-        with urllib.request.urlopen(req, timeout=get_timeout()) as resp:
-            status = int(resp.status)
-            for line in resp:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    evt = json.loads(line)
-                except Exception:
-                    continue
-                if isinstance(evt, dict):
-                    events.append(evt)
-            return status, events
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            raw = resp.read().decode("utf-8", "replace")
+            return int(resp.status), (json.loads(raw) if raw.strip() else {})
     except urllib.error.HTTPError as e:
-        return int(e.code), [{"error": e.read().decode("utf-8", "replace")[:300]}]
+        detail = ""
+        try:
+            detail = e.read().decode("utf-8", "replace")[:300]
+        except Exception:  # pragma: no cover — тело ошибки не обязано читаться
+            pass
+        return int(e.code), {"error": detail}
     except Exception as e:
-        return 0, [{"error": f"{type(e).__name__}: {e}"[:300]}]
+        return 0, {"error": f"{type(e).__name__}: {e}"[:300]}
 
 
-def parse_stream(
-    events: List[Dict[str, Any]]
+def _close_session(session_id: str) -> None:
+    """Убрать сессию за собой: без этого пул и данные сервера растут молча.
+
+    Каждый чанк волны — новая сессия; брошенные сессии у сервера v2 оседают
+    в его каталоге данных (тот же класс утечки, что /tmp-мусор v1 в P197).
+    Уборка best-effort: её сбой исход вызова не меняет.
+    """
+    try:
+        req = urllib.request.Request(
+            f"{get_base_url()}/api/session/{session_id}",
+            method="DELETE",
+            headers=_auth_headers(),
+        )
+        with urllib.request.urlopen(req, timeout=10):
+            pass
+    except Exception:  # noqa: BLE001 — уборка не влияет на исход вызова
+        logger.debug("opencode-engine: сессия %s не удалена за собой", session_id, exc_info=True)
+
+
+def _error_text(err: Any) -> Optional[str]:
+    """Отказ v2 (``{type, message, status?}``) → строка для лога и причины."""
+    if not isinstance(err, dict):
+        return None
+    message = str(err.get("message") or err.get("type") or "").strip()
+    code = err.get("status") or err.get("statusCode")
+    if message and code:
+        return f"http_{code}: {message}"
+    return message or None
+
+
+def _reason_from_error(error: str) -> str:
+    """Строка отказа → причина контракта.
+
+    Код из тела (``http_429`` и пр.) сохраняем как есть; отказ без кода
+    (``provider.no-route``: «Model unavailable») — ``model_error``. Обе
+    причины для фолбэка равнозначны: следующая модель может быть живой там,
+    где эта мертва.
+    """
+    head = error.split(":", 1)[0]
+    if head.startswith("http_") and head[5:].isdigit():
+        return head
+    return "model_error"
+
+
+def parse_messages(
+    messages: List[Dict[str, Any]]
 ) -> Tuple[str, Optional[Dict[str, Any]], Optional[str]]:
-    """Собрать из потока ``(text, usage, error)``.
+    """Собрать из ленты сессии ``(text, usage, error)``.
 
-    Формат потока (замер 14.10): json-lines; у события текст лежит в
-    ``parts[]`` (``{"type": "text", "text": ...}``), счётчики — в
-    ``info.tokens``, отказ модели — в ``info.error.data.message``.
+    Лента v2 (замер 17.10) приходит новейшим вперёд (``order=desc``); у ответа
+    текст лежит в ``content[]`` (``{"type": "text"}``; части ``reasoning``
+    пропускаем), счётчики — в ``tokens``; отказ виден как ``idle.outcome``
+    != ``succeeded`` с ``error`` (``provider.no-route``, ``provider.auth``
+    и пр.). Сбой важнее текста: при затопленном ответе вердикты не считать.
     """
     text_chunks: List[str] = []
     usage: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
-    for evt in events:
-        parts = evt.get("parts")
-        if isinstance(parts, list):
-            for part in parts:
-                if isinstance(part, dict) and part.get("type") == "text":
-                    text_chunks.append(str(part.get("text") or ""))
-        info = evt.get("info")
-        if isinstance(info, dict):
-            tokens = info.get("tokens")
+    assistant_seen = False
+    idle_seen = False
+    for msg in messages:
+        if not isinstance(msg, dict):
+            continue
+        kind = msg.get("type")
+        if kind == "assistant" and not assistant_seen:
+            # Новейший ответ — первый в ленте (запрос с order=desc).
+            assistant_seen = True
+            content = msg.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if isinstance(part, dict) and part.get("type") == "text":
+                        text_chunks.append(str(part.get("text") or ""))
+            tokens = msg.get("tokens")
             if isinstance(tokens, dict):
                 usage = tokens
-            err = info.get("error")
-            if isinstance(err, dict):
-                data = err.get("data") or {}
-                message = str(data.get("message") or err.get("name") or "unknown")
-                code = data.get("statusCode")
-                error = f"http_{code}: {message}" if code else message
+        elif kind == "idle" and not idle_seen:
+            idle_seen = True
+            outcome = str(msg.get("outcome") or "")
+            if outcome and outcome != "succeeded":
+                error = _error_text(msg.get("error")) or outcome
     return "".join(text_chunks).strip(), usage, error
 
 
 def _call_model(model_id: str, prompt: str, label: str) -> Dict[str, Any]:
-    """Один вызов одной модели через serve. Никогда не бросает."""
+    """Один вызов одной модели через serve v2. Никогда не бросает."""
     if not get_base_url():
         return {"ok": False, "reason": "no_base_url"}
 
-    status, session = _post_json("/session", {"title": f"classify:{label}"}, get_timeout())
-    if status == 0 or not isinstance(session, dict) or not session.get("id"):
-        return {"ok": False, "reason": "network", "detail": session}
-    session_id = str(session["id"])
+    timeout = get_timeout()
 
-    status, events = _post_json_lines(
-        f"/session/{session_id}/message",
+    # Сессия сразу с моделью и запретами инструментов: у v2 модель — свойство
+    # сессии, а не сообщения (у prompt поля model нет; строка/объект в теле
+    # промпта молча игнорируются — пробы 17.10).
+    status, session = _post_json(
+        "/api/session",
         {
-            "model": {"providerID": "opencode", "modelID": model_id},
-            "parts": [{"type": "text", "text": prompt}],
+            "title": f"classify:{label}",
+            "model": {"id": model_id, "providerID": "opencode"},
+            "permissions": CLASSIFY_SESSION_PERMISSIONS,
         },
+        min(timeout, 30.0),
     )
     if status == 0:
-        return {"ok": False, "reason": "network", "detail": events[0] if events else None}
+        return {"ok": False, "reason": "network", "detail": session}
+    if status >= 400:
+        return {"ok": False, "reason": f"http_{status}", "detail": session}
+    session_id = str(((session or {}).get("data") or {}).get("id") or "")
+    if not session_id:
+        return {"ok": False, "reason": "network", "detail": session}
 
-    text, usage, error = parse_stream(events)
+    status, prompt_resp = _post_json(
+        f"/api/session/{session_id}/prompt", {"text": prompt}, min(timeout, 30.0)
+    )
+    if status == 0:
+        _close_session(session_id)
+        return {"ok": False, "reason": "network", "detail": prompt_resp}
+    if status >= 400:
+        _close_session(session_id)
+        return {"ok": False, "reason": f"http_{status}", "detail": prompt_resp}
+
+    # wait блокируется до тишины сессии; потолок ожидания — общий таймаут
+    # вызова модели (OPENCODE_TIMEOUT). Сбой на нём — отказ этого захода:
+    # следующая модель попробует свежей сессией.
+    status, wait_resp = _post_json(f"/api/experimental/session/{session_id}/wait", None, timeout)
+    if status == 0 or status >= 400:
+        _close_session(session_id)
+        reason = "network" if status == 0 else f"http_{status}"
+        return {"ok": False, "reason": reason, "detail": wait_resp}
+
+    status, messages = _get_json(
+        f"/api/session/{session_id}/message?limit=20&order=desc", min(timeout, 30.0)
+    )
+    _close_session(session_id)
+    if status == 0:
+        return {"ok": False, "reason": "network", "detail": messages}
+    if status >= 400:
+        return {"ok": False, "reason": f"http_{status}", "detail": messages}
+
+    raw_messages = (messages or {}).get("data") if isinstance(messages, dict) else None
+    text, usage, error = parse_messages(raw_messages if isinstance(raw_messages, list) else [])
     if error:
-        # Нормализуем в http_<код>, когда поток его нёс: фолбэк по цепочке
-        # решает именно по коду (403 geo/quota, 429, 5xx — следующая модель).
-        reason = "model_error"
-        if error.startswith("http_") and error.split(":", 1)[0][5:].isdigit():
-            reason = error.split(":", 1)[0]
-        return {"ok": False, "reason": reason, "detail": error, "usage": usage}
+        return {"ok": False, "reason": _reason_from_error(error), "detail": error, "usage": usage}
     if not text:
         return {"ok": False, "reason": "empty_response", "usage": usage}
 
@@ -490,8 +618,8 @@ def _normalize_content(text: str) -> str:
 def _normalize_usage(usage: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Счётчики serve → контракт DeepSeek-клиента (``total_tokens`` и пр.).
 
-    Формат serve (замер 14.10): ``{"input": N, "output": M, "reasoning": K,
-    "cache": {...}, "total": N+M}``. Классификатор суммирует
+    Формат serve (замер 14.10, у v2 тот же): ``{"input": N, "output": M,
+    "reasoning": K, "cache": {...}, "total": N+M}``. Классификатор суммирует
     ``usage.total_tokens`` по чанкам; без нормализации прогон копил бы нули и
     отчёт токенов врал бы (тот же класс, что молчащий ноль в P175).
     """
@@ -516,9 +644,9 @@ def chat(
     temperature: float = 0.2,  # noqa: ARG001 — свободные модели Zen температуру не принимают
     max_tokens: Optional[int] = None,  # noqa: ARG001 — лимиты на стороне serve
     json_object: bool = False,  # noqa: ARG001 — strict-JSON включается phrasing'ом промпта
-    api_key: Optional[str] = None,  # noqa: ARG001 — ключ живёт в serve (auth.json)
+    api_key: Optional[str] = None,  # noqa: ARG001 — ключ живёт в serve
     model: Optional[str] = None,
-    timeout: Optional[float] = None,  # noqa: ARG001 — таймаут внутри _post_json_lines
+    timeout: Optional[float] = None,  # noqa: ARG001 — таймаут внутри _post_json/_get_json
     label: str = "opencode",
 ) -> Dict[str, Any]:
     """Вызов классификатора через харнесс OpenCode.
@@ -536,8 +664,8 @@ def chat(
     if model:
         chain = [model] + [m for m in chain if m != model]
 
-    # Постулаты + посты одним сообщением: у serve нет ролевых parts, а
-    # префикс-кэша бесплатного тарифа не гарантирует — цена склейки нулевая.
+    # Постулаты + посты одним сообщением: у serve v2 ролевых частей нет,
+    # а префикс-кэша бесплатного тарифа не гарантирует — цена склейки нулевая.
     prompt = f"{system.strip()}\n\n{user.strip()}" if (system or "").strip() else user.strip()
 
     reasons: List[str] = []
@@ -549,10 +677,8 @@ def chat(
         detail = str(result.get("detail") or "")[:120]
         reasons.append(f"{model_id}:{reason}")
         logger.warning("opencode-engine: модель %s отказала (%s %s)", model_id, reason, detail)
-        if reason not in _RETRYABLE_REASONS:
-            # Отказ, который следующая модель не починит (модель промолчала
-            # не по своей вине — всё ещё стоит попробовать: пустой ответ
-            # бывает и от перегруза).
+        if reason in _FATAL_REASONS:
+            # Отказ контура (нет адреса serve) — следующая модель не поможет.
             break
     return {
         "ok": False,
