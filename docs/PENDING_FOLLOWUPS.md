@@ -43,7 +43,9 @@
 
 - **P150** [🔑 D-035 — пилот прод-SSH-ключей из комнаты КАРМАНа: ПРОЙДЕН 2026-08-25, остался вопрос к схеме](pending/P150-d-035-pilot-prod-ssh-klyuchey-iz-komnaty-karmana.md) · `⏱ 2026-08-25 · snooze 0 · parked · пилот пройден, хвостов по коду нет; условие расконсервации: решение владельца по схеме per-machine ключей (D-035) · `
 - **P149** [🔴 Живой VK-токен VITA в публичной истории репозитория — ПРИНЯТЫЙ РИСК (владелец отказался ротировать 2026-08-21)](pending/P149-zhivoy-vk-token-vita-v-publichnoy-istorii.md) · `⏱ 2026-08-20 · snooze 0 · accepted-risk · решение владельца принято, действий не ждём`
-- **P200** [🔴 opencode течёт в `/tmp` по 5.5 МБ за запуск — 15.10 забил диск до 100 % (asyncpg.DiskFullError); PR #903 — приватный TMPDIR + свипер (`sweep_opencode_tmp` каждые полчаса); осталось: live-прогон чанка на проде после деплоя + замер `/tmp/.bcdf*` + решение по revival движка (TICKLER 2026-10-18)](pending/P200-opencode-techet-v-tmp-i-zabivaet-disk.md) · `⏱ 2026-10-15 · snooze 0 · fresh · прод-путь — всегда Popen (OPENCODE_SYSTEMD_RUN не задан; systemd-oneshot Type=oneshot+RemainAfterExit блокирует systemctl start на 30 с); параллельная сессия зарезервировала #197 под CLASSIFIER_INGEST_KEY drift — переименовано на P200`
+- **P200** [🔴 opencode течёт в `/tmp` по 5.5 МБ за запуск — 15.10 забил диск до 100 % (asyncpg.DiskFullError); #903 — приватный TMPDIR + свипер, #910 — движок v2; 18.10 замер чистый (`.bcdf*` = 0, `/tmp` 78 МБ), revival переведён на P201](pending/P200-opencode-techet-v-tmp-i-zabivaet-disk.md) · `⏱ 2026-10-15 · snooze 0 · watch · ждёт внешнего события: снятие гейта free-tier (P201); после возврата — сутки стабильного /tmp; прод-путь — всегда Popen (OPENCODE_SYSTEMD_RUN не задан)`
+
+- **P201** [🔴 Free-tier OpenCode закрыт по IP платформы с 17.10 (403 FreeTierError на все модели) — авто-классификация стоит; аккаунт-ключ бесплатный тир не поднимает; WARP на боксе опробован и откачен (DPI)](pending/P201-free-tier-opencode-zakryt-po-ip.md) · `⏱ 2026-10-18 · snooze 0 · parked · условие: гейт снят (слежение TICKLER 2026-10-19) ЛИБО платный ключ ЛИБО свой выход (линия P195)`
 
 ## ⏳ В процессе
 
