@@ -2,11 +2,16 @@
 id: ADR-0007
 title: Движок классификатора через харнесс OpenCode на том же VPS
 date: 2026-10-14
-status: accepted
+status: superseded (server part) by ADR-0008
 tags: [classifier, opencode, engine, pilot]
 ---
 
 # Движок классификатора через харнесс OpenCode на том же VPS
+
+> **Серверная часть заменена:** [ADR-0008](0008-edinyy-v2-server-opencode.md)
+> (18.10.2026) — v1-юниты выведены, движок прикрепляется к единому serve v2.
+> Решения этой записи о переключателе `CLASSIFIER_ENGINE`, цепочке моделей и
+> fail-open остаются в силе.
 
 ## Контекст
 
