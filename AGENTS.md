@@ -226,6 +226,8 @@ Brain-мандат [#027](../brain_matrica/cross-project-ideas/ideas/027-gate-re
 | [`deadcode`](.claude/commands/deadcode.md) | Ежемесячный гигиенический прогон dead-code (#036). |
 | [`discover_communities`](.claude/commands/discover_communities.md) | Подбор и нейро-классификация VK-сообществ в пул региона. |
 | [`curate`](.claude/commands/curate.md) | Shadow LLM-курация сводок (PoC). |
+| [`sites`](.claude/commands/sites.md) | Обслуживание сайтов кластера: отбор → разбор глазами → сверка → доставка без дублей (4 сайта, `conveyor_manual_deliver.py`). |
+| [`progon`](.claude/commands/progon.md) | Ручной разбор очереди классификатора вместо DeepSeek (пока P177): забор → разбор → вопросы → submit → журнал. |
 
 ---
 
