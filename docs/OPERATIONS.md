@@ -18,19 +18,28 @@ Swagger: `http://127.0.0.1:8000/docs`
 
 ## 2) Systemd (production)
 
-Сервисы:
+Сервисы (имена в systemd — `setka*`; в старых памятках они же назывались
+`sarafan*` — такого юнита на боксе нет):
 
-- `sarafan`
-- `sarafan-celery-worker`
-- `sarafan-celery-beat`
-- `sarafan-vk-bot` — демон ВК-бота САРАФАНа (Bots Long Poll, `scripts/vk_bot_daemon.py`;
+- `setka` — приложение (FastAPI/uvicorn)
+- `setka-celery-worker`
+- `setka-celery-beat`
+- `setka-vk-bot` — демон ВК-бота САРАФАНа (Bots Long Poll, `scripts/vk_bot_daemon.py`;
   юнит ставится `scripts/install_vk_bot_service.sh`)
+- `opencode-web` — нейро-движок классификатора (OpenCode v2 на loopback,
+  ADR-0009); его память сторожит `opencode-rss-guard.timer` — исходники и
+  объяснение в [`infra/neural/`](../infra/neural/README.md)
+- `neural-vpn` и `neural-egress-redirect` — ВПН-плечо движка; стоят
+  `disabled`, пока нет подписки NextGenVPN (P205)
 
 Перезапуск:
 
 ```bash
-sudo systemctl restart sarafan sarafan-celery-worker sarafan-celery-beat sarafan-vk-bot
+sudo systemctl restart setka setka-celery-worker setka-celery-beat setka-vk-bot
 ```
+
+Проверить разом: `systemctl is-active setka setka-celery-worker setka-celery-beat
+setka-vk-bot opencode-web` и `curl -s http://127.0.0.1:8000/api/health/full`.
 
 Логи: `~/САРАФАН/logs/` (есть logrotate); демон бота пишет в `logs/vk-bot.log`.
 
