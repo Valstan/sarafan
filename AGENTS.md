@@ -118,7 +118,10 @@ python ../brain_matrica/.claude/scripts/brain_find.py "слова симптом
 2. **Feature-ветка** — `git checkout -b <type>/<slug>` (`feat/`, `fix/`, `chore/`, `docs/`, `refactor/`). Direct push в `main` запрещён ([ADR-0002](../brain_matrica/adr/0002-pr-only-flow-no-direct-push.md)).
 3. **Работа над фичей** — обычные правки кода. После них:
    - `pytest tests/ -q` — все тесты зелёные. **Сверяй и количество собранных** (порядок — в §«Состояние проекта»): «12 passed» вместо ~2000 — это не зелёный прогон, а не тот путь или сломанный сбор.
-   - `pre-commit run --all-files` — black/isort/flake8.
+   - `pre-commit run --all-files` — black/isort/flake8. **Сначала `git add`:** флаг
+  `--all-files` идёт по `git ls-files`, то есть **новые (untracked) файлы он не
+  видит** и печатает `Passed` — зелёный прогон без них не значит ничего
+  (напоролись 20.10: локально «Passed», CI красный на тех же файлах).
 4. **PR** — `gh pr create` с Summary + Test plan. **Описательное тело PR заменяет старую DEV_HISTORY** ([ADR-0001](docs/adr/0001-archive-dev-history.md)) — что меняли, почему, какие тесты, какое применение на проде. **Авто-мерж под гейтами** ([#027](#автономия-под-гейтами-027)): зелёные `pre-commit` + `pytest` + CI → `gh pr merge --squash --delete-branch` без ручного «окей» (черта — destructive прод-операции с данными, см. ниже).
 
    **Обязательная проверка защиты `main`** (директива brain 2026-08-17, сверено с сервером 2026-08-20): влить PR нельзя, пока не позеленела проверка с именем ровно **`test (3.12)`**. Это не «светится красным в интерфейсе» — **merge отклоняет сервер**, и правило действует на владельца тоже (`enforce_admins: true`). Отсюда три следствия для любого агента:
