@@ -317,6 +317,15 @@ class BulletinBuilder:
 
         return "\n".join(parts)
 
+    def order_for_publication(self, posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Порядок, в котором посты пойдут в публикацию (публичная обёртка).
+
+        Нужен тем, кто готовит пост ДО сборки: пересказ текста (``rewriter``)
+        платит за каждый пост, поэтому переписывать надо ровно те, что попадут
+        в ленту, — а это первые ``max_posts_per_bulletin`` в этом порядке.
+        """
+        return self._sort_by_popularity(posts)
+
     def _sort_by_popularity(self, posts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Sort posts by rating score, descending (звено 5, шаг 2).
 

@@ -305,3 +305,23 @@ def test_urgent_beats_freshness_too(monkeypatch):
     order = BulletinBuilder(urgent_lips={"2_2"})._sort_by_popularity([fresh, stale_urgent])
 
     assert order[0] is stale_urgent
+
+
+def test_order_for_publication_puts_urgent_first_then_rating():
+    """Порядок для пересказа совпадает с порядком публикации.
+
+    Пересказ платный, поэтому переписываем верхушку этого порядка: срочное
+    вперёд, дальше по рейтингу. Тест держит именно совпадение с сортировкой
+    самой сборки — разойтись они не имеют права.
+    """
+    posts = [
+        {"owner_id": -1, "id": 1, "text": "обычный", "views": {"count": 1000}},
+        {"owner_id": -1, "id": 2, "text": "срочный", "views": {"count": 0}},
+        {"owner_id": -1, "id": 3, "text": "слабый", "views": {"count": 5}},
+    ]
+    b = BulletinBuilder(header="", urgent_lips={"1_2"})
+    order = b.order_for_publication(posts)
+    assert [p["id"] for p in order][0] == 2
+    # Тот же порядок, что уйдёт в публикацию: сортировка одна и та же.
+    built = b.build_bulletin(posts, group_names={})
+    assert built.posts_included[0] == "1_2"
