@@ -251,10 +251,10 @@ bash scripts/git_sync_check.sh --gate
 
 ## Шаг 9. Авто-merge handoff-PR (только для doc-only PR)
 
-Если PR — **только** про доки (изменены **только** `docs/SESSION_HANDOFF.md`, `docs/PENDING_FOLLOWUPS.md` и/или письмо-находка `mailbox/to-brain/*.md` с Шага 5.5), его можно авто-смёрджить после CI. Письма в `mailbox/to-brain/` — чистые доки (brain читает их read-only), кода не несут.
+Если PR — **только** про доки (изменены **только** `docs/SESSION_HANDOFF.md`, `docs/PENDING_FOLLOWUPS.md`, `docs/TICKLER.md`, `docs/ops/pilot-qa-log.md` и/или письмо-находка `mailbox/to-brain/*.md` с Шага 5.5), его можно авто-смёрджить после CI. Письма в `mailbox/to-brain/` — чистые доки (brain читает их read-only), кода не несут.
 
 **Не делать авто-merge, если:**
-- В PR есть **любые** файлы кроме `docs/SESSION_HANDOFF.md` / `docs/PENDING_FOLLOWUPS.md` / `docs/pending/*.md` / `mailbox/to-brain/*.md` (например, в ветке есть feature-коммиты с Шага 2 — это код, ему нужно ревью / `/reliz`).
+- В PR есть **любые** файлы кроме `docs/SESSION_HANDOFF.md` / `docs/PENDING_FOLLOWUPS.md` / `docs/TICKLER.md` / `docs/ops/pilot-qa-log.md` / `docs/pending/*.md` / `mailbox/to-brain/*.md` (например, в ветке есть feature-коммиты с Шага 2 — это код, ему нужно ревью / `/reliz`).
 - В PR-ветке несколько коммитов с кодом.
 - `--no-automerge` в `$ARGUMENTS`.
 
@@ -269,11 +269,16 @@ PR_NUM=<номер открытого PR>
 # миграциями и конфигами регионов, то есть такой PR не doc-only.
 # docs/pending/** — тела записей PENDING после раскладки D-097: такие же доки,
 # и без них doc-only PR отбраковывался бы каждый раз, когда правится запись.
-ALLOWED='docs/SESSION_HANDOFF.md docs/PENDING_FOLLOWUPS.md docs/ops/DISTILL_LOG.md'
+# docs/TICKLER.md и docs/ops/pilot-qa-log.md — журналы-будильники (правило #152 и
+# журнал ПРОГОНа): правятся на закрытии сессии почти всегда, кода не несут.
+# Фильтр ниже — «только эти файлы», поэтому код-PR, в который по правилу #152
+# положили строку TICKLER, всё равно не станет doc-only.
+ALLOWED='docs/SESSION_HANDOFF.md docs/PENDING_FOLLOWUPS.md docs/ops/DISTILL_LOG.md docs/TICKLER.md docs/ops/pilot-qa-log.md'
 files=$(gh pr view "$PR_NUM" --json files --jq '.files[].path')
 extra=$(echo "$files" \
   | grep -v -F -x -f <(echo "$ALLOWED" | tr ' ' '\n') \
-  | grep -v '^mailbox/to-brain/.*\.md$' \n  | grep -v '^docs/pending/.*\.md$' || true)
+  | grep -v '^mailbox/to-brain/.*\.md$' \
+  | grep -v '^docs/pending/.*\.md$' || true)
 ```
 
 Если `extra` непустой — пропустить авто-merge, доложить: «PR содержит код — merge руками после ревью или через `/reliz`: `gh pr merge $PR_NUM --squash --delete-branch`».
