@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 from typing import Any, List, Optional, Tuple
 
 # Тематика → заголовок «Тема {регион}:» (fallback, когда в zagolovki нет ключа)
@@ -112,37 +113,65 @@ def resolve_bulletin_header(region_config: Any, theme: str, region: Any) -> str:
     return f"📰 {theme} {rlabel}:"
 
 
+def _city_hashtag(raw: str) -> str:
+    """Название райцентра → аккуратный тег: «малмыж» → «#Малмыж».
+
+    Хвостовые цифры отбрасываются: в части регионов в ``raicentr`` лежит
+    «Киров43» (код региона приклеен к названию), и тег ``#Киров43`` читается
+    как опечатка, а не как город.
+    """
+    value = " ".join((raw or "").strip().lstrip("#").split())
+    value = re.sub(r"\d+$", "", value).strip()
+    if not value:
+        return ""
+    value = value.replace("-", "_").replace("—", "_").replace(" ", "_")
+    if value.islower():
+        value = value[:1].upper() + value[1:]
+    return f"#{value}"
+
+
+def _district_hashtags(region: Any) -> List[str]:
+    """Теги района из ``regions.local_hashtags`` (без #), кроме райцентра.
+
+    Там лежит готовая пара вида ``#малмыж,#малмыжский_район``: первый тег —
+    райцентр (он уходит в ``local_hashtag``), второй и далее — район/округ.
+    """
+    raw = getattr(region, "local_hashtags", None) if region is not None else None
+    if not raw:
+        return []
+    parts = [p.strip().lstrip("#") for p in str(raw).replace("\n", ",").split(",")]
+    out: List[str] = []
+    for part in parts[1:]:
+        part = re.sub(r"[^0-9A-Za-zА-Яа-яЁё_]", "", part.replace("-", "_").replace(" ", "_"))
+        if len(part) >= 4 and part not in out:
+            out.append(part)
+    return out[:2]
+
+
 def resolve_bulletin_hashtags(
     region_config: Any,
     theme: str,
+    region: Any = None,
 ) -> Tuple[List[str], str]:
-    """
-    Возвращает (список тематических тегов без #, один или несколько) и локальный
-    тег региона с # или "".
+    """Тематические теги (без #) и локальный тег региона (с #).
 
-    Как в Mongo: combined «спортЛебяжье» в heshteg[theme] и отдельно #лебяжье из raicentr.
+    Схема владельца 20.10: подпись поста — это 3–4 коротких тега, а не склейка
+    «культураМалмыж» (она читалась как обрубленное слово и выглядела
+    недоделанной). Порядок: тема словом → тег района → тег райцентра.
+
+    Комбинированные теги из ``region_configs.heshteg`` больше не используются
+    намеренно: это ручные заготовки старого Postopus, каждое значение —
+    склейка темы с названием района, ровно та форма, которую владелец забраковал.
+    Данные в базе остаются, читать их незачем.
     """
-    heshteg = getattr(region_config, "heshteg", None) or {}
     heshteg_local = getattr(region_config, "heshteg_local", None) or {}
-    if not isinstance(heshteg, dict):
-        heshteg = {}
     if not isinstance(heshteg_local, dict):
         heshteg_local = {}
 
-    tags: List[str] = []
-    if theme in heshteg and str(heshteg[theme]).strip():
-        tags.append(str(heshteg[theme]).strip().lstrip("#"))
-    else:
-        raicentr = (heshteg_local.get("raicentr") or "").strip().lstrip("#")
-        tw = _THEME_HASHTAG_WORD.get(theme, theme)
-        if raicentr:
-            tags.append(f"{tw}{raicentr}")
-        else:
-            tags.append(tw)
+    tags: List[str] = [_THEME_HASHTAG_WORD.get(theme, theme)]
+    tags.extend(_district_hashtags(region))
 
-    raicentr_raw = (heshteg_local.get("raicentr") or "").strip()
-    local_hashtag = f"#{raicentr_raw.lstrip('#')}" if raicentr_raw else ""
-
+    local_hashtag = _city_hashtag(str(heshteg_local.get("raicentr") or ""))
     return tags, local_hashtag
 
 

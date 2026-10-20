@@ -49,12 +49,29 @@ def test_resolve_header_fallback_sport_russian(monkeypatch):
     assert "Лебяжье" in h
 
 
-def test_resolve_hashtags_fallback_combined_and_local():
-    rc = SimpleNamespace(heshteg={}, heshteg_local={"raicentr": "лебяжье"})
+def test_resolve_hashtags_theme_word_and_local():
+    """Схема 20.10: тема словом + тег райцентра, без склейки «спортЛебяжье»."""
+    rc = SimpleNamespace(heshteg={"sport": "спортЛебяжье"}, heshteg_local={"raicentr": "лебяжье"})
     tags, loc = resolve_bulletin_hashtags(rc, "sport")
-    assert "спорт" in tags[0].lower() or "спорт" in tags[0]
-    assert "лебяжье" in tags[0].lower()
-    assert loc == "#лебяжье"
+    assert tags[0] == "спорт"
+    assert all("лебяжье" not in t.lower() for t in tags), "тема и район больше не склеиваются"
+    assert loc == "#Лебяжье"
+
+
+def test_resolve_hashtags_adds_district_tag_from_region():
+    rc = SimpleNamespace(heshteg={}, heshteg_local={"raicentr": "малмыж"})
+    region = SimpleNamespace(local_hashtags=["#малмыж", "#малмыжский_район"])
+    tags, loc = resolve_bulletin_hashtags(rc, "kultura", region)
+    assert tags[0] == "культура"
+    assert "малмыжский_район" in tags
+    assert loc == "#Малмыж"
+
+
+def test_resolve_hashtags_drops_region_code_from_city():
+    """«Киров43» в конфиге — это город Киров, а не тег с цифрами."""
+    rc = SimpleNamespace(heshteg={}, heshteg_local={"raicentr": "Киров43"})
+    _, loc = resolve_bulletin_hashtags(rc, "oblast")
+    assert loc == "#Киров"
 
 
 def test_resolve_header_oblast_fallback(monkeypatch):
@@ -80,4 +97,4 @@ def test_hashtags_and_attribution_are_not_headers(monkeypatch):
 
     tags, loc = resolve_bulletin_hashtags(rc, "sport")
 
-    assert tags and loc == "#лебяжье"
+    assert tags and loc == "#Лебяжье"

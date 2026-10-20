@@ -94,17 +94,40 @@ def build_headliner(
     *,
     group_name: str = "",
     local_hashtag: str = "",
+    theme_tags: Optional[List[str]] = None,
 ) -> Tuple[str, List[str]]:
-    """Текст и вложения одиночного поста: текст + атрибуция + локальный тег."""
+    """Текст и вложения одиночного поста: заголовок + текст + источник + теги.
+
+    Заголовок приходит из ``rewriter`` (модель строит его по контексту поста).
+    Если модель заголовка не дала — пост выходит как раньше, без него: пустая
+    строка не должна превращаться в дыру в вёрстке.
+    """
     from utils.post_utils import extract_source_attribution
 
-    parts = [(post.get("text") or "").strip()]
-    attribution = ""
+    headline = " ".join(str(post.get("headline") or "").split())
+    parts: List[str] = []
+    if headline:
+        parts.extend([headline, ""])
+    parts.append((post.get("text") or "").strip())
+
     if not post.get("hide_attribution"):
         attribution = extract_source_attribution(post, group_name)
         if attribution:
             parts.extend(["", attribution])
+
+    tags = [t for t in (theme_tags or []) if str(t or "").strip()]
     if local_hashtag:
-        parts.extend(["", local_hashtag])
+        tags.append(local_hashtag)
+    topic_tag = str(post.get("topic_tag") or "").strip()
+    if topic_tag:
+        tags.append(topic_tag)
+    if tags:
+        parts.extend(["", " ".join(_ensure_hash(t) for t in tags[:5])])
+
     attachments = build_attachments_list(extract_vk_attachments(post))
     return "\n".join(parts), attachments
+
+
+def _ensure_hash(tag: str) -> str:
+    value = str(tag or "").strip()
+    return value if value.startswith("#") else f"#{value}"

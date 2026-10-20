@@ -2,9 +2,18 @@
 
 Заказ владельца 20.10: движок фильтрует поток и **формирует посты для
 постинга** — то есть лента публикует не копипасту чужого текста с атрибуцией,
-а наш пересказ. Форма поста не меняется (одна новость — один пост, P168),
-меняется только текст: пересказ 300–1400 знаков, атрибуция-ссылка на источник
-и хэштеги остаются на месте (их добавляет ``BulletinBuilder``).
+а наш пересказ. Форма поста остаётся «одна новость — один пост» (P168), но
+текст теперь состоит из трёх частей:
+
+- **заголовок** — одна строка, собранная моделью по контексту новости
+  (завлекающая, но честная: без выдуманных фактов);
+- **пересказ** 300–1400 знаков;
+- **подпись источника** и хэштеги — их добавляет ``BulletinBuilder``
+  (ссылки на источник владелец убрал 20.10, подробности — ``utils.post_utils``).
+
+Заголовок и тег — необязательная надстройка: модель вправе их не дать, тогда
+пост выходит как раньше. Это осознанный fail-open — украшение не должно быть
+ценой испорченного пересказа.
 
 Границы решения:
 
@@ -43,7 +52,25 @@ SYSTEM_PROMPT = """Ты — редактор районной новостной
 новости из сообщества района. Перепиши его своими словами так, чтобы пост можно
 было опубликовать в нашей ленте.
 
-ЖЁСТКИЕ ПРАВИЛА:
+ФОРМАТ ОТВЕТА — ровно три части, каждая начинается с новой строки:
+ЗАГОЛОВОК: <одна строка>
+ТЕГ: <одно слово>
+ТЕКСТ:
+<пересказ>
+
+ПРАВИЛА ЗАГОЛОВКА:
+- Одна строка до 80 знаков, без точки в конце, без кавычек и эмодзи.
+- Цепляет самое интересное в новости (что произошло и где), но не врёт: нельзя
+  добавлять факты, оценки и обещания, которых нет в источнике.
+- Не «шок», не «сенсация», не вопрос к читателю, не кликбейт-обман.
+- Не повторяй название района, если оно уже в тексте: заголовок про событие.
+
+ПРАВИЛА ТЕГА:
+- Одно слово по сути новости, маленькими буквами, без #: субботник, ремонт_дорог,
+  паводок, выпускной, ярмарка.
+- Не пиши общие слова: новости, культура, спорт, район, малмыж.
+
+ЖЁСТКИЕ ПРАВИЛА ТЕКСТА:
 - Сохрани ВСЕ факты, имена, названия, числа, даты, адреса и телефоны ровно как в
   источнике. Ничего не добавляй и не додумывай: чего нет в тексте, того нет и в
   пересказе.
@@ -57,8 +84,7 @@ SYSTEM_PROMPT = """Ты — редактор районной новостной
 - Не повторяй уже сказанное: каждый абзац добавляет новую информацию.
 - Не добавляй обобщающий абзац в конце («таким образом», «в целом», «итак»).
 - Пересказ не должен быть длиннее источника: меньше фактов — короче текст.
-- Верни ТОЛЬКО текст поста: без пояснений, без заголовка «Пост:», без кавычек
-  вокруг всего текста.
+- Верни ТОЛЬКО три части выше: без пояснений и без кавычек вокруг ответа.
 """
 
 USER_TEMPLATE = """Район: {region}
@@ -72,11 +98,33 @@ _LABEL_RE = re.compile(
     r"^\s*(?:готовый\s+текст|текст\s+поста|текст|пост|пересказ|новость)\s*:\s*",
     re.IGNORECASE,
 )
+_HEADLINE_LINE_RE = re.compile(r"^\s*(?:заголовок|headline)\s*[:：]\s*(.+)$", re.IGNORECASE)
+_TAG_LINE_RE = re.compile(r"^\s*(?:тег|хэштег|tag|hashtag)\s*[:：]\s*(.+)$", re.IGNORECASE)
+_BODY_MARK_RE = re.compile(r"^\s*(?:текст|text)\s*[:：]\s*$", re.IGNORECASE)
 _HASHTAG_RE = re.compile(r"(?:^|\s)#[^\s#]+")
 _MENTION_RE = re.compile(r"(?:^|\s)@[A-Za-z0-9_.]+")
 _MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((?:https?://)?[^)]+\)")
 _MD_EMPH_RE = re.compile(r"(\*\*|__|\*|_|`)")
 _MULTI_NEWLINE_RE = re.compile(r"\n{3,}")
+# Служебные теги, которые модель иногда предлагает вместо сути новости.
+_GENERIC_TAGS = frozenset(
+    {
+        "новости",
+        "новость",
+        "культура",
+        "спорт",
+        "район",
+        "малмыж",
+        "киров",
+        "область",
+        "событие",
+        "жизнь",
+        "общество",
+    }
+)
+# Потолок заголовка: длиннее — уже не заголовок, а первый абзац.
+MAX_HEADLINE_CHARS = 90
+MIN_HEADLINE_CHARS = 12
 
 
 @dataclass
@@ -87,6 +135,7 @@ class RewriteStats:
     skipped_short: int = 0
     attempted: int = 0
     rewritten: int = 0
+    headlines: int = 0
     failed: int = 0
     tokens: int = 0
     reasons: List[str] = field(default_factory=list)
@@ -98,6 +147,7 @@ class RewriteStats:
             "skipped_short": self.skipped_short,
             "attempted": self.attempted,
             "rewritten": self.rewritten,
+            "headlines": self.headlines,
             "failed": self.failed,
             "tokens": self.tokens,
             "reasons": list(self.reasons),
@@ -150,20 +200,104 @@ def _dedupe_paragraphs(text: str) -> str:
     return "\n\n".join(kept)
 
 
+def _strip_fence(text: str) -> str:
+    """Снять ```-обёртку, которой модели иногда оборачивают весь ответ."""
+    text = (text or "").strip()
+    if not text.startswith("```"):
+        return text
+    lines = text.splitlines()
+    if lines:
+        lines = lines[1:]
+    if lines and lines[-1].strip().startswith("```"):
+        lines = lines[:-1]
+    return "\n".join(lines).strip()
+
+
+def split_reply(raw: str) -> tuple[str, str, str]:
+    """Ответ модели → ``(заголовок, тег, текст)``.
+
+    Контракт ответа — три части с метками (см. ``SYSTEM_PROMPT``). Модель
+    вправе их не дать: тогда заголовок и тег пустые, а весь ответ — текст, то
+    есть пост выходит как раньше. Это осознанный fail-open: заголовок — украшение,
+    которого не должно быть ценой испорченного пересказа.
+    """
+    text = _strip_fence(raw)
+    lines = text.splitlines()
+    headline = ""
+    tag = ""
+    start = 0
+    while start < len(lines):
+        line = lines[start]
+        if not headline:
+            match = _HEADLINE_LINE_RE.match(line)
+            if match:
+                headline = match.group(1)
+                start += 1
+                continue
+        if not tag:
+            match = _TAG_LINE_RE.match(line)
+            if match:
+                tag = match.group(1)
+                start += 1
+                continue
+        if _BODY_MARK_RE.match(line):
+            start += 1
+        break
+    return headline, tag, "\n".join(lines[start:])
+
+
+def clean_headline(raw: str) -> str:
+    """Привести строку заголовка к виду «одна строка без разметки».
+
+    Пустая строка — штатный ответ: заголовка не будет. Обрезка идёт по границе
+    слова, а не по символу: обрубок вида «Глава района открыл шко» владелец
+    назвал главной придиркой к прежним постам (20.10).
+    """
+    text = (raw or "").strip()
+    text = _MD_LINK_RE.sub(r"\1", text)
+    text = _HASHTAG_RE.sub("", text)
+    text = _MENTION_RE.sub("", text)
+    text = _MD_EMPH_RE.sub("", text)
+    text = re.sub(r"^[\s«\"“”'‘’]+|[\s«\"“”'‘’]+$", "", text)
+    text = re.sub(r"\s+", " ", text).strip().rstrip(".")
+    # Эмодзи и прочие символы вне букв/цифр/базовой пунктуации — не заголовок.
+    text = re.sub(r"[^\w\s\-–—:,.!?()/%«»\"'№]", "", text).strip()
+    if len(text) < MIN_HEADLINE_CHARS:
+        return ""
+    if len(text) > MAX_HEADLINE_CHARS:
+        cut = text[:MAX_HEADLINE_CHARS]
+        if " " in cut:
+            cut = cut.rsplit(" ", 1)[0]
+        text = cut.rstrip(" ,;:—-")
+    return text
+
+
+def clean_topic_tag(raw: str) -> str:
+    """Тег по сути новости → ``#слово`` либо пустая строка.
+
+    Модель отвечает «одним словом», но регулярно приносит фразу, решётку или
+    общее слово («новости»). Такой тег не нужен: он дублирует тематический и
+    раздувает подпись поста.
+    """
+    value = (raw or "").strip().strip("«»\"'").lstrip("#").strip()
+    if not value:
+        return ""
+    value = re.sub(r"\s+", "_", value).lower()
+    value = re.sub(r"[^0-9a-zа-яё_]", "", value).strip("_")
+    if not (3 <= len(value) <= 25):
+        return ""
+    if value in _GENERIC_TAGS:
+        return ""
+    return f"#{value}"
+
+
 def clean_rewrite(raw: str) -> str:
     """Привести ответ модели к виду «просто текст поста».
 
     Модели регулярно добавляют markdown, метку «Пост:», хэштеги источника или
     кавычки вокруг всего текста. Всё это — шум вёрстки, а не содержание.
     """
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        if lines:
-            lines = lines[1:]
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]
-        text = "\n".join(lines).strip()
+    text = _strip_fence(raw)
 
     text = _LABEL_RE.sub("", text, count=1).strip()
 
@@ -238,7 +372,8 @@ def rewrite_post(
         stats.reasons.append(str(result.get("reason") or "engine_failed"))
         return False
 
-    cleaned = clean_rewrite(str(result.get("content") or ""))
+    headline_raw, tag_raw, body_raw = split_reply(str(result.get("content") or ""))
+    cleaned = clean_rewrite(body_raw)
     usable = _usable(
         source,
         cleaned,
@@ -250,8 +385,19 @@ def rewrite_post(
         stats.reasons.append(f"shape:{len(cleaned)}")
         return False
 
+    headline = clean_headline(headline_raw)
+    topic_tag = clean_topic_tag(tag_raw)
+
     post["text_original"] = source
     post["text"] = usable
+    # Заголовок и тег — необязательная надстройка: пустая строка значит «как
+    # раньше». Они не участвуют в проверке длины пересказа: заголовок это
+    # отдельная строка поста, а не часть пересказа.
+    if headline:
+        post["headline"] = headline
+        stats.headlines += 1
+    if topic_tag:
+        post["topic_tag"] = topic_tag
     stats.rewritten += 1
     return True
 

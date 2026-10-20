@@ -1,4 +1,4 @@
-"""Каскадная сводка для регионов типа ``oblast`` и ``strana``.
+﻿"""Каскадная сводка для регионов типа ``oblast`` и ``strana``.
 
 Простыми словами
 ================
@@ -570,7 +570,7 @@ async def run_cascaded_bulletin(
     # своей траурной повестки, а посты из районов в их раздел не подходят.
 
     header = resolve_bulletin_header(region_config, theme, region)
-    theme_tags, local_hashtag = resolve_bulletin_hashtags(region_config, theme)
+    theme_tags, local_hashtag = resolve_bulletin_hashtags(region_config, theme, region)
 
     results = []
     selected_by_lip: Dict[str, Dict[str, Any]] = {}
@@ -798,7 +798,7 @@ async def run_neighbor_bulletin(
         from tasks.parsing_scheduler_tasks import _build_neighbor_footer
 
         if region is not None:
-            footer = await _build_neighbor_footer(session, region)
+            footer = await _build_neighbor_footer(session, region, respect_cadence=False)
     except Exception:  # pragma: no cover - CTA не имеет права ронять канал
         logger.warning("neighbor CTA footer build failed", exc_info=True)
 
