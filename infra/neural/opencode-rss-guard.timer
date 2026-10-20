@@ -1,0 +1,11 @@
+[Unit]
+Description=Run the OpenCode engine RSS guard every 2 minutes
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=2min
+AccuracySec=30s
+Unit=opencode-rss-guard.service
+
+[Install]
+WantedBy=timers.target
