@@ -564,6 +564,18 @@ async def run_cascaded_bulletin(
     splitter = BulletinSplitter()
     mourning_posts, regular_posts = splitter.split_posts(cascade_news_posts)
     debug_counters["regular_posts_ready"] = len(regular_posts)
+
+    # Официальные названия источников — тот же канон, что у районных волн
+    # (ADR-0011 п.3): в каскадной и соседской сводке тоже должна стоять
+    # подпись, как сообщество называет себя в VK, а не ручное сокращение из
+    # базы. Отказ VK — остаёмся на имени из базы, сводка идёт дальше.
+    try:
+        from modules.source_names import enrich_group_names
+
+        group_names = enrich_group_names(vk, group_names, regular_posts)
+    except Exception:  # pragma: no cover - подпись не валит сводку
+        logger.debug("cascaded: official source names failed", exc_info=True)
+
     if mourning_posts:
         debug_counters["filtered_posts_mourning"] = len(mourning_posts)
     # Для каскадных сводок траурные посты исключаем — у области/страны нет
