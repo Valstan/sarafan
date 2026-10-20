@@ -83,14 +83,24 @@ cd ~/САРАФАН
 - `DEEPSEEK_API_KEY` (нейро-движок экосистемы, MANDATE brain 2026-08-10)
 - `SERVER_HOST`, `SERVER_PORT`
 - `LOG_LEVEL` (по умолчанию `WARNING`)
+- `POST_REWRITE_ENABLED` (пересказ и заголовок; `0` — выключить, откат ADR-0010/0011)
+- `NEIGHBOR_FOOTER_MAX_PER_DAY` (футер «Ленты соседей»: сколько раз в сутки, дефолт 3)
+- `NEIGHBOR_FOOTER_MIN_GAP_HOURS` (пауза между показами футера, дефолт 4)
 
 ## 4.5) sudo для воркера: белый список команд
 
 Воркер и движок работают под пользователем `valstan`. Без пароля ему разрешён
-**только белый список** — точные команды, без wildcard'ов и без `ALL`:
+**только белый список** — точные команды, без `ALL`:
 смена выхода ВПН (`/etc/neural/egress.d/10-nextgenvpn.sh`), `systemctl`
 start/stop/restart по рабочим юнитам (`setka`, `setka-celery-worker`,
 `setka-celery-beat`, `setka-vk-bot`, `opencode-web`), `status`/`is-active`.
+
+**Wildcard разрешён ровно в одном виде** — там, где он не расширяет права:
+`systemctl status *` и `systemctl is-active *` (это чтение состояния любого
+юнита; без `*` правило не совпадало с `status sarafan`, и диагностика молча
+падала на пароле). Любой `*` в строке с `start`/`stop`/`restart`/`reload` —
+запрещён: он превращает белый список в `ALL`. Сторож проверяет это отдельно
+([`tests/test_infra/test_sudo_allowlist.py`](../tests/test_infra/test_sudo_allowlist.py)).
 
 Канон списка — [`infra/sudoers/setka-worker`](../infra/sudoers/setka-worker),
 инструкция и откат — [`infra/sudoers/README.md`](../infra/sudoers/README.md).

@@ -56,6 +56,7 @@ class BulletinBuilder:
     # VK limits
     MAX_TEXT_LENGTH = 4096  # VK post text limit
     MAX_ATTACHMENTS = 10  # VK wall.post media limit
+    MAX_HASHTAGS = 5  # потолок подписи: короче — читаемее (решение 20.10)
     MAX_POSTS_PER_BULLETIN = 3  # Maximum number of posts in a single bulletin
 
     # Default header
@@ -87,6 +88,7 @@ class BulletinBuilder:
         max_posts_per_bulletin: Optional[int] = None,
         footer: str = "",
         urgent_lips: Optional[Set[str]] = None,
+        topical_hashtags: Optional[List[str]] = None,
     ):
         """
         Args:
@@ -103,6 +105,8 @@ class BulletinBuilder:
                 срочными для жителей (отключения, перекрытия, аварии,
                 предупреждения МЧС). Такие посты встают впереди всех остальных,
                 минуя рейтинг. Пусто = порядок прежний.
+            topical_hashtags: теги «по сути новости» от модели (``#субботник``,
+                ``#ремонт_дорог``); уже с решёткой, список ограничен вызывающим.
         """
         # Пустая строка = без заголовка (например траурная сводка); None = дефолтный заголовок
         if header is None:
@@ -111,6 +115,7 @@ class BulletinBuilder:
             self.header = header
         self.hashtags = hashtags or []
         self.local_hashtag = local_hashtag
+        self.topical_hashtags = topical_hashtags or []
         self.footer = (footer or "").strip()
         self.max_text_length = max_text_length
         self.repost_mode = repost_mode
@@ -303,6 +308,12 @@ class BulletinBuilder:
         """
         parts = []
 
+        # Заголовок (модель, ``rewriter``) — отдельной строкой над пересказом.
+        headline = " ".join(str(post_data.get("headline") or "").split())
+        if headline:
+            parts.append(headline)
+            parts.append("")
+
         # Post marker + text
         if post_text:
             parts.append(post_text)
@@ -311,9 +322,10 @@ class BulletinBuilder:
 
         # Empty line between text and attribution only when attribution is present
         if not post_data.get("hide_attribution"):
-            parts.append("")
             attribution = extract_source_attribution(post_data, group_name)
-            parts.append(attribution)
+            if attribution:
+                parts.append("")
+                parts.append(attribution)
 
         return "\n".join(parts)
 
@@ -419,21 +431,43 @@ class BulletinBuilder:
         return min(remaining, max_per_post)
 
     def _build_hashtag_text(self) -> str:
-        """Build hashtag string for bulletin."""
-        hashtags = []
+        """Build hashtag string for bulletin.
 
-        # Add theme hashtags
-        hashtags.extend(self.hashtags)
+        Порядок подписи — от общего к частному: тема, тег по сути новости,
+        локальные теги района. Потолок в пять тегов: «супер-эффективные»
+        паблики держат подпись короткой, а длинная простыня тегов читается
+        как спам и обрезается на превью.
+        """
+        raw: List[str] = []
 
-        # Add local hashtag
+        # Тематические теги (тема словом, районный тег района)
+        raw.extend(self.hashtags)
+        # Тег по сути конкретной новости — от модели.
+        raw.extend(self.topical_hashtags)
+        # Локальный тег района — последним, он же самый «широкий».
         if self.local_hashtag:
-            hashtags.append(self.local_hashtag)
+            raw.append(self.local_hashtag)
 
-        if not hashtags:
+        if not raw:
             return ""
 
-        # Format as hashtags
-        formatted = [f"#{tag}" if not tag.startswith("#") else tag for tag in hashtags]
+        formatted: List[str] = []
+        seen: Set[str] = set()
+        for tag in raw:
+            value = str(tag or "").strip()
+            if not value:
+                continue
+            if not value.startswith("#"):
+                value = f"#{value}"
+            # Внутри одного поста тег повторять незачем: «#малмыж #Малмыж» —
+            # ровно то, что владелец назвал недоделанной подписью.
+            key = value.lstrip("#").lower().replace("ё", "е")
+            if key in seen:
+                continue
+            seen.add(key)
+            formatted.append(value)
+            if len(formatted) >= self.MAX_HASHTAGS:
+                break
 
         return " ".join(formatted)
 

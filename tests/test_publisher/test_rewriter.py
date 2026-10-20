@@ -165,6 +165,65 @@ def test_clean_rewrite_drops_repeated_paragraph():
     assert "Родители проявили выдумку" in cleaned
 
 
+def test_headline_and_tag_are_taken_from_the_contract(monkeypatch):
+    """Ответ по контракту: заголовок и тег становятся полями поста."""
+    body = _long("Субботник собрал больше ста человек.")
+    raw = f"ЗАГОЛОВОК: Субботник на Аджимском кладбище\nТЕГ: субботник\nТЕКСТ:\n{body}"
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: _ok(raw))
+
+    post = _post()
+    stats = rewriter.rewrite_posts([post], region="mi", theme="kultura")
+
+    assert stats.rewritten == 1
+    assert stats.headlines == 1
+    assert post["headline"] == "Субботник на Аджимском кладбище"
+    assert post["topic_tag"] == "#субботник"
+    # Метки контракта не должны попасть в текст поста.
+    assert "ЗАГОЛОВОК" not in post["text"]
+    assert "ТЕКСТ:" not in post["text"]
+    assert post["text"].startswith("Субботник собрал больше ста человек.")
+
+
+def test_answer_without_headline_still_publishes(monkeypatch):
+    """Модель не дала заголовок — пост выходит как раньше, без него."""
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: _ok(_long()))
+
+    post = _post()
+    stats = rewriter.rewrite_posts([post], region="mi")
+
+    assert stats.rewritten == 1
+    assert stats.headlines == 0
+    assert "headline" not in post
+    assert "topic_tag" not in post
+
+
+def test_headline_is_cut_by_word_not_by_letter():
+    """Обрубок вида «Глава района открыл шко» владелец назвал придиркой 20.10."""
+    raw = "Глава района торжественно открыл новую школу в селе Большая Китя"
+    headline = rewriter.clean_headline(raw)
+    assert len(headline) <= rewriter.MAX_HEADLINE_CHARS
+    assert not headline.endswith("Кит")
+    assert raw.startswith(headline)
+
+
+def test_headline_drops_links_tags_and_emoji():
+    raw = "🎉 Открыли школу: [подробнее](https://vk.com/x) #новости @admin"
+    headline = rewriter.clean_headline(raw)
+    assert "http" not in headline
+    assert "#" not in headline
+    assert "@" not in headline
+    assert headline.startswith("Открыли школу")
+
+
+def test_generic_topic_tag_is_rejected():
+    """«#новости» дублирует тематический тег и раздувает подпись."""
+    assert rewriter.clean_topic_tag("новости") == ""
+    assert rewriter.clean_topic_tag("культура") == ""
+    assert rewriter.clean_topic_tag("субботник") == "#субботник"
+    assert rewriter.clean_topic_tag("#ремонт дорог") == "#ремонт_дорог"
+    assert rewriter.clean_topic_tag("!!!!") == ""
+
+
 def test_padding_against_short_source_is_rejected(monkeypatch):
     """Пересказ длиннее источника на треть — это вода, а не пересказ."""
     source = "Дети участвовали в конкурсе поделок. " * 12  # ~430 знаков

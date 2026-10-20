@@ -1,4 +1,4 @@
-"""
+﻿"""
 Celery tasks for Postopus migration - replaces crontab scheduling
 
 Migrated from old_postopus crontab entries to Celery Beat schedule.
@@ -80,7 +80,7 @@ def _use_cascade_bulletin(region_kind: str | None, region_config: Any) -> bool:
     return mode != "communities"
 
 
-async def _build_neighbor_footer(session, region) -> str:
+async def _build_neighbor_footer(session, region, *, respect_cadence: bool = True) -> str:
     """Футер сводки: «Ленты соседей: Имя url · Имя url» (этап 4 ребрендинга).
 
     Соседи ротируются по дню (``toordinal``): каждый день сводки региона
@@ -88,6 +88,12 @@ async def _build_neighbor_footer(session, region) -> str:
     остаётся коротким (лимиты — в ``render_footer_line``). Откат per-region:
     ``regions.config['neighbor_footer'] = false``. Ошибка сборки не должна
     ронять публикацию — снаружи вызов обёрнут try/except.
+
+    ``respect_cadence`` — держать ли суточный лимит показов
+    (``modules.neighbor_footer``): не больше 2–3 раз в сутки с паузой между
+    показами (заказ владельца 20.10). Отдельная соседская сводка
+    (``run_neighbor_bulletin``) передаёт ``False``: там «Ленты соседей» — суть
+    поста, а не подпись под новостью.
     """
     from datetime import date as _date
 
@@ -103,6 +109,11 @@ async def _build_neighbor_footer(session, region) -> str:
     codes = parse_neighbors(getattr(region, "neighbors", None))
     if not codes:
         return ""
+    if respect_cadence:
+        from modules.neighbor_footer import footer_allowed
+
+        if not footer_allowed(getattr(region, "code", "")):
+            return ""
     rows = (
         await session.execute(
             _select(_R.code, _R.name, _R.vk_group_id, _R.config).where(
@@ -127,7 +138,15 @@ async def _build_neighbor_footer(session, region) -> str:
         return ""
     start = _date.today().toordinal() % len(items)
     rotated = items[start:] + items[:start]
-    return render_footer_line(rotated)
+    footer = render_footer_line(rotated)
+    if footer and respect_cadence:
+        # Считаем показ в момент сборки: пост с подписью уже формируется. Редкий
+        # случай «сводка не влезла и не вышла» сжигает слот — это дешёвая
+        # сторона ошибки: лимит «не более N» соблюдается всегда.
+        from modules.neighbor_footer import register_footer
+
+        register_footer(getattr(region, "code", ""))
+    return footer
 
 
 @shared_task(bind=True, max_retries=3)
@@ -556,7 +575,7 @@ def parse_and_publish_theme(
 
             # 7. Build bulletins (заголовки/хештеги как в old_postopus)
             header = resolve_bulletin_header(region_config, theme, region)
-            theme_tags, local_hashtag = resolve_bulletin_hashtags(region_config, theme)
+            theme_tags, local_hashtag = resolve_bulletin_hashtags(region_config, theme, region)
 
             # Community access tokens + publish-кандидаты подбираются внутри
             # ``VKPublisher.create_with_policy`` (см. modules.vk_token_router.TokenPolicy).
@@ -593,12 +612,15 @@ def parse_and_publish_theme(
                     regular_posts = [p for p in regular_posts if p is not headliner_post]
 
             # Футер со ссылками на соседей (этап 4): перекрёстная видимость
-            # сети в каждой сводке; сборка не имеет права ронять публикацию.
+            # сети — но не в каждом посте (заказ владельца 20.10: 2–3 раза в
+            # сутки с паузой, см. modules.neighbor_footer). Собираем только
+            # когда есть что публиковать: пустая волна не должна съедать показ.
             neighbor_footer = ""
-            try:
-                neighbor_footer = await _build_neighbor_footer(session, region)
-            except Exception:  # pragma: no cover - footer никогда не валит волну
-                logger.warning("neighbor footer build failed", exc_info=True)
+            if regular_posts:
+                try:
+                    neighbor_footer = await _build_neighbor_footer(session, region)
+                except Exception:  # pragma: no cover - footer никогда не валит волну
+                    logger.warning("neighbor footer build failed", exc_info=True)
 
             builder = BulletinBuilder(
                 header=header,
@@ -612,10 +634,11 @@ def parse_and_publish_theme(
             )
 
             # 7.4 Пересборка текста своими словами (заказ владельца 2026-10-20):
-            # лента публикует наш пересказ, атрибуция-ссылка остаётся. Платим
-            # только за посты, которые реально уходят в публикацию — вершина
-            # порядка сборки плюс хедлайнер. Failed/флаг выключен → исходник
-            # (fail-open). В dry_run не переписываем: прогон должен быть бесплатным.
+            # лента публикует наш пересказ с заголовком; подпись источника —
+            # название без ссылки (см. utils.post_utils). Платим только за посты,
+            # которые реально уходят в публикацию — вершина порядка сборки плюс
+            # хедлайнер. Failed/флаг выключен → исходник (fail-open). В dry_run
+            # не переписываем: прогон должен быть бесплатным.
             rewrite_stats = None
             if not dry_run:
                 try:
@@ -639,6 +662,35 @@ def parse_and_publish_theme(
                         parser_stats["posts_rewrite_failed"] = rewrite_stats.failed
                 except Exception:  # noqa: BLE001 — пересказ не точка отказа волны
                     logger.warning("post rewrite failed — публикуем исходный текст", exc_info=True)
+
+            # Официальные названия источников (решение владельца 20.10): в подписи
+            # «Источник: …» — имя, как сообщество называет себя в VK, а не ручное
+            # сокращение из базы. Один groups.getById на волну, с кэшем; отказ VK —
+            # остаёмся на имени из базы (подпись не точка отказа).
+            try:
+                from modules.source_names import enrich_group_names
+
+                group_names = enrich_group_names(
+                    vk_client,
+                    group_names,
+                    list(regular_posts)
+                    + ([headliner_post] if headliner_post else [])
+                    + list(mourning_posts or []),
+                )
+            except Exception:  # pragma: no cover - подпись не валит волну
+                logger.debug("official source names failed", exc_info=True)
+
+            # Тег «по сути новости» от модели — один-два на сводку, от самых
+            # сильных постов порядка публикации. Больше двух не берём: подпись
+            # должна остаться короткой (правило 20.10).
+            topical_hashtags: List[str] = []
+            for candidate in builder.order_for_publication(regular_posts):
+                tag = str(candidate.get("topic_tag") or "").strip()
+                if tag and tag not in topical_hashtags:
+                    topical_hashtags.append(tag)
+                if len(topical_hashtags) >= 2:
+                    break
+            builder.topical_hashtags = topical_hashtags
 
             # Regular bulletin
             if regular_posts:
@@ -709,6 +761,7 @@ def parse_and_publish_theme(
                     headliner_post,
                     group_name=group_names.get(str(hl_aid), "") if hl_aid else "",
                     local_hashtag=local_hashtag,
+                    theme_tags=theme_tags,
                 )
                 hl_lip = lip_of_post(hl_owner, headliner_post.get("id", 0))
                 selected_by_lip[hl_lip] = headliner_post

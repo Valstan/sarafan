@@ -1,24 +1,31 @@
-"""Tests for post_utils attribution (VK wiki links)."""
+"""Подпись источника: имя без ссылки (решение владельца 20.10)."""
 
 from utils.post_utils import extract_source_attribution
 
 
-def test_extract_source_attribution_wiki_link_with_group_name():
+def test_extract_source_attribution_is_name_only():
     post = {"owner_id": -123456, "id": 789}
     s = extract_source_attribution(post, "Новости района")
-    assert s == "[https://vk.com/wall-123456_789|Новости района]"
+    assert s == "Источник: Новости района"
+    assert "vk.com" not in s
 
 
-def test_extract_source_attribution_escapes_pipe_in_name():
+def test_extract_source_attribution_keeps_pipe_as_plain_text():
+    """Вертикальная черта больше не ломает разметку: это обычный текст."""
     post = {"owner_id": -1, "id": 2}
     s = extract_source_attribution(post, "A|B")
-    assert s == "[https://vk.com/wall-1_2|A·B]"
+    assert s == "Источник: A|B"
 
 
-def test_extract_source_attribution_fallback_label():
+def test_extract_source_attribution_without_name_is_empty():
+    """Не знаем, чей пост, — подпись не ставим вовсе.
+
+    «Источник: Источник» — хуже, чем отсутствие подписи: он выглядит как
+    потерянные данные, а не как их отсутствие.
+    """
     post = {"owner_id": 100, "id": 5}
-    s = extract_source_attribution(post, "")
-    assert s == "[https://vk.com/wall100_5|Источник]"
+    assert extract_source_attribution(post, "") == ""
+    assert extract_source_attribution(post, "   ") == ""
 
 
 def test_post_counts_unwraps_both_vk_shapes():

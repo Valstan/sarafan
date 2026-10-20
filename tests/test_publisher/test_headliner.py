@@ -71,9 +71,40 @@ def test_build_headliner_text_and_attachments():
     )
     text, atts = build_headliner(post, group_name="Родник", local_hashtag="#опарино")
     assert text.startswith("Важная новость района.")
+    assert "Источник: Родник" in text
+    assert "vk.com" not in text
     assert "#опарино" in text
     assert "Новости" not in text.split("\n")[0]  # без шапки-заголовка сводки
     assert atts and atts[0].startswith("photo-111_9")
+
+
+def test_build_headliner_puts_the_headline_first():
+    """Завлекающий заголовок — первая строка поста (заказ владельца 20.10)."""
+    post = _post(text="Субботник собрал больше ста человек.", headline="Субботник на кладбище")
+    text, _ = build_headliner(
+        post,
+        group_name="Верхнедеревенский сельский клуб",
+        local_hashtag="#Малмыж",
+        theme_tags=["культура", "малмыжский_район"],
+    )
+    lines = text.splitlines()
+    assert lines[0] == "Субботник на кладбище"
+    assert lines[1] == ""
+    assert "Субботник собрал больше ста человек." in text
+    assert "#культура" in text and "#малмыжский_район" in text and "#Малмыж" in text
+    assert "Источник: Верхнедеревенский сельский клуб" in text
+    assert text.rstrip().splitlines()[-1].startswith("#")
+
+
+def test_build_headliner_caps_hashtags():
+    post = _post(text="Текст.", topic_tag="#субботник")
+    text, _ = build_headliner(
+        post,
+        theme_tags=["новости", "район", "лишний1", "лишний2"],
+        local_hashtag="#Малмыж",
+    )
+    tags_line = text.rstrip().splitlines()[-1]
+    assert len(tags_line.split()) <= 5
 
 
 def test_build_headliner_hide_attribution():
