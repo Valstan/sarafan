@@ -99,17 +99,21 @@ def test_too_long_answer_is_rejected(monkeypatch):
     assert post["text"] == source
 
 
-def test_short_source_is_not_rewritten(monkeypatch):
+def test_short_source_is_not_rewritten(monkeypatch, caplog):
     """Объявление из двух строк пересказывать нечего — токены не тратим."""
     calls = []
     monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: calls.append(kw) or _ok(_long()))
 
     post = _post("Продам мотоблок, 8900, звоните.")
-    stats = rewriter.rewrite_posts([post], region="mi")
+    with caplog.at_level("INFO", logger="modules.publisher.rewriter"):
+        stats = rewriter.rewrite_posts([post], region="mi")
 
     assert calls == []
     assert stats.skipped_short == 1
     assert stats.attempted == 0
+    # Волна, где всё короткое, не должна молчать: иначе «пересказ не сработал»
+    # не отличить от «пересказ не включался».
+    assert any("коротких=1" in rec.getMessage() for rec in caplog.records)
 
 
 def test_limit_caps_paid_calls(monkeypatch):

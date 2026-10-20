@@ -298,7 +298,7 @@ def rewrite_posts(
             stats.reasons.append(f"error:{e.__class__.__name__}")
             logger.warning("post rewrite: сбой на посте — оставляю исходник", exc_info=True)
 
-    if stats.attempted:
+    if stats.attempted or stats.skipped_short:
         logger.info(
             "post rewrite: регион=%s тема=%s переписано=%d отказов=%d" " коротких=%d токенов=%d%s",
             region or "?",
