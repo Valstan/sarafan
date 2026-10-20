@@ -69,12 +69,18 @@ def commands() -> list[str]:
     return _entries()
 
 
+# Команды чтения состояния: звёздочка здесь обязательна (см. ниже) и безопасна —
+# `status`/`is-active` состояние не меняют, `--vacuum` живёт в journalctl.
+READONLY_UNIT_WILDCARD = re.compile(r"^/(?:usr/)?bin/systemctl (?:status|is-active) \*$")
+
+
 def test_allowlist_has_no_blanket_root(commands: list[str]) -> None:
     """Белый список не должен снова стать «всё можно»."""
     assert commands, "белый список пуст"
     for command in commands:
         assert command != "ALL", "NOPASSWD: ALL — ровно та дыра, которую закрывали"
-        assert "*" not in command, f"wildcard в белом списке: {command}"
+        if "*" in command:
+            assert READONLY_UNIT_WILDCARD.match(command), f"wildcard в белом списке: {command}"
         assert command.startswith("/"), f"не абсолютный путь: {command}"
 
 
