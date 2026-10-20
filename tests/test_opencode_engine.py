@@ -796,6 +796,42 @@ def test_chat_rotates_egress_and_retries_after_gate(monkeypatch):
     assert calls["models"] == chain_len + 1
 
 
+def test_chat_rotates_egress_and_retries_after_quota(monkeypatch):
+    """Лимит 429 на всей цепочке — тоже per-IP: меняем выход и повторяем.
+
+    Замер 20.10 19:40: все три модели ``http_429 Rate limit exceeded``,
+    поворот ВПН → тот же запрос прошёл за 4,9 с.
+    """
+    from modules import opencode_engine as engine
+
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "opencode")
+    chain_len = len(engine.get_model_chain())
+    calls = {"models": 0, "rotate": 0}
+
+    def fake_call(model_id, prompt, label):
+        calls["models"] += 1
+        if calls["models"] <= chain_len:
+            return {
+                "ok": False,
+                "reason": "http_429",
+                "detail": "http_429: Rate limit exceeded. Please try again later.",
+            }
+        return {"ok": True, "content": "ok", "model": f"opencode/{model_id}", "usage": None}
+
+    monkeypatch.setattr(engine, "_call_model", fake_call)
+    monkeypatch.setattr(
+        engine,
+        "_rotate_egress",
+        lambda detail="": calls.__setitem__("rotate", calls["rotate"] + 1) or True,
+    )
+
+    result = engine.chat(user="u")
+
+    assert result["ok"] is True
+    assert calls["rotate"] == 1
+    assert calls["models"] == chain_len + 1
+
+
 def test_chat_does_not_rotate_without_gate(monkeypatch):
     """Обычный отказ модели не трогает ВПН: выход меняют только по гейту."""
     from modules import opencode_engine as engine

@@ -130,6 +130,14 @@ _NETWORK_GATE_MARKERS = (
     "abusive traffic",
 )
 
+# Причины, после которых имеет смысл менять выход ВПН (обе меряются на проде
+# 20.10): IP-гейт («abusive traffic from this IP») и ``http_429 Rate limit
+# exceeded`` на всей цепочке. Второе — тоже per-IP: в 19:40 все три модели
+# отвечали 429, а через секунду после смены сервера тот же запрос прошёл
+# (замер: поворот → ``Да`` за 4,9 с). Поворот случается только когда легла ВСЯ
+# цепочка: 429 одной модели — обычный фолбэк, ВПН не трогаем.
+_EGRESS_TRIGGER_REASONS = ("network_gate", "http_429")
+
 # Файл-метка паузы между поворотами выхода: воркер многопроцессный, поэтому
 # метка на диске, а не в памяти процесса.
 _EGRESS_ROTATE_STAMP = "setka_egress_rotate.stamp"
@@ -541,7 +549,7 @@ def parse_messages(
 
 
 def _rotate_egress(detail: str = "") -> bool:
-    """Сменить выход ВПН после гейта free-тира по IP. ``True`` — повернули.
+    """Сменить выход ВПН после гейта free-тира по IP или лимита 429. ``True`` — повернули.
 
     Пауза (``NEURAL_EGRESS_ROTATE_COOLDOWN``) обязательна: без неё волна из
     десятков регионов крутила бы серверы подряд и сожгла все адреса подписки за
@@ -562,7 +570,7 @@ def _rotate_egress(detail: str = "") -> bool:
     cooldown = get_egress_rotate_cooldown()
     if last and (now - last) < cooldown:
         logger.warning(
-            "opencode-engine: гейт free-тира по IP, но поворот выхода на паузе" " (%.0f с из %.0f)",
+            "opencode-engine: гейт/лимит free-тира, но поворот выхода на паузе" " (%.0f с из %.0f)",
             now - last,
             cooldown,
         )
@@ -578,7 +586,7 @@ def _rotate_egress(detail: str = "") -> bool:
         out = (proc.stdout or "").strip().splitlines()
         tail = out[-1] if out else (proc.stderr or "").strip()[:160]
         logger.warning(
-            "opencode-engine: выход ВПН повёрнут после гейта (%s) rc=%s %s",
+            "opencode-engine: выход ВПН повёрнут после гейта/лимита (%s) rc=%s %s",
             detail[:120],
             proc.returncode,
             tail,
@@ -745,7 +753,8 @@ def chat(
     reasons: List[str] = []
     gate_detail = ""
     # Две попытки: первая — как есть; если вся цепочка легла на гейт free-тира
-    # по IP — меняем выход ВПН (если бокс это разрешил) и повторяем цепочку.
+    # по IP или на лимит (429) — меняем выход ВПН (если бокс это разрешил) и
+    # повторяем цепочку.
     for attempt in (1, 2):
         reasons = []
         gate_detail = ""
@@ -756,7 +765,7 @@ def chat(
             reason = str(result.get("reason") or "?")
             detail = str(result.get("detail") or "")[:120]
             reasons.append(f"{model_id}:{reason}")
-            if reason == "network_gate" and not gate_detail:
+            if reason in _EGRESS_TRIGGER_REASONS and not gate_detail:
                 gate_detail = detail
             logger.warning("opencode-engine: модель %s отказала (%s %s)", model_id, reason, detail)
             if reason in _FATAL_REASONS:
