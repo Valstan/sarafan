@@ -41,4 +41,8 @@ valstan ALL=(root) NOPASSWD: /usr/bin/systemctl start opencode-web, /usr/bin/sys
 # Статус любого юнита — чтение, не меняет состояние (диагностика).
 # Журнал целиком (`journalctl`) намеренно не разрешён: он умеет `--vacuum-*`,
 # то есть стирание логов. Последние строки журнала видны через `status -n`.
-valstan ALL=(root) NOPASSWD: /usr/bin/systemctl status, /bin/systemctl status, /usr/bin/systemctl is-active, /bin/systemctl is-active
+# ⚠️ `status *` и `is-active *` — звёздочка обязательна: строка sudoers с
+# аргументом совпадает с командой ТОЧНО, и `systemctl status` без `*` разрешал
+# вызов без имени юнита, а `systemctl status setka` падал с «a password is
+# required» (поймано 20.10 при первой же установке).
+valstan ALL=(root) NOPASSWD: /usr/bin/systemctl status *, /bin/systemctl status *, /usr/bin/systemctl is-active *, /bin/systemctl is-active *
