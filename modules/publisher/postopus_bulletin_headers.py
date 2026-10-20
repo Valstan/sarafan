@@ -25,6 +25,7 @@ _THEME_TITLE: dict[str, str] = {
     "setka": "Сетка регионов",
     "oblast": "Главное в области",
     "neighbors": "Новости соседей",
+    "korotko": "Короткой строкой",
     # Расширенная областная повестка (community-mode oblast)
     "proisshestviya": "Происшествия",
     "molodezh": "Молодёжь",
@@ -51,6 +52,7 @@ _THEME_HASHTAG_WORD: dict[str, str] = {
     "setka": "сетка",
     "oblast": "область",
     "neighbors": "соседи",
+    "korotko": "коротко",
     # Расширенная областная повестка (community-mode oblast)
     "proisshestviya": "происшествия",
     "molodezh": "молодёжь",

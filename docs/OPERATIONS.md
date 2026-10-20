@@ -84,6 +84,7 @@ cd ~/САРАФАН
 - `SERVER_HOST`, `SERVER_PORT`
 - `LOG_LEVEL` (по умолчанию `WARNING`)
 - `POST_REWRITE_ENABLED` (пересказ и заголовок; `0` — выключить, откат ADR-0010/0011)
+- `DAILY_DIGEST_ENABLED` (вечерняя сводка «Короткой строкой» в 21:40; `0` — выключить)
 - `NEIGHBOR_FOOTER_MAX_PER_DAY` (футер «Ленты соседей»: сколько раз в сутки, дефолт 3)
 - `NEIGHBOR_FOOTER_MIN_GAP_HOURS` (пауза между показами футера, дефолт 4)
 

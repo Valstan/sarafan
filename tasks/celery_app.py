@@ -197,6 +197,7 @@ app = Celery(
         "tasks.vk_bot_tasks",  # ВК-бот кабинета: Long Poll сообщества САРАФАН
         "tasks.broadcast_tasks",  # сетевая рассылка: диспетчер-публикатор (brain 2026-06-14)
         "tasks.promo_tasks",  # раскрутка молодых сообществ (заказ владельца 2026-08-28)
+        "tasks.digest_tasks",  # вечерняя сводка «Короткой строкой» (P182, 20.10)
     ],
 )
 app.config_from_object("config.celery_config")
@@ -2273,6 +2274,18 @@ app.conf.beat_schedule = {
             # См. комментарий у prune-gateway-requests-daily: expires обязан
             # переживать ночной затор, иначе ретеншн молча не работает.
             "expires": 21600,
+            "catchup": False,
+        },
+    },
+    # Вечерняя сводка «Короткой строкой» (P182, заказ 20.10): последний пост дня
+    # — сжатые пересказы того, что сегодня не попало в ленту. 21:40 MSK, после
+    # последних волн новостей (22:00 — «Ленты соседей» и хвосты расписания),
+    # чтобы не украсть слот у свежей новости. Kill-switch — DAILY_DIGEST_ENABLED.
+    "daily-digest-evening": {
+        "task": "tasks.digest_tasks.publish_daily_digest",
+        "schedule": crontab(minute=40, hour=21),
+        "options": {
+            "expires": 1800,
             "catchup": False,
         },
     },
