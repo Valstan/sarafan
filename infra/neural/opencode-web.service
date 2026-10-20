@@ -1,7 +1,7 @@
 [Unit]
 Description=OpenCode v2 (free models, loopback) - classifier engine
-After=network-online.target
-Wants=network-online.target
+After=network-online.target privoxy.service
+Wants=network-online.target privoxy.service
 
 [Service]
 Type=simple
@@ -12,6 +12,11 @@ EnvironmentFile=/etc/opencode-web/anon.env
 Environment=HOME=/home/opencode
 Environment=XDG_DATA_HOME=/home/opencode/.local/share/opencode
 Environment=TMPDIR=/home/opencode/.cache/tmp
+# Outbound through the HTTP proxy in front of the VPN socks inbound: the
+# nft-redirect of the engine uid does not work inside our container (see README).
+Environment=HTTPS_PROXY=http://127.0.0.1:8118
+Environment=HTTP_PROXY=http://127.0.0.1:8118
+Environment=NO_PROXY=127.0.0.1,localhost
 ExecStart=/usr/local/bin/opencode serve --hostname 127.0.0.1 --port 49374
 Restart=on-failure
 RestartSec=5
