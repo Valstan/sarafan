@@ -1,0 +1,9 @@
+[Unit]
+Description=Neural egress guard - VPN arm gives the engine an exit (ADR-0009)
+After=network-online.target neural-vpn.service privoxy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/lib/neural/neural-egress-guard.sh
+Nice=10

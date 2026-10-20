@@ -119,6 +119,21 @@ NO_SPAWN_WAIT_SEC = 30.0
 # отказ контура (нет адреса serve), а не свойство конкретной модели.
 _FATAL_REASONS = ("no_base_url",)
 
+# Признаки гейта free-тира по IP (замер 20.10: «free models aren't available
+# from your current network… we've detected abusive traffic from this IP»).
+# Гейт per-IP, поэтому лечится сменой выхода ВПН, а не сменой модели: все
+# модели каталога закрыты одним и тем же адресом.
+_NETWORK_GATE_MARKERS = (
+    "aren't available from your current network",
+    "are not available from your current network",
+    "abusive traffic from this ip",
+    "abusive traffic",
+)
+
+# Файл-метка паузы между поворотами выхода: воркер многопроцессный, поэтому
+# метка на диске, а не в памяти процесса.
+_EGRESS_ROTATE_STAMP = "setka_egress_rotate.stamp"
+
 
 def _port_of(base_url: str) -> int:
     try:
@@ -472,11 +487,14 @@ def _error_text(err: Any) -> Optional[str]:
 def _reason_from_error(error: str) -> str:
     """Строка отказа → причина контракта.
 
-    Код из тела (``http_429`` и пр.) сохраняем как есть; отказ без кода
-    (``provider.no-route``: «Model unavailable») — ``model_error``. Обе
-    причины для фолбэка равнозначны: следующая модель может быть живой там,
-    где эта мертва.
+    Код из тела (``http_429`` и пр.) сохраняем как есть; гейт free-тира по IP
+    узнаём по тексту (``network_gate``) — у него нет HTTP-кода, и от смены
+    модели он не проходит; отказ без кода (``provider.no-route``) —
+    ``model_error``.
     """
+    low = (error or "").lower()
+    if any(marker in low for marker in _NETWORK_GATE_MARKERS):
+        return "network_gate"
     head = error.split(":", 1)[0]
     if head.startswith("http_") and head[5:].isdigit():
         return head
@@ -520,6 +538,62 @@ def parse_messages(
             if outcome and outcome != "succeeded":
                 error = _error_text(msg.get("error")) or outcome
     return "".join(text_chunks).strip(), usage, error
+
+
+def _rotate_egress(detail: str = "") -> bool:
+    """Сменить выход ВПН после гейта free-тира по IP. ``True`` — повернули.
+
+    Пауза (``NEURAL_EGRESS_ROTATE_COOLDOWN``) обязательна: без неё волна из
+    десятков регионов крутила бы серверы подряд и сожгла все адреса подписки за
+    один час. Метка лежит в temp, потому что воркер многопроцессный.
+    """
+    from config.opencode import get_egress_rotate_cmd, get_egress_rotate_cooldown
+
+    cmd = get_egress_rotate_cmd()
+    if not cmd:
+        return False
+
+    stamp = os.path.join(tempfile.gettempdir(), _EGRESS_ROTATE_STAMP)
+    now = time.time()
+    try:
+        last = os.path.getmtime(stamp)
+    except OSError:
+        last = 0.0
+    cooldown = get_egress_rotate_cooldown()
+    if last and (now - last) < cooldown:
+        logger.warning(
+            "opencode-engine: гейт free-тира по IP, но поворот выхода на паузе" " (%.0f с из %.0f)",
+            now - last,
+            cooldown,
+        )
+        return False
+
+    try:
+        proc = subprocess.run(  # noqa: S603 — команда из env бокса, не из ввода
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+        out = (proc.stdout or "").strip().splitlines()
+        tail = out[-1] if out else (proc.stderr or "").strip()[:160]
+        logger.warning(
+            "opencode-engine: выход ВПН повёрнут после гейта (%s) rc=%s %s",
+            detail[:120],
+            proc.returncode,
+            tail,
+        )
+        ok = proc.returncode == 0
+    except (OSError, subprocess.SubprocessError) as e:
+        logger.error("opencode-engine: поворот выхода не удался: %s", e)
+        return False
+
+    try:
+        with open(stamp, "w", encoding="utf-8") as fh:
+            fh.write(str(int(now)))
+    except OSError:
+        pass
+    return ok
 
 
 def _call_model(model_id: str, prompt: str, label: str) -> Dict[str, Any]:
@@ -669,17 +743,29 @@ def chat(
     prompt = f"{system.strip()}\n\n{user.strip()}" if (system or "").strip() else user.strip()
 
     reasons: List[str] = []
-    for model_id in chain:
-        result = _call_model(model_id, prompt, label)
-        if result.get("ok"):
-            return result
-        reason = str(result.get("reason") or "?")
-        detail = str(result.get("detail") or "")[:120]
-        reasons.append(f"{model_id}:{reason}")
-        logger.warning("opencode-engine: модель %s отказала (%s %s)", model_id, reason, detail)
-        if reason in _FATAL_REASONS:
-            # Отказ контура (нет адреса serve) — следующая модель не поможет.
-            break
+    gate_detail = ""
+    # Две попытки: первая — как есть; если вся цепочка легла на гейт free-тира
+    # по IP — меняем выход ВПН (если бокс это разрешил) и повторяем цепочку.
+    for attempt in (1, 2):
+        reasons = []
+        gate_detail = ""
+        for model_id in chain:
+            result = _call_model(model_id, prompt, label)
+            if result.get("ok"):
+                return result
+            reason = str(result.get("reason") or "?")
+            detail = str(result.get("detail") or "")[:120]
+            reasons.append(f"{model_id}:{reason}")
+            if reason == "network_gate" and not gate_detail:
+                gate_detail = detail
+            logger.warning("opencode-engine: модель %s отказала (%s %s)", model_id, reason, detail)
+            if reason in _FATAL_REASONS:
+                # Отказ контура (нет адреса serve) — следующая модель не поможет.
+                break
+        if attempt == 1 and gate_detail and _rotate_egress(gate_detail):
+            logger.warning("opencode-engine: повторяю цепочку после смены выхода ВПН")
+            continue
+        break
     return {
         "ok": False,
         "reason": "engine_all_failed",

@@ -29,6 +29,10 @@ Env vars:
   OPENCODE_SPILL_GLOB            # маска temp-мусора opencode; дефолт .bcdf*.so
   OPENCODE_SPILL_MAX_AGE         # возраст, после которого свипер удаляет
                                  # найденный мусор, сек; дефолт 1800 (P197)
+  NEURAL_EGRESS_ROTATE_CMD       # команда смены выхода ВПН при гейте free-тира
+                                 # по IP (напр. «sudo -n /etc/neural/egress.d/
+                                 # 10-nextgenvpn.sh»); пусто = автоповорот выкл.
+  NEURAL_EGRESS_ROTATE_COOLDOWN  # пауза между поворотами, сек; дефолт 600
 """
 
 from __future__ import annotations
@@ -142,6 +146,31 @@ def get_serve_max_lifetime() -> float:
 def get_spill_glob() -> str:
     """Маска temp-мусора opencode (P197)."""
     return (os.getenv("OPENCODE_SPILL_GLOB") or "").strip() or SPILL_GLOB
+
+
+def get_egress_rotate_cmd() -> List[str]:
+    """Команда смены выхода ВПН; пусто — автоповорот выключен.
+
+    Free-тир OpenCode закрывается по IP: «free models aren't available from your
+    current network… abusive traffic from this IP». Гейт per-IP, поэтому смена
+    выхода его снимает (замер 20.10: смена сервера — 1,7–2,6 с, движок живёт).
+    Здесь — команда поворота, а не путь к скрипту: политика «кто и как меняет
+    выход» остаётся настройкой бокса, а движок только просит.
+    """
+    raw = (os.getenv("NEURAL_EGRESS_ROTATE_CMD") or "").strip()
+    if not raw:
+        return []
+    import shlex
+
+    return shlex.split(raw)
+
+
+def get_egress_rotate_cooldown() -> float:
+    """Пауза между автоповоротами выхода, сек (дефолт 10 минут)."""
+    try:
+        return max(0.0, float(os.getenv("NEURAL_EGRESS_ROTATE_COOLDOWN", "600")))
+    except ValueError:
+        return 600.0
 
 
 def get_spill_max_age_sec() -> float:
