@@ -1,0 +1,10 @@
+[Unit]
+Description=RSS guard for the OpenCode engine (restart when it outgrows the box)
+After=opencode-web.service
+
+[Service]
+Type=oneshot
+Environment=UNIT=opencode-web
+Environment=ENGINE_USER=opencode
+Environment=LIMIT_MB=400
+ExecStart=/usr/local/lib/neural/opencode-rss-guard.sh

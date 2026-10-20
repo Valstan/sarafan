@@ -20,11 +20,12 @@ Env vars:
   OPENCODE_SERVER_PASSWORD       # basic-auth serve; пусто = без пароля
   OPENCODE_TIMEOUT=120           # потолок одного вызова модели, сек
   OPENCODE_MODEL_CHAIN           # CSV цепочка фолбэков: первая живая модель
-                                 # отвечает. Дефолт — замер 14.10 с VPS,
-                                 # перепроверен на v2 (17.10): longcat/mimo
-                                 # отвечают. Заведомо мёртвой головы в цепочке
-                                 # быть не должно — она съедает таймаут на
-                                 # каждом чанке.
+                                 # отвечает. Дефолт — замер 20.10 со своего
+                                 # бокса: deepseek-v4.1-flash-free первый
+                                 # (решение владельца), дальше glm-5.3 /
+                                 # mimo-v2.6 / longcat-2.5. Заведомо мёртвой
+                                 # головы в цепочке быть не должно — она
+                                 # съедает таймаут на каждом чанке.
   OPENCODE_SPILL_GLOB            # маска temp-мусора opencode; дефолт .bcdf*.so
   OPENCODE_SPILL_MAX_AGE         # возраст, после которого свипер удаляет
                                  # найденный мусор, сек; дефолт 1800 (P197)
@@ -35,10 +36,15 @@ from __future__ import annotations
 import os
 from typing import List
 
+# Замер 20.10 (движок v2.0.32, свой бокс): список моделей платформы сменился —
+# `space-bunny-free` из каталога ушёл (голова цепочки съедала бы таймаут),
+# `deepseek-v4.1-flash-free` отвечает за ~2,7 с и стоит первым по решению
+# владельца. Остальные — проверенные 20.10 фолбэки того же каталога.
 DEFAULT_MODEL_CHAIN = [
-    "longcat-2.5-preview-free",
-    "space-bunny-free",
+    "deepseek-v4.1-flash-free",
+    "glm-5.3-flash-free",
     "mimo-v2.6-flash-free",
+    "longcat-2.5-preview-free",
 ]
 
 DEFAULT_BASE_URL = "http://127.0.0.1:4096"

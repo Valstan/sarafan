@@ -1,0 +1,26 @@
+[Unit]
+Description=OpenCode v2 (free models, loopback) - classifier engine
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=opencode
+Group=opencode
+WorkingDirectory=/home/opencode
+EnvironmentFile=/etc/opencode-web/anon.env
+Environment=HOME=/home/opencode
+Environment=XDG_DATA_HOME=/home/opencode/.local/share/opencode
+Environment=TMPDIR=/home/opencode/.cache/tmp
+ExecStart=/usr/local/bin/opencode serve --hostname 127.0.0.1 --port 49374
+Restart=on-failure
+RestartSec=5
+# Vestigial on boxes without memory accounting (see README.md): kept as intent,
+# the enforced guard is opencode-rss-guard.timer.
+MemoryHigh=384M
+MemoryMax=450M
+PrivateTmp=yes
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

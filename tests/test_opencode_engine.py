@@ -121,6 +121,9 @@ def engine_on(monkeypatch):
     monkeypatch.setenv("CLASSIFIER_ENGINE", "opencode")
     monkeypatch.setenv("OPENCODE_BASE_URL", "http://127.0.0.1:4999")
     monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "")
+    # Цепочка фиксируется в тесте: дефолт меняется по замеру каталога моделей,
+    # и падение из-за смены головы цепочки — шум, а не регрессия.
+    monkeypatch.setenv("OPENCODE_MODEL_CHAIN", "longcat-2.5-preview-free")
 
 
 @pytest.fixture
@@ -502,7 +505,8 @@ def test_default_chain_excludes_geo_dead_models():
     from config.opencode import DEFAULT_MODEL_CHAIN
 
     assert "muse-spark-1.3-contributor-free" not in DEFAULT_MODEL_CHAIN
-    assert DEFAULT_MODEL_CHAIN[0] == "longcat-2.5-preview-free"
+    assert "space-bunny-free" not in DEFAULT_MODEL_CHAIN
+    assert DEFAULT_MODEL_CHAIN[0] == "deepseek-v4.1-flash-free"
 
 
 def test_serve_limits_from_env(monkeypatch):
