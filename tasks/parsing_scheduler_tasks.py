@@ -600,18 +600,48 @@ def parse_and_publish_theme(
             except Exception:  # pragma: no cover - footer никогда не валит волну
                 logger.warning("neighbor footer build failed", exc_info=True)
 
+            builder = BulletinBuilder(
+                header=header,
+                hashtags=theme_tags,
+                local_hashtag=local_hashtag,
+                max_text_length=region_config.text_post_maxsize_simbols or 4096,
+                repost_mode=region_config.setka_regim_repost,
+                max_posts_per_bulletin=pipeline_eff.get("max_posts_per_bulletin"),
+                footer=neighbor_footer,
+                urgent_lips=urgent_in_wave,
+            )
+
+            # 7.4 Пересборка текста своими словами (заказ владельца 2026-10-20):
+            # лента публикует наш пересказ, атрибуция-ссылка остаётся. Платим
+            # только за посты, которые реально уходят в публикацию — вершина
+            # порядка сборки плюс хедлайнер. Failed/флаг выключен → исходник
+            # (fail-open). В dry_run не переписываем: прогон должен быть бесплатным.
+            rewrite_stats = None
+            if not dry_run:
+                try:
+                    from modules.publisher.rewriter import rewrite_posts as _rewrite_posts
+
+                    rewrite_targets: List[Dict[str, Any]] = []
+                    if headliner_post is not None:
+                        rewrite_targets.append(headliner_post)
+                    if regular_posts:
+                        rewrite_targets.extend(builder.order_for_publication(regular_posts))
+                    rewrite_stats = _rewrite_posts(
+                        rewrite_targets,
+                        region=getattr(region, "name", "") or region.code,
+                        theme=theme,
+                        limit=builder.max_posts_per_bulletin
+                        + (1 if headliner_post is not None else 0),
+                    )
+                    if rewrite_stats.rewritten:
+                        parser_stats["posts_rewritten"] = rewrite_stats.rewritten
+                    if rewrite_stats.failed:
+                        parser_stats["posts_rewrite_failed"] = rewrite_stats.failed
+                except Exception:  # noqa: BLE001 — пересказ не точка отказа волны
+                    logger.warning("post rewrite failed — публикуем исходный текст", exc_info=True)
+
             # Regular bulletin
             if regular_posts:
-                builder = BulletinBuilder(
-                    header=header,
-                    hashtags=theme_tags,
-                    local_hashtag=local_hashtag,
-                    max_text_length=region_config.text_post_maxsize_simbols or 4096,
-                    repost_mode=region_config.setka_regim_repost,
-                    max_posts_per_bulletin=pipeline_eff.get("max_posts_per_bulletin"),
-                    footer=neighbor_footer,
-                    urgent_lips=urgent_in_wave,
-                )
                 bulletin = builder.build_bulletin(regular_posts, group_names=group_names)
                 if bulletin.post_count == 0 or not bulletin.text.strip():
                     logger.warning(
