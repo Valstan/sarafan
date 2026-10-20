@@ -104,8 +104,9 @@ ssh sarafan 'cd ~/SETKA && CLASSIFIER_INGEST_KEY=$(sudo -n grep -m1 "^CLASSIFIER
 
 ```bash
 scp <scratchpad>/edits.json sarafan:/tmp/distill_edits.json
-ssh sarafan "sudo bash -c 'set -a; . /etc/setka/setka.env; set +a; cd ~/SETKA && exec ./venv/bin/python scripts/distill_apply_rules.py /tmp/distill_edits.json --apply'"
+ssh sarafan "sudo bash -c 'set -a; . /etc/setka/setka.env; set +a; cd /home/\$SUDO_USER/SETKA && exec ./venv/bin/python scripts/distill_apply_rules.py /tmp/distill_edits.json --apply'"
 ```
+⚠️ `cd ~/SETKA` под `sudo` уводит в `/root` — каталог деплоя берём от `$SUDO_USER`.
 
 Проверка — не по «команда прошла», а по предмету: `GET /api/classifier/postulates`
 (ключ рутины) должен содержать новые тексты, а размер файла — вырасти. Правка

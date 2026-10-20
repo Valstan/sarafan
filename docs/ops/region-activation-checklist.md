@@ -786,7 +786,7 @@ ssh sarafan "sudo -u postgres psql -d setka -f ~/SETKA/database/migrations/073_k
 отчёт готовности, запись только с `--apply`.
 
 ```bash
-ssh sarafan "sudo bash -c 'set -a; . /etc/setka/setka.env; set +a; cd ~/SETKA && exec ./venv/bin/python scripts/activate_regions.py omutninsk belholunitsa verhnekame=kirs_info43 afanasyevo'"
+ssh sarafan "sudo bash -c 'set -a; . /etc/setka/setka.env; set +a; cd /home/\$SUDO_USER/SETKA && exec ./venv/bin/python scripts/activate_regions.py omutninsk belholunitsa verhnekame=kirs_info43 afanasyevo'"
 ```
 
 > ⚠️ **Три части команды обязательны, иначе она не запустится.** `/etc/setka/setka.env` —
@@ -830,7 +830,7 @@ community-токен, neighbors и права токена, и печатает 
 ## Шаг 6. Проверка живьём
 
 ```bash
-ssh sarafan "sudo bash -c 'set -a; . /etc/setka/setka.env; set +a; cd ~/SETKA && exec ./venv/bin/python scripts/smoke_test.py --region omutninsk --theme novost --min-posts 1'"
+ssh sarafan "sudo bash -c 'set -a; . /etc/setka/setka.env; set +a; cd /home/\$SUDO_USER/SETKA && exec ./venv/bin/python scripts/smoke_test.py --region omutninsk --theme novost --min-posts 1'"
 ```
 
 > ⏱ **Окно «передумать» измеряется минутами, а не часами.** Ни один прежний батч этого

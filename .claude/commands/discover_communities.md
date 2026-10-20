@@ -133,17 +133,65 @@ scp sarafan:/tmp/scan.json ./_scan.json
 `[{"vk_id": <положительный>, "category": "<тема>", "name": "...", "screen_name": "..."}]`.
 `vk_id` — положительный (как из groups.search); сидер сам пишет `-abs`.
 
+⚠️ Сверку кандидатов с текущим пулом делать по **`abs(vk_id)`**: скан отдаёт
+положительные id, в БД они отрицательные, и наивное сравнение даёт «уже в пуле: 0»
+на всём списке — то есть выглядит как «90 новых», а не как ошибка сверки
+(напоролось 20.10).
+
 ## Шаг 6. Засев (сначала dry-run!)
 `communities.vk_id` хранится **отрицательным**; уникального constraint нет — сидер
 дедуплит сам по (region, abs(vk_id), category).
+
+Команда живёт в **файле-обёртке**, а не в строке `ssh`: env нужно прочитать под `sudo`,
+а `cd ~/SETKA` под `sudo` уводит в `/root` (проверено 20.10 — команда падает на
+`cd: /root/SETKA: No such file or directory`). Плюс `$(...)` и вложенные кавычки в
+строке переживают два шелла и PowerShell хуже, чем путь к файлу.
 ```bash
-scp scripts/seed_region_communities.py ./seed.json sarafan:/tmp/
-# DRY-RUN
-ssh sarafan "sudo bash -c 'set -a; . /etc/setka/setka.env; set +a; cd ~/SETKA && ./venv/bin/python /tmp/seed_region_communities.py --region-code <code> --file /tmp/seed.json --dry-run'"
-# WRITE (после проверки вывода)
-ssh sarafan "sudo bash -c 'set -a; . /etc/setka/setka.env; set +a; cd ~/SETKA && ./venv/bin/python /tmp/seed_region_communities.py --region-code <code> --file /tmp/seed.json'"
+# /tmp/run_seed.sh — содержимое:
+#   set -euo pipefail
+#   set -a; . /etc/setka/setka.env; set +a
+#   cd "$(getent passwd "${SUDO_USER:-$(id -un)}" | cut -d: -f6)/SETKA"
+#   exec ./venv/bin/python /tmp/seed_region_communities.py --region-code <code> --file /tmp/seed.json "$@"
+scp scripts/seed_region_communities.py ./seed.json ./run_seed.sh sarafan:/tmp/
+ssh sarafan "sudo bash /tmp/run_seed.sh --dry-run"   # DRY-RUN
+ssh sarafan "sudo bash /tmp/run_seed.sh"             # WRITE — после проверки вывода
 ```
-(env читается под `sudo`, т.к. `valstan` сам `/etc/setka/setka.env` не видит.)
+(env читается под `sudo`, т.к. обычный пользователь `/etc/setka/setka.env` не видит.)
+
+## Шаг 6б. Снятие чужих доноров (если пул был клоном или разъехался)
+
+Добор и снятие — **разные шаги, и порядок обязателен: сначала добор, потом снятие**
+(решение владельца 20.10). Снять чужих раньше, чем набраны свои, значит оставить район
+без доноров.
+
+Признаки, что пора: у соседних районов совпадает размер пула и состав;
+своего района в пуле меньше половины; в пуле лежит **наша собственная** группа
+(`regions.vk_group_id`) — тогда район собирает наши же сводки.
+
+```sql
+-- 1) один пул у соседей (одинаковый состав = клон)
+SELECT c.vk_id, count(*) AS n, string_agg(r.code, ', ' ORDER BY r.code)
+FROM communities c JOIN regions r ON r.id = c.region_id
+WHERE c.is_active GROUP BY c.vk_id HAVING count(*) > 1 ORDER BY n DESC;
+-- 2) наша группа как донор (должно быть пусто)
+SELECT rd.code AS group_region, rp.code AS in_pool_of, c.vk_id, c.name
+FROM communities c
+JOIN regions rp ON rp.id = c.region_id
+JOIN regions rd ON rd.vk_group_id = c.vk_id
+WHERE c.is_active;
+```
+
+Снятие — [`scripts/deactivate_communities.py`](../../scripts/deactivate_communities.py)
+(мягко: `is_active=false` + `disabled_reason`, строка и статистика остаются):
+```bash
+scp scripts/deactivate_communities.py ./off.json ./run_off.sh sarafan:/tmp/
+ssh sarafan "sudo bash /tmp/run_off.sh --dry-run"   # DRY-RUN: покажет ровно то, что погаснет
+ssh sarafan "sudo bash /tmp/run_off.sh"             # WRITE — под гейтом #025, список владельцу
+```
+`off.json` — JSON-список id (знак не важен). Причины: `pool_foreign_district`
+(чужой район), `pool_own_group` (наша группа), `pool_not_news` (коммерция/не новости).
+⚠️ `disabled_reason='dormant_t1_auto'` **зарезервирован**: ежемесячный recheck вернёт
+такие строки в пул, и снятие окажется мнимым — скрипт такую причину не принимает.
 
 ## Шаг 7. Проверка
 ```bash
