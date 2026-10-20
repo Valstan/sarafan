@@ -1,0 +1,44 @@
+# /etc/sudoers.d/setka-worker — белый список привилегированных команд
+# пользователя, под которым работают воркер и движок (valstan).
+#
+# Канон этого файла — `infra/sudoers/setka-worker` в репозитории САРАФАН.
+# На бокс ставится так (см. infra/sudoers/README.md):
+#
+#     sudo install -m 0440 -o root -g root infra/sudoers/setka-worker \
+#         /etc/sudoers.d/setka-worker
+#     sudo visudo -c
+#
+# ⚠️ ПРАВИЛО ДЛЯ РАЗРАБОТЧИКА. Если код воркера начинает вызывать новую
+# привилегированную команду (`sudo -n ...`), она добавляется СЮДА в том же PR.
+# Иначе на боксе она упадёт с «sudo: a password is required», хотя тесты
+# зелёные: без пароля работают только строки ниже. Сторож —
+# `tests/test_infra/test_sudo_allowlist.py`: он сверяет sudo-вызовы в
+# modules/tasks/web/config с этим списком и валит CI, если список отстал.
+#
+# Всё, чего здесь нет (миграции БД, правка /etc, установка юнитов, nginx),
+# делается человеком с паролем: valstan состоит в группе sudo, поэтому
+# интерактивный `sudo` у него остаётся.
+
+# --- Движок классификатора -------------------------------------------------
+# Смена выхода ВПН после гейта free-тира по IP или лимита 429
+# (modules/opencode_engine.py, переменная NEURAL_EGRESS_ROTATE_CMD).
+valstan ALL=(root) NOPASSWD: /etc/neural/egress.d/10-nextgenvpn.sh
+
+# Legacy-харнесс v1 (`setka-opencode-run`): сейчас не спавнится
+# (OPENCODE_NO_SPAWN=1), строки оставлены на случай отката на v1.
+valstan ALL=(root) NOPASSWD: /usr/bin/systemctl start setka-opencode-run, /usr/bin/systemctl stop setka-opencode-run, /usr/bin/systemctl status setka-opencode-run, /bin/systemctl start setka-opencode-run, /bin/systemctl stop setka-opencode-run, /bin/systemctl status setka-opencode-run
+
+# --- Рабочие юниты САРАФАНА: релиз и диагностика ---------------------------
+# Нужны релизной процедуре (git pull + restart) и памятке check.
+# `/bin/systemctl` и `/usr/bin/systemctl` — один и тот же файл через symlink
+# /bin -> /usr/bin; sudo сравнивает путь как его нашёл PATH, поэтому оба.
+valstan ALL=(root) NOPASSWD: /usr/bin/systemctl start setka, /usr/bin/systemctl stop setka, /usr/bin/systemctl restart setka, /bin/systemctl start setka, /bin/systemctl stop setka, /bin/systemctl restart setka
+valstan ALL=(root) NOPASSWD: /usr/bin/systemctl start setka-celery-worker, /usr/bin/systemctl stop setka-celery-worker, /usr/bin/systemctl restart setka-celery-worker, /bin/systemctl start setka-celery-worker, /bin/systemctl stop setka-celery-worker, /bin/systemctl restart setka-celery-worker
+valstan ALL=(root) NOPASSWD: /usr/bin/systemctl start setka-celery-beat, /usr/bin/systemctl stop setka-celery-beat, /usr/bin/systemctl restart setka-celery-beat, /bin/systemctl start setka-celery-beat, /bin/systemctl stop setka-celery-beat, /bin/systemctl restart setka-celery-beat
+valstan ALL=(root) NOPASSWD: /usr/bin/systemctl start setka-vk-bot, /usr/bin/systemctl stop setka-vk-bot, /usr/bin/systemctl restart setka-vk-bot, /bin/systemctl start setka-vk-bot, /bin/systemctl stop setka-vk-bot, /bin/systemctl restart setka-vk-bot
+valstan ALL=(root) NOPASSWD: /usr/bin/systemctl start opencode-web, /usr/bin/systemctl stop opencode-web, /usr/bin/systemctl restart opencode-web, /bin/systemctl start opencode-web, /bin/systemctl stop opencode-web, /bin/systemctl restart opencode-web
+
+# Статус любого юнита — чтение, не меняет состояние (диагностика).
+# Журнал целиком (`journalctl`) намеренно не разрешён: он умеет `--vacuum-*`,
+# то есть стирание логов. Последние строки журнала видны через `status -n`.
+valstan ALL=(root) NOPASSWD: /usr/bin/systemctl status, /bin/systemctl status, /usr/bin/systemctl is-active, /bin/systemctl is-active

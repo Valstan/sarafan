@@ -84,6 +84,25 @@ cd ~/САРАФАН
 - `SERVER_HOST`, `SERVER_PORT`
 - `LOG_LEVEL` (по умолчанию `WARNING`)
 
+## 4.5) sudo для воркера: белый список команд
+
+Воркер и движок работают под пользователем `valstan`. Без пароля ему разрешён
+**только белый список** — точные команды, без wildcard'ов и без `ALL`:
+смена выхода ВПН (`/etc/neural/egress.d/10-nextgenvpn.sh`), `systemctl`
+start/stop/restart по рабочим юнитам (`setka`, `setka-celery-worker`,
+`setka-celery-beat`, `setka-vk-bot`, `opencode-web`), `status`/`is-active`.
+
+Канон списка — [`infra/sudoers/setka-worker`](../infra/sudoers/setka-worker),
+инструкция и откат — [`infra/sudoers/README.md`](../infra/sudoers/README.md).
+Всё остальное (`psql` под postgres, правка `/etc`, nginx) — только человеком
+с паролем: `valstan` в группе `sudo`, интерактивный `sudo` у него остаётся.
+
+⚠️ **Меняя воркер, помни про белый список.** Новый привилегированный вызов
+(`sudo -n …`) в `modules/`, `tasks/`, `web/`, `config/` = правка
+`infra/sudoers/setka-worker` **тем же PR**. Иначе локально и в CI всё зелёное,
+а на боксе команда падает с `sudo: a password is required` — и это выглядит
+как поломка прода. Сторож — `tests/test_infra/test_sudo_allowlist.py`.
+
 ## 5) Nginx
 
 Редактируемая копия: `config/sarafan.conf.editable`.
