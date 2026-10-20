@@ -137,6 +137,10 @@ async def _digest_for_region(session: Any, region: Any, *, dry_run: bool) -> Dic
         return {"region": region.code, "skipped": "empty_digest"}
 
     if dry_run:
+        # Превью печатается в лог: на боксе скрипт требует env (его читает только
+        # root), поэтому штатный путь приёмки — `celery call ... dry_run=true`,
+        # а результат смотрят в журнале воркера.
+        logger.info("daily digest preview: регион=%s\n%s", region.code, draft.text)
         return {"region": region.code, "preview": draft.text, "lips": draft.lips}
 
     return await _publish(session, region, draft)
