@@ -46,6 +46,50 @@ privoxy: после вызова там видно `Request: models.opencode.ai:
 безопасный (классификатор fail-open, волна идёт по обычным фильтрам), но это
 ещё одна точка отказа на прод-пути.
 
+### Сброс гейта free-тира: поворот выхода по требованию
+
+20.10 в 16:20 free-тир закрылся по IP: `provider.auth` — «free models aren't
+available from your current network… we've detected abusive traffic from this
+IP». Гейт **per-IP**: все модели каталога закрыты одним и тем же адресом, смена
+модели цепочки не помогает, а смена выхода ВПН снимает отказ за 1,7–2,6 с
+(проверено: DE → AT, вызов модели 2,3 с).
+
+Автоповорот встроен в клиент движка (`modules/opencode_engine.py`), а не в
+отдельный сторож:
+
+- причина отказа с текстом гейта классифицируется как `network_gate` — видно в
+  логах воркера (`...:network_gate`), не только «движок молчит»;
+- если **вся цепочка** легла на гейт, клиент выполняет команду из
+  `NEURAL_EGRESS_ROTATE_CMD` и повторяет цепочку один раз;
+- пауза между поворотами — `NEURAL_EGRESS_ROTATE_COOLDOWN` (дефолт 600 с),
+  метка на диске (воркер многопроцессный). Без паузы волна из десятков регионов
+  сожгла бы все адреса подписки за час.
+
+В env-файле приложения на боксе:
+
+```text
+NEURAL_EGRESS_ROTATE_CMD="sudo -n /etc/neural/egress.d/10-nextgenvpn.sh"
+NEURAL_EGRESS_ROTATE_COOLDOWN=600
+```
+
+Пусто в `NEURAL_EGRESS_ROTATE_CMD` — автоповорот выключен (движок только пишет
+`network_gate` в лог). Рабочему пользователю воркера нужен `sudo -n` на этот
+скрипт: он меняет `/etc/neural/vpn/*` и перезапускает `neural-vpn`.
+
+### Сторож плеча: `neural-egress-guard.timer`
+
+Автоповорот лечит **отказ вендора**, а не мёртвое плечо: упал xray или умер
+текущий сервер подписки — у движка нет выхода, и в логе это только
+`engine_all_failed`. Поэтому раз в 2 минуты `neural-egress-guard` проверяет
+выход двумя путями (socks `10808` и HTTP-прокси `8118`):
+
+- оба живы → молчит, счётчик провалов сбрасывает;
+- **два провала подряд** → запускает `10-nextgenvpn.sh` (он сам перебирает
+  серверы и проверяет выход), счётчик сбрасывает.
+
+Один провал не трогаем: одиночный таймаут бывает у любого сервера, а лишний
+поворот рвёт живой туннель под нагрузкой.
+
 ## 2. Память: почему сторож, а не `MemoryMax`
 
 В юните стоит `MemoryHigh=384M` / `MemoryMax=450M`, но на этом боксе лимиты
@@ -75,6 +119,8 @@ OOM killer — не обязательно движок (14.10 он убивал
 | `privoxy-neural.conf` | `/etc/privoxy/config` |
 | `opencode-rss-guard.sh` | `/usr/local/lib/neural/opencode-rss-guard.sh` (755) |
 | `opencode-rss-guard.service` / `.timer` | `/etc/systemd/system/` |
+| `neural-egress-guard.sh` | `/usr/local/lib/neural/neural-egress-guard.sh` (755) |
+| `neural-egress-guard.service` / `.timer` | `/etc/systemd/system/` |
 
 ВПН-клиент (`neural-vpn`, `10-nextgenvpn.sh`, `refresh-subscription.sh`) —
 без изменений из `brain_matrica/docs/plans/neural/`.
@@ -90,6 +136,10 @@ systemctl enable --now privoxy
 install -m755 opencode-rss-guard.sh /usr/local/lib/neural/
 install -m644 opencode-rss-guard.service opencode-rss-guard.timer /etc/systemd/system/
 systemctl daemon-reload && systemctl enable --now opencode-rss-guard.timer
+
+install -m755 neural-egress-guard.sh /usr/local/lib/neural/
+install -m644 neural-egress-guard.service neural-egress-guard.timer /etc/systemd/system/
+systemctl daemon-reload && systemctl enable --now neural-egress-guard.timer
 ```
 
 Права каталога ВПН: `/etc/neural/vpn` — `root:nogroup 750` (xray работает под

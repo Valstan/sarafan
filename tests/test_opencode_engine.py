@@ -750,3 +750,95 @@ def test_beat_schedule_has_opencode_tmp_sweep():
     assert entry is not None
     assert entry["task"] == "tasks.celery_app.sweep_opencode_tmp"
     assert entry["options"]["catchup"] is False
+
+
+GATE_ERROR = (
+    "OpenCode's free models aren't available from your current network because"
+    " we've detected abusive traffic from this IP address."
+)
+
+
+def test_reason_from_error_detects_network_gate():
+    """Гейт free-тира по IP идёт без HTTP-кода — узнаём по тексту."""
+    from modules.opencode_engine import _reason_from_error
+
+    assert _reason_from_error(GATE_ERROR) == "network_gate"
+    assert _reason_from_error("http_429: rate limit") == "http_429"
+    assert _reason_from_error("Model unavailable") == "model_error"
+
+
+def test_chat_rotates_egress_and_retries_after_gate(monkeypatch):
+    """Вся цепочка легла на гейт по IP → меняем выход и повторяем один раз."""
+    from modules import opencode_engine as engine
+
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "opencode")
+    chain_len = len(engine.get_model_chain())
+    calls = {"models": 0, "rotate": 0}
+
+    def fake_call(model_id, prompt, label):
+        calls["models"] += 1
+        # Первая цепочка целиком — гейт, вторая — успех.
+        if calls["models"] <= chain_len:
+            return {"ok": False, "reason": "network_gate", "detail": GATE_ERROR}
+        return {"ok": True, "content": "ok", "model": f"opencode/{model_id}", "usage": None}
+
+    monkeypatch.setattr(engine, "_call_model", fake_call)
+    monkeypatch.setattr(
+        engine,
+        "_rotate_egress",
+        lambda detail="": calls.__setitem__("rotate", calls["rotate"] + 1) or True,
+    )
+
+    result = engine.chat(user="u")
+
+    assert result["ok"] is True
+    assert calls["rotate"] == 1
+    assert calls["models"] == chain_len + 1
+
+
+def test_chat_does_not_rotate_without_gate(monkeypatch):
+    """Обычный отказ модели не трогает ВПН: выход меняют только по гейту."""
+    from modules import opencode_engine as engine
+
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "opencode")
+    rotated = []
+    monkeypatch.setattr(
+        engine,
+        "_call_model",
+        lambda *a, **kw: {"ok": False, "reason": "model_error", "detail": "no route"},
+    )
+    monkeypatch.setattr(engine, "_rotate_egress", lambda detail="": rotated.append(detail) or True)
+
+    result = engine.chat(user="u")
+
+    assert result["ok"] is False
+    assert result["reason"] == "engine_all_failed"
+    assert rotated == []
+
+
+def test_rotate_egress_respects_cooldown(monkeypatch, tmp_path):
+    """Поворот не чаще паузы: иначе волна сожжёт все адреса подписки за час."""
+    from modules import opencode_engine as engine
+
+    class _Proc:
+        returncode = 0
+        stdout = "egress: AT -> DE\n"
+        stderr = ""
+
+    runs = []
+    monkeypatch.setenv("NEURAL_EGRESS_ROTATE_CMD", "rotate-egress --next")
+    monkeypatch.setenv("NEURAL_EGRESS_ROTATE_COOLDOWN", "600")
+    monkeypatch.setattr(engine.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(engine.subprocess, "run", lambda *a, **kw: runs.append(a) or _Proc())
+
+    assert engine._rotate_egress("gate") is True
+    # Вторая попытка сразу — на паузе, команда не вызывается.
+    assert engine._rotate_egress("gate") is False
+    assert len(runs) == 1
+
+
+def test_rotate_egress_disabled_without_command(monkeypatch):
+    from modules import opencode_engine as engine
+
+    monkeypatch.delenv("NEURAL_EGRESS_ROTATE_CMD", raising=False)
+    assert engine._rotate_egress("gate") is False
