@@ -159,7 +159,13 @@ def _tg_call(token: str, method: str, params: Dict[str, Any]) -> Dict[str, Any]:
     try:
         from modules import telegram_http as tg_http
 
-        r = tg_http.get_httpx(f"{TG_API}/bot{token}/{method}", params=params, timeout=20)
+        # Клиентский таймаут чтения обязан быть больше серверного ожидания
+        # getUpdates: иначе long poll (``timeout=25``) каждый раз кончается
+        # ``ReadTimeout`` — ответ просто ещё не пришёл, а мы уже считаем отказом.
+        server_wait = int(params.get("timeout") or 0)
+        r = tg_http.get_httpx(
+            f"{TG_API}/bot{token}/{method}", params=params, timeout=20 + server_wait
+        )
         return r.json()
     except Exception as e:  # noqa: BLE001 - сеть; не валим beat
         logger.warning("radar-bot %s failed: %s", method, e)
