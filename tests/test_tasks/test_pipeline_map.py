@@ -201,3 +201,107 @@ def test_task_and_map_use_the_same_region_selector(monkeypatch):
     assert seen == {"theme": "novost", "strict": False}
     assert dispatched == [("mi", "novost"), ("ur", "novost")]
     assert result["regions"] == ["mi", "ur"]
+
+
+def test_schedule_is_read_from_cron_not_from_the_comment():
+    """Подпись расписания выводится из самого crontab.
+
+    Живой промах: у ``reconcile-scheduled-publications`` два месяца стоял
+    комментарий «каждые 30 мин» при часовом слоте. Карта, повторяющая
+    комментарий, повторяет и ошибку — поэтому подпись считается из полей.
+    """
+    assert pm.describe_schedule(crontab(minute="*"))["label"] == "каждую минуту"
+    assert (
+        pm.describe_schedule(crontab(minute="*/15", hour="8-23"))["label"] == "каждые 15 мин, 08–23"
+    )
+    assert pm.describe_schedule(crontab(minute=35, hour="*/3"))["label"] == "каждые 3 ч в :35"
+    assert pm.describe_schedule(crontab(minute=20, hour="12,22"))["label"] == "12:20, 22:20"
+
+
+def test_weekly_entry_is_one_run_a_week_not_one_a_day():
+    described = pm.describe_schedule(crontab(minute=40, hour=4, day_of_week=1))
+
+    assert described["label"].startswith("пн")
+    assert described["runs_per_day"] == 0.14
+
+
+def test_interval_schedule_is_described_as_interval_not_as_clock():
+    from datetime import timedelta
+
+    described = pm.describe_schedule(timedelta(minutes=30))
+
+    assert described["kind"] == "interval"
+    assert described["label"] == "каждые 30 мин"
+    assert described["runs_per_day"] == 48.0
+
+
+def test_periodic_block_does_not_swallow_waves():
+    schedule = {
+        "postopus-novost-6": _wave("postopus-novost-6", "novost", hour="6"),
+        "ad-repost-dispatch": {
+            "task": "tasks.celery_app.dispatch_ad_reposts",
+            "schedule": crontab(minute="*"),
+            "options": {"expires": 55},
+        },
+    }
+
+    rows = pm.periodic_slots(schedule)
+
+    assert [r["name"] for r in rows] == ["ad-repost-dispatch"]
+    assert rows[0]["runs_per_day"] == 1440.0
+    assert rows[0]["task_short"] == "dispatch_ad_reposts"
+
+
+def test_periodic_table_costs_a_task_in_slot_minutes():
+    """8 прогонов в сутки по 589 с — это 78.5 минуты слота, а не «мелочь»."""
+    schedule = {
+        "classifier-headless": {
+            "task": "tasks.celery_app.classify_pending_posts",
+            "schedule": crontab(minute=35, hour="*/3"),
+            "options": {"expires": 3 * 3600},
+        }
+    }
+    rows = pm.periodic_slots(schedule)
+
+    table = pm.periodic_table(
+        rows,
+        {"tasks.celery_app.classify_pending_posts": {"avg_seconds": 589.0, "samples": 4}},
+    )
+
+    assert table[0]["minutes_per_day"] == 78.5
+    assert table[0]["samples"] == 4
+    assert pm.periodic_totals(table)["minutes_per_day"] == 78.5
+
+
+def test_unmeasured_task_shows_blank_not_zero():
+    """Ноль читается как «ничего не занимает» — поэтому неизмеренное это None."""
+    rows = pm.periodic_slots(
+        {"x": {"task": "tasks.demo.nothing", "schedule": crontab(minute=0, hour=3)}}
+    )
+
+    table = pm.periodic_table(rows, {})
+
+    assert table[0]["minutes_per_day"] is None
+    assert table[0]["avg_seconds"] is None
+    assert pm.periodic_totals(table) == {
+        "tasks": 1,
+        "measured": 0,
+        "minutes_per_day": 0,
+        "top": None,
+        "top_minutes": None,
+    }
+
+
+def test_periodic_table_is_sorted_by_what_it_costs_the_worker():
+    rows = [
+        {"name": "cheap", "task": "t.cheap", "runs_per_day": 1440.0},
+        {"name": "expensive", "task": "t.expensive", "runs_per_day": 8.0},
+    ]
+    timings = {
+        "t.cheap": {"avg_seconds": 1.0},
+        "t.expensive": {"avg_seconds": 589.0},
+    }
+
+    table = pm.periodic_table(rows, timings)
+
+    assert [r["name"] for r in table] == ["expensive", "cheap"]

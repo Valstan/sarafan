@@ -318,6 +318,52 @@ def _setka_log_peak_rss(task=None, **_kwargs) -> None:
         logger.debug("peak rss probe failed", exc_info=True)
 
 
+# ---------------------------------------------------------------------------
+# Прибор длительности: сколько слота воркера стоит каждая задача.
+#
+# Замер P208 (21.10) считал занятость слота разбором `celery-worker.log` за 26
+# часов: разово годится, для страницы `/pipeline` — нет (лог ротируется, разбор
+# никто не повторяет, цифра стареет молча). Здесь то же самое измеряется на
+# месте: `task_prerun` → `task_postrun`, то есть время ИСПОЛНЕНИЯ, без стояния
+# в очереди — слот занимает именно исполнение.
+#
+# Словарь живёт в памяти ребёнка пула: prerun и postrun одной попытки всегда в
+# одном процессе. Размер ограничен — если postrun не придёт (ребёнка убили
+# OOM, P164), след не растёт бесконечно.
+# ---------------------------------------------------------------------------
+_task_started: dict[str, float] = {}
+_TASK_STARTED_LIMIT = 512
+
+
+@signals.task_prerun.connect  # type: ignore[has-type]
+def _setka_mark_task_started(task_id=None, **_kwargs) -> None:
+    try:
+        if not task_id:
+            return
+        if len(_task_started) >= _TASK_STARTED_LIMIT:
+            oldest = min(_task_started, key=lambda k: _task_started[k])
+            _task_started.pop(oldest, None)
+        _task_started[str(task_id)] = time.monotonic()
+    except Exception:
+        logger.debug("task timings: старт не отмечен", exc_info=True)
+
+
+@signals.task_postrun.connect  # type: ignore[has-type]
+def _setka_record_task_duration(task=None, task_id=None, **_kwargs) -> None:
+    started = _task_started.pop(str(task_id), None) if task_id else None
+    if started is None:
+        return
+    try:
+        from modules import task_timings
+
+        task_timings.record(
+            getattr(task, "name", None) or "unknown",
+            time.monotonic() - started,
+        )
+    except Exception:
+        logger.debug("task timings: длительность не записана", exc_info=True)
+
+
 @app.task(name="tasks.celery_app.run_vk_monitoring")
 def run_vk_monitoring():
     """

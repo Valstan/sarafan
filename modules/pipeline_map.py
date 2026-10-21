@@ -29,6 +29,47 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence
 # на регион. Именно её слоты владелец и называет «волнами».
 WAVE_TASK = "run_all_regions_theme"
 
+ALL_MINUTES = list(range(60))
+ALL_HOURS = list(range(24))
+ALL_DAYS_OF_WEEK = list(range(7))
+ALL_DAYS_OF_MONTH = list(range(1, 32))
+ALL_MONTHS = list(range(1, 13))
+
+# Celery нумерует дни недели как в cron: 0 — воскресенье, 1 — понедельник.
+# Проверено на живой записи ``classifier-distill-weekly``: `day_of_week=1` там
+# помечен комментарием «ночь понедельника».
+WEEKDAY_NAMES = {0: "вс", 1: "пн", 2: "вт", 3: "ср", 4: "чт", 5: "пт", 6: "сб", 7: "вс"}
+
+
+def _uniform_step(values: Sequence[int]) -> Optional[int]:
+    """Шаг равномерного ряда (``*/15`` → 15), иначе ``None``."""
+    if len(values) < 2:
+        return None
+    diffs = {int(b) - int(a) for a, b in zip(values, values[1:])}
+    if len(diffs) == 1:
+        return diffs.pop()
+    return None
+
+
+def _is_contiguous(values: Sequence[int]) -> bool:
+    return len(values) > 1 and (int(values[-1]) - int(values[0])) == len(values) - 1
+
+
+def _day_factor(
+    dow: Optional[Sequence[int]],
+    dom: Optional[Sequence[int]],
+    month: Optional[Sequence[int]],
+) -> float:
+    """Доля дней, в которые запись реально срабатывает (1.0 — каждый день)."""
+    factor = 1.0
+    if dow is not None and set(dow) != set(ALL_DAYS_OF_WEEK):
+        factor *= len(set(dow)) / 7
+    if dom is not None and set(dom) != set(ALL_DAYS_OF_MONTH):
+        factor *= len(set(dom)) / 31
+    if month is not None and set(month) != set(ALL_MONTHS):
+        factor *= len(set(month)) / 12
+    return factor
+
 
 def _cron_values(value: Any) -> Optional[List[int]]:
     """Значения поля crontab как список: у celery это множество, но не всегда."""
@@ -42,37 +83,38 @@ def _cron_values(value: Any) -> Optional[List[int]]:
         return None
 
 
-def _expand_cron(schedule: Any) -> Optional[Dict[str, int]]:
-    """``crontab`` → минуты/часы/множитель повторяемости; иначе ``None``."""
+def _cron_parts(schedule: Any) -> Optional[Dict[str, List[int]]]:
+    """Поля ``crontab`` как списки чисел; ``None``, если это не crontab."""
     minute = _cron_values(getattr(schedule, "minute", None))
     hour = _cron_values(getattr(schedule, "hour", None))
     if minute is None or hour is None:
         return None
 
-    def _field(name: str, size: int) -> Optional[List[int]]:
-        values = _cron_values(getattr(schedule, name, None))
-        if values is None:
-            return None
-        return values
+    def _field(name: str) -> Optional[List[int]]:
+        return _cron_values(getattr(schedule, name, None))
 
-    dow = _field("day_of_week", 7)
-    dom = _field("day_of_month", 31)
-    month = _field("month_of_year", 12)
+    return {
+        "minutes": minute,
+        "hours": hour,
+        "dow": _field("day_of_week"),
+        "dom": _field("day_of_month"),
+        "month": _field("month_of_year"),
+    }
 
-    factor = 1.0
-    if dow is not None and set(dow) != set(range(7)):
-        factor *= len(set(dow)) / 7
-    if dom is not None and set(dom) != set(range(1, 32)):
-        factor *= len(set(dom)) / 31
-    if month is not None and set(month) != set(range(1, 13)):
-        factor *= len(set(month)) / 12
 
+def _expand_cron(schedule: Any) -> Optional[Dict[str, Any]]:
+    """``crontab`` → минуты/часы/множитель повторяемости; иначе ``None``."""
+    parts = _cron_parts(schedule)
+    if parts is None:
+        return None
+    minute = parts["minutes"]
+    hour = parts["hours"]
     return {
         "minute": minute[0] if minute else 0,
         "hour": hour[0] if hour else 0,
         "minutes": minute,
         "hours": hour,
-        "factor": factor,
+        "factor": _day_factor(parts["dow"], parts["dom"], parts["month"]),
     }
 
 
@@ -272,10 +314,189 @@ def totals(
     }
 
 
+def _each_minutes(step: int) -> str:
+    return "каждую минуту" if step == 1 else f"каждые {step} мин"
+
+
+def _interval_label(seconds: float) -> str:
+    if seconds < 60:
+        return f"каждые {round(seconds)} с"
+    if seconds < 3600:
+        return f"каждые {round(seconds / 60)} мин"
+    if seconds < 86400:
+        return f"каждые {round(seconds / 3600, 1)} ч"
+    return f"каждые {round(seconds / 86400, 1)} дн"
+
+
+def _cron_label(minutes: Sequence[int], hours: Sequence[int]) -> str:
+    """Человеческая подпись расписания — «каждые 15 мин, 08–23», а не «*/15 8-23»."""
+    minute_list = sorted({int(m) for m in minutes})
+    hour_list = sorted({int(h) for h in hours})
+    if not minute_list or not hour_list:
+        return "—"
+    step_m = _uniform_step(minute_list)
+    step_h = _uniform_step(hour_list)
+
+    if hour_list == ALL_HOURS:
+        if len(minute_list) == len(ALL_MINUTES):
+            return "каждую минуту"
+        if step_m:
+            return _each_minutes(step_m)
+        if len(minute_list) == 1:
+            return f"каждый час в :{minute_list[0]:02d}"
+        return f"{len(minute_list)} раз в час"
+
+    if len(minute_list) == 1 and len(hour_list) <= 4:
+        return ", ".join(f"{h:02d}:{minute_list[0]:02d}" for h in hour_list)
+    if len(hour_list) == 1 and len(minute_list) <= 6:
+        return ", ".join(f"{hour_list[0]:02d}:{m:02d}" for m in minute_list)
+    if len(minute_list) == 1 and step_h and step_h > 1:
+        return f"каждые {step_h} ч в :{minute_list[0]:02d}"
+    if len(minute_list) == 1:
+        return f"каждый час {hour_list[0]:02d}–{hour_list[-1]:02d} " f"в :{minute_list[0]:02d}"
+    if step_m and _is_contiguous(hour_list):
+        return f"{_each_minutes(step_m)}, {hour_list[0]:02d}–{hour_list[-1]:02d}"
+    if _is_contiguous(hour_list):
+        return f"{len(minute_list)} мин в час, {hour_list[0]:02d}–{hour_list[-1]:02d}"
+    return f"{len(minute_list) * len(hour_list)} зап./сутки"
+
+
+def _day_prefix(
+    dow: Optional[Sequence[int]],
+    dom: Optional[Sequence[int]],
+    month: Optional[Sequence[int]],
+) -> str:
+    """Ограничение по дням: «пн», «числа 1, 15», «янв», или пусто."""
+    parts: List[str] = []
+    if month is not None and set(month) != set(ALL_MONTHS):
+        parts.append("мес. " + ",".join(str(m) for m in sorted(set(month))))
+    if dom is not None and set(dom) != set(ALL_DAYS_OF_MONTH):
+        parts.append("числа " + ",".join(str(d) for d in sorted(set(dom))))
+    if dow is not None and set(dow) != set(ALL_DAYS_OF_WEEK):
+        parts.append(",".join(WEEKDAY_NAMES.get(int(d), str(d)) for d in sorted(set(dow))))
+    return " ".join(parts)
+
+
+def describe_schedule(schedule: Any) -> Dict[str, Any]:
+    """Расписание записи beat словами: подпись, запусков в сутки, вид.
+
+    Подпись строится из самого ``crontab``, а не из комментария рядом с ним:
+    комментарий в `beat_schedule` уже врал (см. историю `reconcile-scheduled-
+    publications` — там два месяца стояло «каждые 30 мин» при часовом слоте).
+    """
+    parts = _cron_parts(schedule)
+    if parts is None:
+        total_seconds = getattr(schedule, "total_seconds", None)
+        if callable(total_seconds):
+            try:
+                seconds = float(total_seconds())
+            except Exception:  # noqa: BLE001 — чужой объект расписания
+                seconds = 0.0
+            if seconds > 0:
+                return {
+                    "kind": "interval",
+                    "label": _interval_label(seconds),
+                    "runs_per_day": round(86400.0 / seconds, 2),
+                }
+        return {"kind": None, "label": "—", "runs_per_day": 0.0}
+
+    minutes, hours = parts["minutes"], parts["hours"]
+    factor = _day_factor(parts["dow"], parts["dom"], parts["month"])
+    label = _cron_label(minutes, hours)
+    prefix = _day_prefix(parts["dow"], parts["dom"], parts["month"])
+    if prefix:
+        label = f"{prefix} · {label}"
+    return {
+        "kind": "cron",
+        "label": label,
+        "runs_per_day": round(len(set(minutes)) * len(set(hours)) * factor, 2),
+    }
+
+
+def periodic_slots(schedule: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Всё расписание, кроме волн: задача, подпись расписания, запусков в сутки.
+
+    Зачем отдельно от волн. Замер P208: периодика — 31 % занятости слота, то
+    есть почти треть воркера тратится на то, чего на карте не было видно
+    вовсе. Владелец смотрел на волны и не понимал, почему очередь стоит.
+    """
+    rows: List[Dict[str, Any]] = []
+    for name, entry in (schedule or {}).items():
+        if not isinstance(entry, dict):
+            continue
+        task = str(entry.get("task") or "")
+        if not task or task.endswith(WAVE_TASK):
+            continue
+        described = describe_schedule(entry.get("schedule"))
+        rows.append(
+            {
+                "name": name,
+                "task": task,
+                "task_short": task.split(".")[-1],
+                "label": described["label"],
+                "kind": described["kind"],
+                "runs_per_day": described["runs_per_day"],
+                "expires": _entry_expires(entry),
+            }
+        )
+    rows.sort(key=lambda r: (-float(r["runs_per_day"] or 0), str(r["name"])))
+    return rows
+
+
+def periodic_table(
+    rows: Sequence[Dict[str, Any]], timings: Optional[Dict[str, Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
+    """Периодика + измеренная длительность → «сколько слота съедает в сутки».
+
+    ``timings`` — сводка ``modules.task_timings``: ``{task: {avg_seconds, ...}}``.
+    Записи без измерений остаются с ``minutes_per_day = None``: **прочерк
+    честнее нуля**, потому что ноль читается как «ничего не занимает».
+    """
+    measured = timings or {}
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        item = dict(row)
+        timing = measured.get(str(item.get("task") or "")) or {}
+        avg = timing.get("avg_seconds")
+        runs = float(item.get("runs_per_day") or 0)
+        item["avg_seconds"] = avg
+        item["max_seconds"] = timing.get("max_seconds")
+        item["last_seconds"] = timing.get("last_seconds")
+        item["samples"] = int(timing.get("samples") or 0)
+        item["minutes_per_day"] = round(float(avg) * runs / 60, 1) if avg else None
+        out.append(item)
+    out.sort(
+        key=lambda r: (
+            r["minutes_per_day"] is None,
+            -float(r["minutes_per_day"] or 0),
+            -float(r["runs_per_day"] or 0),
+            str(r["name"]),
+        )
+    )
+    return out
+
+
+def periodic_totals(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Сколько слотовых минут в сутки уходит на периодику — и на чём это стоит."""
+    known = [r for r in rows if r.get("minutes_per_day") is not None]
+    total = round(sum(float(r["minutes_per_day"]) for r in known), 1)
+    return {
+        "tasks": len(rows),
+        "measured": len(known),
+        "minutes_per_day": total,
+        "top": known[0]["name"] if known else None,
+        "top_minutes": known[0]["minutes_per_day"] if known else None,
+    }
+
+
 __all__ = [
     "WAVE_TASK",
     "attach_regions",
+    "describe_schedule",
     "group_by_hour",
+    "periodic_slots",
+    "periodic_table",
+    "periodic_totals",
     "theme_table",
     "totals",
     "wave_slots",
