@@ -37,6 +37,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
+from config.opencode import get_publish_timeout
 from config.post_rewrite import (
     get_max_chars,
     get_max_posts,
@@ -355,6 +356,7 @@ def rewrite_post(
         user=build_prompt(source, region=region, theme=theme),
         temperature=0.3,
         model=get_model() or None,
+        timeout=get_publish_timeout(),
         label="post_rewrite",
     )
     usage = result.get("usage") or {}

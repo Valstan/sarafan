@@ -57,12 +57,25 @@ def chat(**kwargs: Any) -> Dict[str, Any]:
     Переключатель стоит здесь, а не в ``classify_posts``/тасках: один рубеж на
     все пути классификации (фоновая таска, prepublish внутри волны, кнопка в
     UI), а DeepSeek остаётся дефолтом — откат пилота без деплоя кода.
+
+    Здесь же стоит предохранитель: под лимитом free-тира вызов возвращает отказ
+    сразу, не трогая сеть (``modules.engine_guard``). Рубеж один по той же
+    причине — второй экземпляр решения разошёлся бы с первым молча.
     """
+    from modules import engine_guard
+
+    if not engine_guard.allow():
+        return {"ok": False, "reason": "breaker_open"}
+
     if engine_enabled():
         from modules.opencode_engine import chat as _opencode_chat
 
-        return _opencode_chat(**kwargs)
-    return _deepseek_chat(**kwargs)
+        result = _opencode_chat(**kwargs)
+    else:
+        result = _deepseek_chat(**kwargs)
+
+    engine_guard.note_result(bool(result.get("ok")), str(result.get("reason") or ""))
+    return result
 
 
 # Сколько постов уходит в один вызов. Больше — дешевле (постулаты не
@@ -295,6 +308,7 @@ def classify_chunk(
     *,
     postulates: str,
     model: Optional[str] = None,
+    timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Один вызов модели на чанк. Никогда не бросает."""
     if not posts:
@@ -307,6 +321,7 @@ def classify_chunk(
         max_tokens=_MAX_TOKENS_PER_POST * len(posts),
         json_object=True,
         model=model,
+        timeout=timeout,
         label="headless",
     )
     if not result.get("ok"):
@@ -348,11 +363,16 @@ def classify_posts(
     postulates: str,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
     model: Optional[str] = None,
+    timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
     """Классифицировать батч. Возвращает вердикты + счётчики прогона.
 
     Отказ одного чанка не отменяет остальные: посты независимы, а прогон стоит
     денег. Причины отказов копятся в ``failures`` и уходят в лог целиком.
+
+    ``timeout`` — потолок одного чанка. Путь публикации передаёт короткий
+    (``config.opencode.get_publish_timeout``): волна не должна стоять в слоте
+    воркера, пока free-тир думает. ``None`` — общий потолок движка.
     """
     with_text = [p for p in posts if has_text(p)]
     skipped_no_text = len(posts) - len(with_text)
@@ -366,7 +386,7 @@ def classify_posts(
     def _drain() -> None:
         nonlocal tokens
         for chunk in chunks:
-            res = classify_chunk(chunk, postulates=postulates, model=model)
+            res = classify_chunk(chunk, postulates=postulates, model=model, timeout=timeout)
             usage = res.get("usage") or {}
             tokens += int(usage.get("total_tokens") or 0)
             if not res.get("ok"):

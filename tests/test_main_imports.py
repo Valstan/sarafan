@@ -39,6 +39,7 @@ def test_all_api_routers_importable():
         "web.api.publisher",
         "web.api.parsing",
         "web.api.parsing_stats",
+        "web.api.pipeline",
         "web.api.filtration",
         "web.api.templates",
         "web.api.promotion",

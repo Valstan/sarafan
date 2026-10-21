@@ -329,6 +329,56 @@ def test_chat_empty_prompt(monkeypatch, engine_on):
     assert result == {"ok": False, "reason": "empty_prompt"}
 
 
+def test_chat_timeout_budget_covers_whole_chain(monkeypatch, engine_on):
+    """``timeout`` — бюджет всего вызова, а не одной модели.
+
+    Живой повод 21.10: цепочка трёх моделей с двумя попытками умножает потолок
+    на шесть, поэтому «25 с на пересказ» превращались в 120 с простоя слота.
+    """
+    monkeypatch.setenv("OPENCODE_MODEL_CHAIN", "m1,m2,m3")
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def monotonic(self) -> float:
+            self.t += 0.5
+            return self.t
+
+    monkeypatch.setattr(opencode_engine, "time", _Clock())
+
+    seen: List[Optional[float]] = []
+
+    def fake_call(model_id, prompt, label, timeout=None):
+        seen.append(timeout)
+        return {"ok": False, "reason": "http_429", "detail": "limit"}
+
+    monkeypatch.setattr(opencode_engine, "_call_model", fake_call)
+
+    result = chat(user="пост", timeout=2.0)
+
+    assert result["ok"] is False
+    assert result["reason"] == "engine_all_failed"
+    assert "budget_exhausted" in result["detail"]
+    assert seen, "первая модель должна была получить остаток бюджета"
+    assert all(t is not None and t <= 2.0 for t in seen)
+    assert len(seen) < 3, "бюджет кончился — вторую модель звать уже нечем"
+
+
+def test_chat_without_timeout_keeps_engine_default(monkeypatch, engine_on):
+    seen: List[Optional[float]] = []
+
+    def fake_call(model_id, prompt, label, timeout=None):
+        seen.append(timeout)
+        return {"ok": False, "reason": "http_429", "detail": "limit"}
+
+    monkeypatch.setattr(opencode_engine, "_call_model", fake_call)
+
+    chat(user="пост")
+
+    assert seen == [None], "без явного бюджета поведение прежнее: общий таймаут движка"
+
+
 def test_headless_router_follows_engine_flag(monkeypatch, engine_on):
     """Флаг CLASSIFIER_ENGINE реально переводят вызов на opencode и обратно."""
     from modules import opencode_engine

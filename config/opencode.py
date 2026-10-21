@@ -116,6 +116,22 @@ def get_timeout() -> float:
         return 120.0
 
 
+def get_publish_timeout() -> float:
+    """Потолок одного вызова движка на пути публикации, сек.
+
+    ``OPENCODE_TIMEOUT`` (120 с) — потолок ручных прогонов и фоновых батчей, где
+    ждать долго терпимо. Волна публикации ждёт иначе: она стоит в единственном
+    слоте воркера, и каждый её вызов — это задержка публикаций всех остальных
+    районов. Поэтому у пути публикации свой, короткий потолок: не ответил за
+    ``OPENCODE_PUBLISH_TIMEOUT`` (дефолт 25 с) — публикуем исходный текст
+    (fail-open уже встроен в пересказ и в нейро-фильтр).
+    """
+    try:
+        return max(5.0, float(os.getenv("OPENCODE_PUBLISH_TIMEOUT", "25")))
+    except ValueError:
+        return 25.0
+
+
 def get_model_chain() -> List[str]:
     """Цепочка моделей-фолбэков (CSV в env, иначе дефолт по замеру)."""
     raw = (os.getenv("OPENCODE_MODEL_CHAIN") or "").strip()

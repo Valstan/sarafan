@@ -1206,68 +1206,17 @@ def run_all_regions_theme(theme: str, strict: bool = False):
     для новых областных тем (proisshestviya/molodezh/nauka/promyshlennost/selhoz/
     zdorovie/zhkh/priroda), чтобы волна не затягивала районы (у них таких
     communities нет) и не плодила «не свои» сводки.
-    """
-    from sqlalchemy import exists, select
 
+    Отбор регионов живёт в ``modules.wave_targets``: его же зовёт карта
+    конвейера (``/pipeline``), и вторая копия гейта означала бы карту, которая
+    показывает не то, что поедет.
+    """
     from database.connection import AsyncSessionLocal
-    from database.models import Community, Region
-    from database.models_extended import RegionConfig
+    from modules.wave_targets import select_regions
 
     async def _get_regions():
         async with AsyncSessionLocal() as session:
-            has_theme_communities = (
-                select(Community.id)
-                .where(
-                    Community.region_id == Region.id,
-                    Community.category == theme,
-                    Community.is_active.is_(True),
-                )
-                .exists()
-            )
-            has_any_communities = (
-                select(Community.id)
-                .where(
-                    Community.region_id == Region.id,
-                    Community.is_active.is_(True),
-                )
-                .exists()
-            )
-            # NB: раньше тут был хардкод ``Region.code != "kirov_obl"`` — область
-            # держалась вне тематических волн (жила на каскад-слотах). С переходом
-            # kirov_obl на bulletin_mode='communities' (2026-05) исключение снято:
-            # каскадные регионы (tatarstan_obl/rf) и так отсекаются проверкой
-            # наличия communities ниже (у них пул пуст).
-            community_gate = (
-                has_theme_communities if strict else (has_theme_communities | has_any_communities)
-            )
-            # Регион допускается в волну, если выполнено ЛЮБОЕ из:
-            #   1. есть строка RegionConfig (легаси-путь, мигрировано из Mongo);
-            #   2. он community-mode (config.bulletin_mode='communities') — области/
-            #      страны на собственном пуле (kirov_obl/tatarstan_obl, 2026-05);
-            #   3. есть хотя бы одно активное community (``has_any_communities``).
-            # Пункт 3 (2026-06) чинит онбординг районов: новый РАЙОН из визарда
-            # `/regions/new` не получает строку region_configs (её создавала только
-            # Mongo-миграция) и без bulletin_mode молча выпадал из ВСЕХ волн, хотя пул
-            # источников у него есть (Тужа: 49 communities, 0 публикаций). Теперь
-            # регион публикует сразу после засева пула. ``parse_and_publish_theme``
-            # при отсутствии RegionConfig подставляет safe-defaults; заголовки/хэштеги
-            # имеют fallback по теме+имени региона.
-            # ``Region.config`` — generic JSON-колонка (без .astext), поэтому
-            # достаём bulletin_mode PG-оператором ``->>`` (возвращает text).
-            config_gate = (
-                exists().where(RegionConfig.region_code == Region.code)
-                | (Region.config.op("->>")("bulletin_mode") == "communities")
-                | has_any_communities
-            )
-            result = await session.execute(
-                select(Region.code).where(
-                    Region.is_active.is_(True),
-                    Region.vk_group_id.isnot(None),
-                    config_gate,
-                    community_gate,
-                )
-            )
-            return list(result.scalars().all())
+            return await select_regions(session, theme=theme, strict=strict)
 
     regions = run_coro(_get_regions())
     results = []

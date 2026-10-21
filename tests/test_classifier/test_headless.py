@@ -61,6 +61,23 @@ def _verdict(lip, action="publish", theme="Новости", **kw):
 # ───────── нарезка ─────────
 
 
+def test_timeout_budget_reaches_every_chunk(monkeypatch):
+    """Короткий потолок пути публикации обязан дойти до каждого чанка.
+
+    Иначе волна снова ждёт по общему таймауту движка, и правка «не держать
+    слот» остаётся на бумаге.
+    """
+    calls = _chat(
+        monkeypatch,
+        lambda n: {"verdicts": [{"lip": "1_10", "action": "publish"}]},
+    )
+
+    headless.classify_posts(POSTS, postulates="правила", chunk_size=1, timeout=17.0)
+
+    assert calls, "модель должны были позвать"
+    assert {c.get("timeout") for c in calls} == {17.0}
+
+
 def test_chunks_never_mix_regions():
     """Склейка — суждение «это одно событие»; посты разных районов склеивать
     нельзя, а одного района нужно видеть вместе."""

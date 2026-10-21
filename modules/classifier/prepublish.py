@@ -41,6 +41,8 @@ import logging
 import os
 from typing import Any, Dict, List, Sequence, Set
 
+from config.opencode import get_publish_timeout
+
 # ``post_lip`` переехал в utils (нужен и сборщику сводки — порядок срочного),
 # но импортируется сюда ради прежнего пути `modules.classifier.prepublish.post_lip`:
 # им пользуются волна и десяток тестов.
@@ -149,7 +151,12 @@ async def blocked_lips_before_publish(
         ensure_secret("DEEPSEEK_API_KEY")
         postulates = await rules.render_effective_postulates(session)
         run = headless.classify_posts(
-            fresh, postulates=postulates, chunk_size=get_headless_chunk_size()
+            fresh,
+            postulates=postulates,
+            chunk_size=get_headless_chunk_size(),
+            # Волна стоит в единственном слоте воркера: не ответил за короткий
+            # потолок — идём по обычным фильтрам (fail-open, как при отказе чанка).
+            timeout=get_publish_timeout(),
         )
         if run["failures"]:
             logger.error(
