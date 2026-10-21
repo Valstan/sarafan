@@ -17,6 +17,7 @@ telegram-id (чтобы владелец узнал свой id и внёс в a
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -27,7 +28,10 @@ logger = logging.getLogger(__name__)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
 TG_API = "https://api.telegram.org"
-GETUPDATES_TIMEOUT = 0  # короткий poll внутри beat-тика (не long-poll)
+# Короткий poll внутри beat-тика (не long-poll). Демон радара передаёт свой
+# ``long_poll`` явно: там ожидание 25 с бесплатно, потому что не занимает слот
+# воркера (``scripts/radar_intake_daemon.py``).
+GETUPDATES_TIMEOUT = 0
 
 
 def extract_forwarded_channel(message: Dict[str, Any]) -> Tuple[Optional[str], Optional[str]]:
@@ -90,7 +94,8 @@ async def handle_message(
     `add_channel(username)` — async callable, добавляет канал в радар и возвращает
     {"status": "added"|"exists"|"error", "title": str, "error": str}.
     `link_account(code, chat_id, display_name)` — async callable привязки личного
-    аккаунта по `/start <код>` («Радиоточка»); {"status": "linked"|"exists"|"invalid"}."""
+    аккаунта по `/start <код>` («Радиоточка»); {"status": "linked"|"exists"|"invalid"}.
+    """
     if not isinstance(message, dict):
         return None
     chat = message.get("chat") or {}
@@ -170,19 +175,29 @@ async def poll_radar_bot_once(
     offset_set: Callable[[int], None],
     call: Optional[Callable[[str, str, Dict[str, Any]], Dict[str, Any]]] = None,
     link_account: Optional[Callable[[str, int, str], Any]] = None,
+    long_poll: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Один тик приёмника: getUpdates → обработать → ответить → продвинуть offset.
 
     `call(token, method, params)` инъектируется (тест/прод); по умолчанию — Bot API.
-    `link_account` — привязка личного аккаунта по `/start <код>` («Радиоточка»)."""
+    `link_account` — привязка личного аккаунта по `/start <код>` («Радиоточка»).
+    `long_poll` — секунды серверного ожидания getUpdates: 0 у beat-тика, 25 в
+    демоне (там ожидание не занимает слот воркера)."""
     call = call or _tg_call
     offset = offset_get()
-    params: Dict[str, Any] = {"timeout": GETUPDATES_TIMEOUT, "allowed_updates": '["message"]'}
+    timeout = GETUPDATES_TIMEOUT if long_poll is None else int(long_poll)
+    params: Dict[str, Any] = {"timeout": timeout, "allowed_updates": '["message"]'}
     if offset is not None:
         params["offset"] = offset
-    resp = call(token, "getUpdates", params)
+    # В поток: с long_poll=25 прямой вызов держал бы event loop демона всё
+    # ожидание и останавливал соседний VK-поллинг.
+    resp = await asyncio.to_thread(call, token, "getUpdates", params)
     if not resp.get("ok"):
-        return {"ok": False, "processed": 0, "error": resp.get("description", "getUpdates failed")}
+        return {
+            "ok": False,
+            "processed": 0,
+            "error": resp.get("description", "getUpdates failed"),
+        }
 
     updates = resp.get("result") or []
     processed, added, replied = 0, 0, 0
@@ -208,7 +223,7 @@ async def poll_radar_bot_once(
         chat_id, reply = out
         if reply.startswith("✅"):
             added += 1
-        call(token, "sendMessage", {"chat_id": chat_id, "text": reply})
+        await asyncio.to_thread(call, token, "sendMessage", {"chat_id": chat_id, "text": reply})
         replied += 1
 
     if max_update_id is not None:
