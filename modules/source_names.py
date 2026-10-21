@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from typing import Any, Dict, Iterable, Optional
@@ -25,6 +26,30 @@ logger = logging.getLogger(__name__)
 # Название сообщества меняется нечасто; 6 часов — компромисс между свежестью
 # и тем, чтобы не звать VK на каждой волне.
 CACHE_TTL_SECONDS = 6 * 3600
+
+# Буквы, из которых состоит пригодная подпись источника: кириллица и латиница.
+# Татарские/казахские имена на латинице тоже проходят.
+_PRINTABLE_LETTER = re.compile(r"[A-Za-zА-Яа-яЁёӘәҖҗҢңӨөҮүҺһІі]")
+
+# CJK-диапазоны. ``groups.getById`` умеет вернуть вместо названия строку в
+# чужой кодировке — живая группа 234960216 отдала `习薪摆废赘蒲` (проверено
+# 21.10.2026). Печатать такое в постах нельзя.
+_CJK = re.compile(r"[\u2e80-\u9fff\uf900-\ufaff\uff00-\uffef]")
+
+
+def _usable_name(name: str) -> bool:
+    """Годится ли официальное имя в подпись «Источник: …».
+
+    Причина проверки — не косметика: имя приходит из VK, а VK для части
+    сообществ отдаёт мусор (бан, переименование в чужую кодировку). Без заслона
+    подпись в публикации выглядела бы как набор иероглифов, и заметить это можно
+    было бы только глазами в ленте. Негодное имя не заменяет прежнее: остаётся
+    то, что лежит в базе.
+    """
+    if _CJK.search(name):
+        return False
+    return bool(_PRINTABLE_LETTER.search(name))
+
 
 _CACHE: Dict[int, "tuple[float, str]"] = {}
 _LOCK = threading.Lock()
@@ -107,6 +132,13 @@ def fetch_official_names(
             continue
         name = " ".join(str(item.get("name") or "").split())
         if not name or len(name) < 2:
+            continue
+        if not _usable_name(name):
+            logger.info(
+                "groups.getById: имя %s не годится в подпись (%r) — остаётся имя из базы",
+                group_id,
+                name[:80],
+            )
             continue
         out[group_id] = name
         _store(group_id, name, now)

@@ -83,6 +83,30 @@ def test_empty_name_from_vk_is_ignored():
     assert names["9"] == "Имя из базы"
 
 
+def test_garbage_name_from_vk_is_ignored():
+    """VK отдал вместо названия CJK-мусор — в подпись он не идёт.
+
+    Живой случай 21.10.2026: группа 234960216 через `groups.getById` вернула
+    `习薪摆废赘蒲`. Без заслона подпись «Источник: …» в публикации состояла бы из
+    иероглифов, и увидеть это можно было только глазами в ленте.
+    """
+    vk = FakeVK({234960216: "习薪摆废赘蒲"})
+    names = source_names.enrich_group_names(vk, {"234960216": "Малмыж"}, [_post(-234960216)])
+
+    assert names["234960216"] == "Малмыж"
+
+
+def test_official_name_with_latin_or_emoji_is_kept():
+    """Запрет узкий: латиница и значки в названии не повод отказываться."""
+    vk = FakeVK({11: "High Mountain INFO | Афиша", 12: "Кильмезь ИНФО 🏡"})
+    names = source_names.enrich_group_names(
+        vk, {"11": "старое", "12": "старое"}, [_post(-11), _post(-12)]
+    )
+
+    assert names["11"] == "High Mountain INFO | Афиша"
+    assert names["12"] == "Кильмезь ИНФО 🏡"
+
+
 def test_no_posts_is_a_noop():
     vk = FakeVK({})
     assert source_names.enrich_group_names(vk, {"1": "А"}, []) == {"1": "А"}
