@@ -339,6 +339,21 @@ def _usable(source: str, result: str, *, min_chars: int, max_chars: int) -> Opti
     return result
 
 
+def _looks_truncated(text: str) -> bool:
+    """Текст кончается на полуслове? Признак — последний знак без завершения.
+
+    Проверяем только длинные ответы: у короткой реплики «без точки» это норма
+    (заголовок, подпись), а пересказ новости — проза, и наша форма ответа
+    требует законченных предложений. Цена ложного срабатывания мала —
+    публикуем исходный текст; цена пропуска велика — оборванная фраза в ленте.
+    """
+    stripped = (text or "").strip()
+    if len(stripped) < 200:
+        return False
+    last = stripped[-1]
+    return last.isalpha() or last.isdigit()
+
+
 def rewrite_post(
     post: Dict[str, Any],
     *,
@@ -376,6 +391,18 @@ def rewrite_post(
 
     headline_raw, tag_raw, body_raw = split_reply(str(result.get("content") or ""))
     cleaned = clean_rewrite(body_raw)
+
+    if str(result.get("finish") or "").lower() == "length" or _looks_truncated(cleaned):
+        # Ответ оборван — лимитом токенов модели или её собственным обрывом.
+        # Публиковать половину предложения хуже, чем исходный текст: живой
+        # прогон 21.10 дал «…место завалено грудо» (775 знаков, ровно обрыв),
+        # и по тексту это неотличимо от нормального ответа. Признак ``finish
+        # == length`` приходит от модели, эвристика — на случай, когда
+        # провайдер причину не сообщил.
+        stats.failed += 1
+        stats.reasons.append("truncated")
+        return False
+
     usable = _usable(
         source,
         cleaned,

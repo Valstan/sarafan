@@ -19,6 +19,12 @@ Env vars:
   OPENCODE_SERVER_USERNAME       # basic-auth serve (опц.; дефолт opencode)
   OPENCODE_SERVER_PASSWORD       # basic-auth serve; пусто = без пароля
   OPENCODE_TIMEOUT=120           # потолок одного вызова модели, сек
+  OPENCODE_PUBLISH_TIMEOUT=40    # потолок вызова на пути публикации (волна),
+                                 # сек; остаток бюджета делится между моделями
+                                 # цепочки (ADR-0013)
+  ENGINE_BREAKER_ENABLED=1       # предохранитель движка: 0 — выключить
+  ENGINE_BREAKER_FAILS=3         # сколько отказов по лимиту/сети подряд
+  ENGINE_BREAKER_COOLDOWN=300    # на сколько секунд он закрывает вызовы, сек
   OPENCODE_MODEL_CHAIN           # CSV цепочка фолбэков: первая живая модель
                                  # отвечает. Дефолт — замер 20.10 со своего
                                  # бокса: deepseek-v4.1-flash-free первый
@@ -123,13 +129,20 @@ def get_publish_timeout() -> float:
     ждать долго терпимо. Волна публикации ждёт иначе: она стоит в единственном
     слоте воркера, и каждый её вызов — это задержка публикаций всех остальных
     районов. Поэтому у пути публикации свой, короткий потолок: не ответил за
-    ``OPENCODE_PUBLISH_TIMEOUT`` (дефолт 25 с) — публикуем исходный текст
-    (fail-open уже встроен в пересказ и в нейро-фильтр).
+    ``OPENCODE_PUBLISH_TIMEOUT`` — публикуем исходный текст (fail-open уже
+    встроен в пересказ и в нейро-фильтр).
+
+    Почему дефолт 40 с, а не 25. Замер на боксе 21.10
+    (``scripts/post_rewrite_sample.py --region mi --limit 3``): три пересказа —
+    64 с на всех, то есть 20–30 с на удачный ответ. При потолке 25 с один из
+    трёх не успевал и падал в ``engine_all_failed`` — то есть мы платили те же
+    25 с и не получали пересказа. 40 с — типичный ответ с запасом на медленный,
+    и по-прежнему втрое меньше прежних 120 с × 6 (цепочка × попытки).
     """
     try:
-        return max(5.0, float(os.getenv("OPENCODE_PUBLISH_TIMEOUT", "25")))
+        return max(5.0, float(os.getenv("OPENCODE_PUBLISH_TIMEOUT", "40")))
     except ValueError:
-        return 25.0
+        return 40.0
 
 
 def get_model_chain() -> List[str]:

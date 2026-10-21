@@ -75,6 +75,41 @@ def test_rewrite_replaces_text_and_keeps_original(monkeypatch):
     assert "х" * 100 not in post["text"]
 
 
+def test_truncated_answer_keeps_source(monkeypatch):
+    """Модель сказала ``finish=length`` — половину предложения в ленту не пускаем.
+
+    Живой случай 21.10: пересказ пришёл оборванным на «…место завалено грудо»
+    (775 знаков). По тексту такой ответ неотличим от нормального, поэтому
+    решает причина остановки, а не «красивость».
+    """
+    answer = dict(_ok(_long("Глава района открыл школу.")))
+    answer["finish"] = "length"
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: answer)
+
+    post = _post()
+    source = post["text"]
+    stats = rewriter.rewrite_posts([post], region="mi")
+
+    assert stats.failed == 1
+    assert stats.rewritten == 0
+    assert stats.reasons == ["truncated"]
+    assert post["text"] == source
+
+
+def test_answer_cut_mid_word_is_rejected_even_without_finish(monkeypatch):
+    """Провайдер причину не сообщил — ловим по форме: проза не кончается буквой."""
+    body = _long("Синцовская библиотека проводит диктант.") + " Место завалено грудо"
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: _ok(body))
+
+    post = _post()
+    source = post["text"]
+    stats = rewriter.rewrite_posts([post], region="mi")
+
+    assert stats.failed == 1
+    assert stats.reasons == ["truncated"]
+    assert post["text"] == source
+
+
 def test_engine_failure_keeps_source(monkeypatch):
     monkeypatch.setattr(
         rewriter,
