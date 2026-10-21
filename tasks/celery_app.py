@@ -2759,17 +2759,26 @@ app.conf.beat_schedule = {
         "schedule": crontab(minute="*/10"),
         "options": {"expires": 540, "catchup": False},
     },
-    # Intake-бот «Карман» (приём форвардов каналов): каждую минуту getUpdates.
+    # Intake-бот «Карман» (приём форвардов каналов): getUpdates раз в две минуты.
     # No-op, пока не заданы RADAR_BOT_NAME + токен (#008). Форвард поста канала
     # боту → канал в радар + подписка оператора.
+    #
+    # Почему не каждую минуту (было так). ``api.telegram.org`` с бокса теряет
+    # около половины SYN (G307), поэтому тик идёт не мгновенно, а 8–9 с — и всё
+    # это время однопроцессный воркер занят ожиданием (замер 21.10: 678 прогонов
+    # × 8.6 с = 5 818 с за сутки, 6.2 % времени слота). Две минуты вдвое
+    # уменьшают эту занятость: код привязки и форвард канала ждут лишнюю минуту,
+    # но волны публикации перестают стоять за пустым поллингом.
     "radar-intake-bot": {
         "task": "tasks.radar_tasks.poll_radar_bot",
-        "schedule": crontab(minute="*"),
-        "options": {"expires": 55, "catchup": False},
+        "schedule": crontab(minute="*/2"),
+        "options": {"expires": 110, "catchup": False},
     },
     # VK-интейк (приём кодов привязки VK-лички через Bots Long Poll сообщества):
     # каждую минуту. No-op, пока не задан RADAR_VK_COMMUNITY_ID + community-токен
     # (#008). Юзер пишет код сообществу-точке → ловим vk_id → vk_dm-вывод в личку.
+    # Сам a_check ждёт всего 3 с (``vk_intake.LP_WAIT``): тик минутный, и длинное
+    # ожидание внутри него — это простой слота, а не работа.
     "radar-vk-intake": {
         "task": "tasks.radar_tasks.poll_radar_vk_intake",
         "schedule": crontab(minute="*"),
