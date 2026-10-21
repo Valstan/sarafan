@@ -87,6 +87,45 @@ async def test_loop_repeats_success_without_sleep(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_interval_loop_holds_the_step(monkeypatch):
+    """Поллер источников ходит по интервалу, а не сразу следующим тиком.
+
+    Иначе демон молотил бы внешние ленты без паузы: для long poll «сразу
+    следующий» и есть ожидание, а здесь ожидания нет — сеть вызывается сама.
+    """
+    stop = asyncio.Event()
+    calls = {"n": 0}
+    times = []
+
+    async def runner():
+        calls["n"] += 1
+        times.append(asyncio.get_running_loop().time())
+        if calls["n"] >= 2:
+            stop.set()
+        return {"ok": True}
+
+    await asyncio.wait_for(daemon._interval_loop("sources", runner, stop, interval=0.05), timeout=2)
+
+    assert calls["n"] == 2
+    assert times[1] - times[0] >= 0.04
+
+
+@pytest.mark.asyncio
+async def test_sources_runner_returns_summary(monkeypatch):
+    """Демон ждёт от сборки ``ok`` и сводку поллера, а не ``skipped``."""
+    from modules.radar import intake_runners
+
+    async def fake_poll():
+        return {"sources": 2, "new_items": 3, "failed": 0}
+
+    monkeypatch.setattr("modules.radar.poller.poll_all_sources", fake_poll)
+
+    out = await intake_runners.sources_poll_once()
+
+    assert out == {"ok": True, "sources": 2, "new_items": 3, "failed": 0}
+
+
+@pytest.mark.asyncio
 async def test_vk_runner_skips_without_community_id(monkeypatch):
     from modules.radar.intake_runners import vk_intake_once
 

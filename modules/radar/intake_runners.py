@@ -17,6 +17,10 @@ getUpdates у Telegram), но в однопроцессном воркере о�
 Сборки возвращают ровно то, что возвращали таски, — включая ``skipped``, когда
 интейк выключен конфигом (нет ``RADAR_VK_COMMUNITY_ID``/токена, пустой
 allowlist). Демон по ``skipped`` спит дольше, а не крутит цикл.
+
+Третья сборка — ``sources_poll_once`` (поллер источников, 21.10): та же причина,
+но без «ожидания события». Она крутится по фиксированному интервалу и не имеет
+состояния, поэтому ``skipped`` у неё нет: пустой радар — это no-op, а не выключка.
 """
 
 from __future__ import annotations
@@ -25,6 +29,23 @@ import logging
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+
+async def sources_poll_once() -> Dict[str, Any]:
+    """Один прогон поллера источников радара — без Celery.
+
+    Третий цикл демона. Раньше это была beat-таска ``poll_radar_sources``
+    (каждые 10 минут), и она стоила слоту воркера 187 мин в сутки: пять
+    источников поллились по очереди, а у телеграм-релейного фетчера таймаут
+    45 с и две попытки. В демоне прогон не занимает слот, а сами фетчи идут
+    параллельно (``modules.radar.poller``).
+
+    Возвращает сводку поллера: ``{ok, sources, new_items, failed}``.
+    """
+    from modules.radar.poller import poll_all_sources
+
+    summary = await poll_all_sources()
+    return {"ok": True, **summary}
 
 
 async def vk_intake_once(*, lp_wait: Optional[int] = None) -> Dict[str, Any]:

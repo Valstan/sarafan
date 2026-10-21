@@ -2803,14 +2803,18 @@ app.conf.beat_schedule = {
         "kwargs": {"region_code": "copy", "theme": "krugozor"},
         "options": {"expires": 3600},
     },
-    # Контент-радар (Ф0.2): fan-out поллер источников каждые 10 мин круглосуточно
-    # (личная лента — не публикация в сеть, ночное окно не нужно). Внутри прогона
-    # поллятся только активные источники с ≥1 подпиской; пустой радар = no-op.
-    "radar-poll-sources": {
-        "task": "tasks.radar_tasks.poll_radar_sources",
-        "schedule": crontab(minute="*/10"),
-        "options": {"expires": 540, "catchup": False},
-    },
+    # Контент-радар (Ф0.2): поллер источников в beat НЕ стоит.
+    #
+    # Замер 21.10 (прибор длительности): 144 прогона в сутки по 78 с = 187 мин
+    # слота — больше любой другой периодики, и это при ПЯТИ активных источниках.
+    # Причина не в трафике: источники поллились по очереди, а телеграм-фетчер
+    # идёт через релей с таймаутом 45 с × 2 попытки, то есть одна медленная
+    # лента держала остальные. Теперь прогон крутит демон setka-radar-intake
+    # (scripts/radar_intake_daemon.py) по интервалу RADAR_POLL_INTERVAL_SECONDS,
+    # а фетчи внутри прогона идут параллельно (modules/radar/poller.py).
+    # Таска tasks.radar_tasks.poll_radar_sources оставлена для ручного прогона и
+    # диагностики. Watchdog check_radar_poll_heartbeat остаётся здесь: он смотрит
+    # на heartbeat setka:radar_last_polled, а не на расписание.
     # Intake-бот «Карман» (приём форвардов каналов) и VK-интейк радара в beat НЕ
     # стоят намеренно — оба крутит демон setka-radar-intake
     # (scripts/radar_intake_daemon.py, шаблон config/setka-radar-intake.service.template).

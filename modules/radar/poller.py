@@ -6,6 +6,20 @@
 ON CONFLICT DO NOTHING по uniq (source_id, external_id) — повторный фетч
 того же поста = no-op, курсоры не нужны.
 
+**Источники поллятся параллельно, пачкой.** Замер 21.10: прогон стоил 78 с
+при пяти источниках и занимал единственный слот воркера 144 раза в сутки
+(187 мин — больше любой другой периодики). Причина была не в трафике, а в
+последовательном обходе: телеграм-фетчер идёт через релей с таймаутом 45 с и
+двумя попытками, то есть одна медленная лента держала остальные. Теперь фетчи
+уходят в ``asyncio.gather`` под семафором, а записи остаются последовательными
+в одной сессии (параллельные ``execute`` в одной сессии запрещены).
+
+**Крутит его демон, а не beat.** Ждать сеть в очереди задач нельзя — это тот же
+класс отказа, что интейки: ожидание занимает слот, а под переполненной очередью
+тик истекает по ``expires`` и не выполняется вовсе. Поллер живёт третьим циклом
+демона ``setka-radar-intake`` (``scripts/radar_intake_daemon.py``); Celery-таска
+``poll_radar_sources`` осталась для ручного прогона и диагностики.
+
 Liveness — по паттерну ``modules/bulletin_heartbeat.py`` (pool #018,
 retired≠dead R6): успешный прогон пишет unix-ts в Redis
 ``setka:radar_last_polled``; watchdog алёртит ТОЛЬКО если есть активные
@@ -15,6 +29,7 @@ retired≠dead R6): успешный прогон пишет unix-ts в Redis
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -28,6 +43,10 @@ logger = logging.getLogger(__name__)
 
 HEARTBEAT_KEY = "setka:radar_last_polled"
 _HEARTBEAT_TTL_SECONDS = 14 * 24 * 3600
+
+# Сколько источников опрашивать одновременно. Пять — по числу активных
+# источников на проде 21.10; больше незачем, меньше смысла.
+POLL_CONCURRENCY = max(1, int(os.getenv("RADAR_POLL_CONCURRENCY", "5")))
 
 # Поллер идёт каждые 10 минут; 40 мин = 4 пропущенных прогона подряд.
 DEFAULT_MAX_AGE_MINUTES = 40
@@ -64,7 +83,73 @@ def touch_heartbeat() -> None:
         logger.warning("radar poller: heartbeat write failed: %s", e)
 
 
-async def poll_all_sources() -> dict:
+async def _fetch_source(source, fetcher, semaphore: asyncio.Semaphore):
+    """Один источник: только сеть, без БД. Возвращает ``(source, items, error)``.
+
+    Ошибку не бросаем: упавший источник не должен стоить остальных (прежняя
+    семантика последовательного цикла), но и ждать его никто не обязан.
+    """
+    async with semaphore:
+        try:
+            return source, await fetcher(source), None
+        except Exception as e:  # noqa: BLE001 - источник упал, прогон живёт
+            return source, None, e
+
+
+def _rows_for_source(source_id, items, *, now=None) -> tuple:
+    """Элементы источника → строки для одного INSERT. Возвращает ``(rows, newest)``.
+
+    Дубли внутри пачки снимаем здесь: ``ON CONFLICT`` разбирает конфликты с уже
+    лежащими строками, а не с соседями по VALUES.
+    """
+    rows = []
+    seen: set = set()
+    newest: Optional[datetime] = None
+    stamp = now or datetime.utcnow()
+    for item in items:
+        external_id = item.external_id
+        if external_id in seen:
+            continue
+        seen.add(external_id)
+        rows.append(
+            {
+                "source_id": source_id,
+                "external_id": external_id,
+                "url": item.url,
+                "title": item.title,
+                "text": item.text,
+                "media": item.media or [],
+                "published_at": item.published_at,
+                "fetched_at": stamp,
+            }
+        )
+        if item.published_at and (newest is None or item.published_at > newest):
+            newest = item.published_at
+    return rows, newest
+
+
+async def _insert_items(session, source_id, items) -> tuple:
+    """Вставить элементы источника одной пачкой. Возвращает ``(сколько новых, newest)``.
+
+    Одна вставка на источник вместо запроса на элемент: при полном прогоне это
+    десятки элементов, и каждый отдельный ``execute`` — круг до Postgres посреди
+    той же транзакции.
+    """
+    rows, newest = _rows_for_source(source_id, items)
+    if not rows:
+        return 0, newest
+
+    from database.models_extended import RadarItem
+
+    result = await session.execute(
+        pg_insert(RadarItem)
+        .values(rows)
+        .on_conflict_do_nothing(index_elements=["source_id", "external_id"])
+    )
+    return max(int(getattr(result, "rowcount", 0) or 0), 0), newest
+
+
+async def poll_all_sources(*, poll_concurrency: Optional[int] = None) -> dict:
     """Один прогон поллера: фетч всех активных подписанных источников.
 
     Возвращает сводку {sources, new_items, failed} для лога/таски.
@@ -73,7 +158,7 @@ async def poll_all_sources() -> dict:
     """
     from database import models  # noqa: F401 - конфигурация мапперов (PR #189)
     from database.connection import AsyncSessionLocal
-    from database.models_extended import RadarItem, RadarSource, RadarSubscription
+    from database.models_extended import RadarSource, RadarSubscription
     from modules.radar.sources import get_fetcher
 
     summary = {"sources": 0, "new_items": 0, "failed": 0}
@@ -97,48 +182,46 @@ async def poll_all_sources() -> dict:
             .all()
         )
 
+        # Сеть — параллельно, БД — последовательно.
+        #
+        # Замер 21.10: прогон стоил 78 с при ПЯТИ активных источниках, и эти
+        # 78 с занимали единственный слот воркера 144 раза в сутки (187 мин,
+        # больше любой другой периодики). Причина не в объёме, а в том, что
+        # источники поллились по очереди: у телеграм-релейного фетчера таймаут
+        # 45 с и две попытки, то есть одна медленная лента держала остальные.
+        # Сессия БД между фетчами не нужна вовсе — источник читается один раз
+        # выше, а записи идут после. Поэтому фетчи отпускаем в gather, а записи
+        # остаются в одной сессии (одна сессия = одно соединение, параллельные
+        # execute в ней запрещены).
+        pairs = []
         for source in sources:
             fetcher = get_fetcher(source.type)
             if fetcher is None:  # tg до Ф0.3 — пропускаем молча, это не ошибка
                 continue
-            summary["sources"] += 1
-            try:
-                items = await fetcher(source)
-            except Exception as e:  # noqa: BLE001 - источник упал, прогон живёт
+            pairs.append((source, fetcher))
+        summary["sources"] = len(pairs)
+
+        concurrency = poll_concurrency if poll_concurrency is not None else POLL_CONCURRENCY
+        semaphore = asyncio.Semaphore(max(1, concurrency))
+        fetched = await asyncio.gather(
+            *(_fetch_source(source, fetcher, semaphore) for source, fetcher in pairs)
+        )
+
+        for source, items, error in fetched:
+            if error is not None:
                 source.fail_count = (source.fail_count or 0) + 1
-                source.last_error = str(e)[:512]
+                source.last_error = str(error)[:512]
                 summary["failed"] += 1
                 logger.warning(
                     "radar poll failed for %s:%s (fail #%d): %s",
                     source.type,
                     source.key,
                     source.fail_count,
-                    e,
+                    error,
                 )
                 continue
 
-            new_count = 0
-            newest: Optional[datetime] = None
-            for item in items:
-                result = await session.execute(
-                    pg_insert(RadarItem)
-                    .values(
-                        source_id=source.id,
-                        external_id=item.external_id,
-                        url=item.url,
-                        title=item.title,
-                        text=item.text,
-                        media=item.media or [],
-                        published_at=item.published_at,
-                        fetched_at=datetime.utcnow(),
-                    )
-                    .on_conflict_do_nothing(index_elements=["source_id", "external_id"])
-                )
-                if result.rowcount:
-                    new_count += 1
-                if item.published_at and (newest is None or item.published_at > newest):
-                    newest = item.published_at
-
+            new_count, newest = await _insert_items(session, source.id, items)
             source.last_polled_at = datetime.utcnow()
             source.fail_count = 0
             source.last_error = None
