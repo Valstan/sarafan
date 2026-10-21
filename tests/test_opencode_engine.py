@@ -378,6 +378,76 @@ def test_chat_timeout_budget_covers_whole_chain(monkeypatch, engine_on):
     assert len(seen) < 3, "бюджет кончился — вторую модель звать уже нечем"
 
 
+def test_stalled_model_does_not_eat_the_whole_budget(monkeypatch, engine_on):
+    """Зависшая модель платит своим потолком, а не бюджетом всей цепочки.
+
+    Живой повод 21.10: 69 волн за день (15 %) ушли в fail-open с
+    ``engine_all_failed``, а в логе — ``модель deepseek-v4.1-flash-free отказала
+    (network TimeoutError)``. Первая модель получала весь бюджет вызова,
+    зависала на нём и оставляла остальные две без времени. Здесь — что цепочка
+    доходит до конца, хотя каждая модель висит.
+    """
+    monkeypatch.setenv("OPENCODE_MODEL_CHAIN", "m1,m2,m3")
+    monkeypatch.setenv("OPENCODE_MODEL_TIMEOUT", "20")
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def monotonic(self) -> float:
+            return self.t
+
+    clock = _Clock()
+    monkeypatch.setattr(opencode_engine, "time", clock)
+    monkeypatch.setattr(opencode_engine, "_rotate_egress", lambda detail: False)
+
+    seen: List[Tuple[str, Optional[float]]] = []
+
+    def fake_call(model_id, prompt, label, timeout=None):
+        seen.append((model_id, timeout))
+        clock.t += timeout or 0.0  # модель «висит» весь отпущенный ей бюджет
+        return {"ok": False, "reason": "network", "detail": "TimeoutError"}
+
+    monkeypatch.setattr(opencode_engine, "_call_model", fake_call)
+
+    result = chat(user="пост", timeout=60.0)
+
+    assert result["reason"] == "engine_all_failed"
+    assert [m for m, _ in seen] == ["m1", "m2", "m3"], "каждая модель должна получить шанс"
+    assert all(t is not None and t <= 20.0 for _, t in seen)
+
+
+def test_publish_budget_gives_second_model_a_chance(monkeypatch, engine_on):
+    """Бюджет публикации 40 с: раньше первая же зависшая модель съедала всё,
+    теперь до второй дело доходит."""
+    monkeypatch.setenv("OPENCODE_MODEL_CHAIN", "m1,m2,m3")
+    monkeypatch.setenv("OPENCODE_MODEL_TIMEOUT", "20")
+
+    class _Clock:
+        def __init__(self) -> None:
+            self.t = 0.0
+
+        def monotonic(self) -> float:
+            return self.t
+
+    clock = _Clock()
+    monkeypatch.setattr(opencode_engine, "time", clock)
+    monkeypatch.setattr(opencode_engine, "_rotate_egress", lambda detail: False)
+
+    seen: List[Tuple[str, Optional[float]]] = []
+
+    def fake_call(model_id, prompt, label, timeout=None):
+        seen.append((model_id, timeout))
+        clock.t += timeout or 0.0
+        return {"ok": False, "reason": "network", "detail": "TimeoutError"}
+
+    monkeypatch.setattr(opencode_engine, "_call_model", fake_call)
+
+    chat(user="пост", timeout=40.0)
+
+    assert len(seen) >= 2, "вторая модель должна получить свою половину бюджета"
+
+
 def test_chat_without_timeout_keeps_engine_default(monkeypatch, engine_on):
     seen: List[Optional[float]] = []
 
