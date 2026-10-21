@@ -65,6 +65,7 @@ from config.opencode import (
     engine_enabled,
     get_base_url,
     get_model_chain,
+    get_model_timeout,
     get_serve_max_lifetime,
     get_serve_rss_kill_mb,
     get_server_password,
@@ -775,6 +776,7 @@ def chat(
 
     reasons: List[str] = []
     gate_detail = ""
+    per_model_cap = get_model_timeout()
     # Две попытки: первая — как есть; если вся цепочка легла на гейт free-тира
     # по IP или на лимит (429) — меняем выход ВПН (если бокс это разрешил) и
     # повторяем цепочку.
@@ -790,6 +792,10 @@ def chat(
                     # следующая модель означала бы новый таймаут поверх старого.
                     reasons.append("budget_exhausted")
                     break
+                # Потолок одной модели: зависшая модель не должна съедать
+                # бюджет всей цепочки (замер 21.10 — 15 % волн без пересказа
+                # ровно по этой причине, см. config.opencode.get_model_timeout).
+                budget = min(budget, per_model_cap)
             result = (
                 _call_model(model_id, prompt, label, timeout=budget)
                 if budget is not None
