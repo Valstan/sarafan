@@ -41,7 +41,7 @@ sudo systemctl restart setka setka-celery-worker setka-celery-beat setka-vk-bot
 Проверить разом: `systemctl is-active setka setka-celery-worker setka-celery-beat
 setka-vk-bot opencode-web` и `curl -s http://127.0.0.1:8000/api/health/full`.
 
-Логи: `~/САРАФАН/logs/` (есть logrotate); демон бота пишет в `logs/vk-bot.log`.
+Логи: `~/SETKA/logs/` (есть logrotate); демон бота пишет в `logs/vk-bot.log`.
 
 ВК-бот: демон пишет heartbeat `setka:vkbot:heartbeat` (Redis db 1, unix-ts) после
 каждого ответа Long Poll; сторож `vk-bot-watchdog` (beat, каждые 10 минут) шлёт Telegram,
@@ -51,7 +51,7 @@ setka-vk-bot opencode-web` и `curl -s http://127.0.0.1:8000/api/health/full`.
 ## 3) Celery (ручной запуск)
 
 ```bash
-cd ~/САРАФАН
+cd ~/SETKA
 ./scripts/start_celery.sh
 ```
 
@@ -88,31 +88,35 @@ cd ~/САРАФАН
 - `NEIGHBOR_FOOTER_MAX_PER_DAY` (футер «Ленты соседей»: сколько раз в сутки, дефолт 3)
 - `NEIGHBOR_FOOTER_MIN_GAP_HOURS` (пауза между показами футера, дефолт 4)
 
-## 4.5) sudo для воркера: белый список команд
+## 4.5) sudo на боксе: разработчику — полный, движку — никакого
 
-Воркер и движок работают под пользователем `valstan`. Без пароля ему разрешён
-**только белый список** — точные команды, без `ALL`:
-смена выхода ВПН (`/etc/neural/egress.d/10-nextgenvpn.sh`), `systemctl`
-start/stop/restart по рабочим юнитам (`setka`, `setka-celery-worker`,
-`setka-celery-beat`, `setka-vk-bot`, `opencode-web`), `status`/`is-active`.
+Граница изоляции проходит **по пользователю**, а не по перечню команд:
 
-**Wildcard разрешён ровно в одном виде** — там, где он не расширяет права:
-`systemctl status *` и `systemctl is-active *` (это чтение состояния любого
-юнита; без `*` правило не совпадало с `status sarafan`, и диагностика молча
-падала на пароле). Любой `*` в строке с `start`/`stop`/`restart`/`reload` —
-запрещён: он превращает белый список в `ALL`. Сторож проверяет это отдельно
-([`tests/test_infra/test_sudo_allowlist.py`](../tests/test_infra/test_sudo_allowlist.py)).
+| Пользователь | Что под ним работает | sudo |
+|---|---|---|
+| `valstan` | воркер Celery, релизная процедура, агент-разработчик | `NOPASSWD: ALL` |
+| `opencode` | нейро-движок `opencode-web` | нет вообще; юнит держит `NoNewPrivileges=yes` |
 
-Канон списка — [`infra/sudoers/setka-worker`](../infra/sudoers/setka-worker),
-инструкция и откат — [`infra/sudoers/README.md`](../infra/sudoers/README.md).
-Всё остальное (`psql` под postgres, правка `/etc`, nginx) — только человеком
-с паролем: `valstan` в группе `sudo`, интерактивный `sudo` у него остаётся.
+Канон правила разработчика — [`infra/sudoers/valstan-dev`](../infra/sudoers/valstan-dev),
+инструкция и границы — [`infra/sudoers/README.md`](../infra/sudoers/README.md).
 
-⚠️ **Меняя воркер, помни про белый список.** Новый привилегированный вызов
-(`sudo -n …`) в `modules/`, `tasks/`, `web/`, `config/` = правка
-`infra/sudoers/setka-worker` **тем же PR**. Иначе локально и в CI всё зелёное,
-а на боксе команда падает с `sudo: a password is required` — и это выглядит
-как поломка прода. Сторож — `tests/test_infra/test_sudo_allowlist.py`.
+**Почему не белый список.** До 21.10 здесь лежал перечень разрешённых команд для
+`valstan`. Он ограничивал разработчика, а не прод-нейросеть: движок работает под
+отдельным пользователем `opencode`, у которого sudo нет ни в одной строке, а
+юнит и так запечатан `NoNewPrivileges=yes`. Песочница движка существует без
+белого списка; цена же платилась настоящая — каждая новая привилегированная
+команда в релизе требовала правки sudoers в том же PR, иначе на боксе
+`sudo: a password is required`, и это выглядело как поломка прода.
+
+Сторож — [`tests/test_infra/test_sudo_policy.py`](../tests/test_infra/test_sudo_policy.py):
+он падает, если для `valstan` снова заведут перечень команд, если права получит
+`opencode`, если из юнита движка пропадёт `NoNewPrivileges=yes` или сменится
+`User`, и если это описание исчезнет из документа.
+
+⚠️ **Полный sudo — не разрешение.** Гейт на destructive-операциях с прод-данными
+(`ALTER`, `DROP`, `DELETE`, `UPDATE`, `systemctl stop`, ротация токенов) остаётся
+человеческим: `NOPASSWD` снимает вопрос «дадут ли пароль», а не вопрос «стоит ли
+это делать» (см. [`AGENTS.md`](../AGENTS.md) §«Автономия под гейтами»).
 
 ## 5) Nginx
 
@@ -121,7 +125,7 @@ start/stop/restart по рабочим юнитам (`setka`, `setka-celery-work
 Применение:
 
 ```bash
-~/САРАФАН/scripts/apply_nginx_config.sh
+~/SETKA/scripts/apply_nginx_config.sh
 ```
 
 Что должно работать:
