@@ -37,6 +37,12 @@ _THEME_TITLE: dict[str, str] = {
     "priroda": "Природа и туризм",
 }
 
+
+def theme_title(theme: str) -> str:
+    """Русское имя темы — одно на заголовки сводок и на карту конвейера."""
+    return _THEME_TITLE.get(theme, theme)
+
+
 # Часть хештега по теме (кириллица, без #). К региональной части из
 # heshteg_local пристыковывается в heshteg.
 _THEME_HASHTAG_WORD: dict[str, str] = {

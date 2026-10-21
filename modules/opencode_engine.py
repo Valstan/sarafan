@@ -604,12 +604,14 @@ def _rotate_egress(detail: str = "") -> bool:
     return ok
 
 
-def _call_model(model_id: str, prompt: str, label: str) -> Dict[str, Any]:
+def _call_model(
+    model_id: str, prompt: str, label: str, timeout: Optional[float] = None
+) -> Dict[str, Any]:
     """Один вызов одной модели через serve v2. Никогда не бросает."""
     if not get_base_url():
         return {"ok": False, "reason": "no_base_url"}
 
-    timeout = get_timeout()
+    timeout = timeout or get_timeout()
 
     # Сессия сразу с моделью и запретами инструментов: у v2 модель — свойство
     # сессии, а не сообщения (у prompt поля model нет; строка/объект в теле
@@ -728,7 +730,7 @@ def chat(
     json_object: bool = False,  # noqa: ARG001 — strict-JSON включается phrasing'ом промпта
     api_key: Optional[str] = None,  # noqa: ARG001 — ключ живёт в serve
     model: Optional[str] = None,
-    timeout: Optional[float] = None,  # noqa: ARG001 — таймаут внутри _post_json/_get_json
+    timeout: Optional[float] = None,
     label: str = "opencode",
 ) -> Dict[str, Any]:
     """Вызов классификатора через харнесс OpenCode.
@@ -736,7 +738,14 @@ def chat(
     Сигнатура и контракт ответа зеркалят ``modules/deepseek_client.chat`` —
     вызывающий код (headless) не различает движки. ``model``, если задан,
     встаёт во главу цепочки фолбэков; далее — ``OPENCODE_MODEL_CHAIN``.
+
+    ``timeout`` — бюджет **всего** вызова, а не одной модели: цепочка из трёх
+    моделей с двумя попытками умножала бы потолок на шесть. Волна публикации
+    передаёт сюда ``config.opencode.get_publish_timeout()``, поэтому остаток
+    бюджета делится между моделями, а нехватка времени честно завершает вызов
+    отказом (fail-open у вызывающего уже есть).
     """
+    deadline = (time.monotonic() + timeout) if timeout else None
     if not engine_enabled():
         return {"ok": False, "reason": "engine_disabled"}
     if not (user or "").strip():
@@ -759,7 +768,19 @@ def chat(
         reasons = []
         gate_detail = ""
         for model_id in chain:
-            result = _call_model(model_id, prompt, label)
+            budget: Optional[float] = None
+            if deadline is not None:
+                budget = deadline - time.monotonic()
+                if budget <= 1.0:
+                    # Бюджет вызова исчерпан — дальше пробовать нечем: каждая
+                    # следующая модель означала бы новый таймаут поверх старого.
+                    reasons.append("budget_exhausted")
+                    break
+            result = (
+                _call_model(model_id, prompt, label, timeout=budget)
+                if budget is not None
+                else _call_model(model_id, prompt, label)
+            )
             if result.get("ok"):
                 return result
             reason = str(result.get("reason") or "?")
@@ -771,6 +792,9 @@ def chat(
             if reason in _FATAL_REASONS:
                 # Отказ контура (нет адреса serve) — следующая модель не поможет.
                 break
+        if deadline is not None and deadline - time.monotonic() <= 5.0:
+            # На поворот ВПН и второй проход бюджета уже нет.
+            break
         if attempt == 1 and gate_detail and _rotate_egress(gate_detail):
             logger.warning("opencode-engine: повторяю цепочку после смены выхода ВПН")
             continue

@@ -1,0 +1,294 @@
+{% extends "base.html" %}
+
+{% block title %}САРАФАН — карта конвейера{% endblock %}
+{% block nav_pipeline_map %}active{% endblock %}
+{% block nav_section_pipeline %}active{% endblock %}
+
+{% block content %}
+<div class="container-fluid py-4">
+    <div class="row mb-4 align-items-end">
+        <div class="col">
+            <h1 class="h3 mb-1">
+                <i class="bi bi-diagram-3 me-2"></i>Карта конвейера
+            </h1>
+            <p class="text-muted mb-0">
+                Что и когда запускается, из чего состоит волна и что она даёт.
+                Время — московское, как в расписании beat.
+            </p>
+        </div>
+        <div class="col-auto d-flex gap-2">
+            <select id="daysFilter" class="form-select">
+                <option value="1">последние 24 часа</option>
+                <option value="7" selected>последние 7 дней</option>
+                <option value="14">последние 14 дней</option>
+                <option value="30">последние 30 дней</option>
+            </select>
+            <button class="btn btn-outline-secondary" onclick="loadMap()">
+                <i class="bi bi-arrow-clockwise"></i> Обновить
+            </button>
+        </div>
+    </div>
+
+    <div class="alert alert-warning d-none" id="mapError" role="alert"></div>
+
+    <!-- Шапка: сколько стоит день -->
+    <div class="row g-3 mb-4">
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small">Слотов в сутки</div>
+                    <div class="display-6" id="totalSlots">—</div>
+                    <div class="text-muted small">запусков веера по расписанию</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small">Волн в сутки (оценка)</div>
+                    <div class="display-6" id="totalWaves">—</div>
+                    <div class="text-muted small">слот × регионы в нём</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small">Занятость слота</div>
+                    <div class="display-6" id="busyHours">—</div>
+                    <div class="text-muted small" id="busyShare">среднее за период</div>
+                </div>
+            </div>
+        </div>
+        <div class="col-md-3">
+            <div class="card border-0 shadow-sm h-100">
+                <div class="card-body">
+                    <div class="text-muted small">Сейчас в очереди</div>
+                    <div class="display-6" id="queueDepth">—</div>
+                    <div class="text-muted small" id="queueNote">воркер: один слот</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Сейчас -->
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-white">
+            <h6 class="mb-0"><i class="bi bi-activity me-1"></i> Сейчас</h6>
+        </div>
+        <div class="card-body">
+            <div class="row g-3">
+                <div class="col-lg-6">
+                    <div class="small text-muted mb-1">Выполняется</div>
+                    <div id="activeTask" class="font-monospace small">—</div>
+                </div>
+                <div class="col-lg-3">
+                    <div class="small text-muted mb-1">Слот воркера</div>
+                    <div id="slotInfo" class="small">—</div>
+                </div>
+                <div class="col-lg-3">
+                    <div class="small text-muted mb-1">Нейро-движок</div>
+                    <div id="breakerInfo" class="small">—</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Расписание по часам -->
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+            <h6 class="mb-0"><i class="bi bi-calendar3 me-1"></i> Расписание волн по часам</h6>
+            <span class="text-muted small">одна строка = один запуск; «регионов» — столько задач уедет в слот</span>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0" id="scheduleTable">
+                    <thead class="table-light">
+                        <tr>
+                            <th style="width:120px">Час</th>
+                            <th style="width:80px">Время</th>
+                            <th>Тема</th>
+                            <th>Запись расписания</th>
+                            <th class="text-end">Регионов</th>
+                            <th>Куда</th>
+                            <th class="text-end">expires</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td colspan="7" class="text-center py-4 text-muted">Загрузка…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Темы -->
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+            <h6 class="mb-0"><i class="bi bi-tags me-1"></i> Темы: сколько стоит и что даёт</h6>
+            <span class="text-muted small">«волн на пост» — во сколько волн обходится один пост</span>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0" id="themesTable">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Тема</th>
+                            <th class="text-end">Слотов/сутки</th>
+                            <th class="text-end">Регионов</th>
+                            <th class="text-end">Волн/сутки</th>
+                            <th class="text-end">Волн за период</th>
+                            <th class="text-end">Постов</th>
+                            <th class="text-end">Волн на пост</th>
+                            <th class="text-end">Средняя волна</th>
+                            <th class="text-end">Последняя</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td colspan="9" class="text-center py-4 text-muted">Загрузка…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <p class="text-muted small mb-0">
+        Расписание читается из живого <code>app.conf.beat_schedule</code>, число регионов — тем же
+        отбором, что у таска волны (<code>modules.wave_targets</code>), выход тем — из
+        <code>parsing_stats</code> за выбранный период. Кэш расписания — 10 минут,
+        блок «сейчас» — без кэша.
+    </p>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    document.getElementById('daysFilter').addEventListener('change', loadMap);
+    loadMap();
+});
+
+function esc(value) {
+    return String(value === null || value === undefined ? '' : value)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function toast(message, kind) {
+    if (typeof showToast === 'function') { showToast(message, kind || 'error'); }
+}
+
+function loadMap() {
+    const days = document.getElementById('daysFilter').value;
+    fetch(`/api/pipeline/map?days=${days}`)
+        .then(response => {
+            if (!response.ok) { throw new Error('HTTP ' + response.status); }
+            return response.json();
+        })
+        .then(renderMap)
+        .catch(error => {
+            console.error('pipeline map:', error);
+            const box = document.getElementById('mapError');
+            box.textContent = 'Не удалось загрузить карту: ' + error.message;
+            box.classList.remove('d-none');
+            toast('Ошибка загрузки карты конвейера');
+        });
+}
+
+function renderMap(data) {
+    document.getElementById('mapError').classList.add('d-none');
+    const t = data.totals || {};
+
+    document.getElementById('totalSlots').textContent = t.slots_per_day ?? '—';
+    document.getElementById('totalWaves').textContent = t.waves_per_day ?? '—';
+    document.getElementById('busyHours').textContent = (t.busy_hours ?? '—') + (t.busy_hours != null ? ' ч' : '');
+    document.getElementById('busyShare').textContent = t.share_of_day != null
+        ? `${t.share_of_day}% суток занято одним слотом`
+        : 'среднее за период';
+
+    renderNow(data.now || {});
+    renderSchedule(data.hours || [], data.theme_titles || {});
+    renderThemes(data.themes || [], data.theme_titles || {});
+}
+
+function renderNow(now) {
+    document.getElementById('queueDepth').textContent = now.queue_depth ?? '—';
+    document.getElementById('queueNote').textContent = now.unacked
+        ? `воркер: один слот, взято в работу: ${now.unacked}`
+        : 'воркер: один слот';
+    document.getElementById('slotInfo').textContent = now.slot || '—';
+
+    const active = (now.active || []);
+    document.getElementById('activeTask').textContent = active.length
+        ? active.map(a => `${a.name} (${a.args || '—'})`).join('; ')
+        : 'свободен (или задача короче интервала опроса)';
+
+    const b = now.breaker || {};
+    const el = document.getElementById('breakerInfo');
+    if (b.open) {
+        el.innerHTML = `<span class="text-danger">пропускает вызовы ${esc(b.remaining_seconds)} с</span>`
+            + `<div class="text-muted small">причина: ${esc(b.last_reason)} · пропущено: ${esc(b.skipped)}</div>`;
+    } else {
+        el.innerHTML = `<span class="text-success">зовём</span>`
+            + `<div class="text-muted small">отказов подряд: ${esc(b.failures_in_row)} из ${esc(b.threshold)}`
+            + ` · открывался: ${esc(b.opens)}</div>`;
+    }
+}
+
+function renderSchedule(hours, titles) {
+    const body = document.querySelector('#scheduleTable tbody');
+    if (!hours.length) {
+        body.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-muted">'
+            + 'Расписание пусто: beat-записи волн не найдены</td></tr>';
+        return;
+    }
+    let html = '';
+    hours.forEach(hour => {
+        hour.slots.forEach((slot, index) => {
+            const title = titles[slot.theme] || slot.theme || '—';
+            html += '<tr>';
+            if (index === 0) {
+                html += `<td rowspan="${hour.slots.length}" class="align-middle">`
+                    + `<span class="badge bg-light text-dark">${esc(hour.label)}</span>`;
+                if (hour.waves) {
+                    html += `<div class="text-muted small mt-1">${esc(hour.regions_total)} задач</div>`;
+                }
+                html += '</td>';
+            }
+            html += `<td class="font-monospace">${esc(slot.time)}</td>`
+                + `<td>${esc(title)} <span class="text-muted small">${esc(slot.theme)}</span></td>`
+                + `<td class="text-muted small">${esc(slot.name)}</td>`
+                + `<td class="text-end">${esc(slot.regions)}</td>`
+                + '<td class="text-muted small">в свою группу каждого района (сеть САРАФАН)</td>'
+                + `<td class="text-end text-muted small">${slot.expires ? esc(slot.expires) + ' с' : '—'}</td>`
+                + '</tr>';
+        });
+    });
+    body.innerHTML = html;
+}
+
+function renderThemes(themes, titles) {
+    const body = document.querySelector('#themesTable tbody');
+    const shown = themes.filter(t => t.slots_per_day > 0);
+    if (!shown.length) {
+        body.innerHTML = '<tr><td colspan="9" class="text-center py-4 text-muted">Нет данных</td></tr>';
+        return;
+    }
+    body.innerHTML = shown.map(t => {
+        const perPost = t.waves_per_post == null ? '—' : t.waves_per_post;
+        const cls = t.waves_per_post != null && t.waves_per_post >= 8 ? 'text-danger fw-semibold' : '';
+        return '<tr>'
+            + `<td>${esc(titles[t.theme] || t.theme)} <span class="text-muted small">${esc(t.theme)}</span></td>`
+            + `<td class="text-end">${esc(t.slots_per_day)}</td>`
+            + `<td class="text-end">${esc(t.regions)}</td>`
+            + `<td class="text-end">${esc(t.waves_per_day)}</td>`
+            + `<td class="text-end">${esc(t.runs)}</td>`
+            + `<td class="text-end">${esc(t.published)}</td>`
+            + `<td class="text-end ${cls}">${esc(perPost)}</td>`
+            + `<td class="text-end">${t.avg_seconds ? esc(t.avg_seconds) + ' с' : '—'}</td>`
+            + `<td class="text-end text-muted small">${esc(t.last_run || '—')}</td>`
+            + '</tr>';
+    }).join('');
+}
+</script>
+{% endblock %}

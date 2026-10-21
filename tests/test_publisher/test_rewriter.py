@@ -42,6 +42,22 @@ def test_disabled_keeps_source_and_calls_nothing(monkeypatch):
     assert "text_original" not in post
 
 
+def test_rewrite_passes_publish_timeout_budget(monkeypatch):
+    """Волна даёт движку короткий потолок, а не общий (120 с).
+
+    Мерило — аргумент, который уходит в движок: под нагрузкой free-тира именно
+    он ограничивает простой единственного слота воркера.
+    """
+    monkeypatch.delenv("POST_REWRITE_ENABLED", raising=False)
+    monkeypatch.setenv("OPENCODE_PUBLISH_TIMEOUT", "17")
+    calls = []
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: calls.append(kw) or _ok(_long()))
+
+    rewriter.rewrite_posts([_post()], region="mi", theme="новости")
+
+    assert calls and calls[0]["timeout"] == 17.0
+
+
 def test_rewrite_replaces_text_and_keeps_original(monkeypatch):
     monkeypatch.delenv("POST_REWRITE_ENABLED", raising=False)
     monkeypatch.setattr(

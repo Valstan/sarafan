@@ -54,6 +54,7 @@ from web.api import (  # noqa: E402
     notifications,
     parsing,
     parsing_stats,
+    pipeline,
     posts,
     promotion,
     publisher,
@@ -208,6 +209,7 @@ app.include_router(task_monitoring.router, tags=["Task Monitoring"])
 app.include_router(publisher.router, prefix="/api/publisher", tags=["VK Publisher"])
 app.include_router(parsing.router, tags=["Parsing"])
 app.include_router(parsing_stats.router, tags=["Parsing Stats"])  # Postopus migration
+app.include_router(pipeline.router, tags=["Pipeline Map"])
 app.include_router(filtration.router, prefix="/api/filtration", tags=["Filtration"])
 app.include_router(templates_api.router, prefix="/api/templates", tags=["Message Templates"])
 app.include_router(ad_cabinet.router, prefix="/api/ad-cabinet", tags=["Ad Cabinet"])
@@ -729,6 +731,16 @@ async def parsing_page(request: Request):
 async def parsing_stats_page(request: Request):
     """Parsing statistics page (Postopus migration)"""
     return templates.TemplateResponse("parsing_stats.html", {"request": request})
+
+
+@app.get("/pipeline")
+async def pipeline_map_page(request: Request):
+    """Карта конвейера: расписание волн, их состав и выход по темам.
+
+    Заказ владельца 21.10: видеть, что и когда работает и куда идут волны.
+    Данные — ``/api/pipeline/map``; страница только рисует.
+    """
+    return templates.TemplateResponse("pipeline.html", {"request": request})
 
 
 @app.get("/publications")
