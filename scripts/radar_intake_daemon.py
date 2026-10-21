@@ -99,6 +99,14 @@ async def _loop(name: str, runner: Runner, stop: asyncio.Event) -> None:
 
 
 async def main() -> None:
+    # Секреты живут в комнате КАРМАНа, а не в env-файле: TELEGRAM_TOKEN_*, VK-токены
+    # и ключи движка доезжают до процесса только через bootstrap — ровно так это
+    # делает воркер (`tasks/celery_app.py`, строка с ``bootstrap_secrets()``).
+    # Без этого демон стартовал с «no TELEGRAM_TOKEN for AFONYA» при живом боте.
+    from modules.secrets_bootstrap import bootstrap_secrets
+
+    bootstrap_secrets()
+
     from modules.radar.intake_runners import telegram_intake_once, vk_intake_once
 
     stop = asyncio.Event()
