@@ -13,7 +13,7 @@
 ### Структура директорий
 
 ```
-~/САРАФАН/
+~/SETKA/
 ├── main.py                     # FastAPI приложение (lifespan, роуты, middleware)
 ├── celery_app.py               # Точка входа Celery (re-export из tasks/)
 ├── config/                     # Конфигурация
@@ -137,7 +137,7 @@ from config.deepseek import get_api_key  # ключ читается при КА
 ### Структура тестов
 
 ```
-САРАФАН/
+SETKA/
 ├── tests/                          # Unit-тесты (pytest)
 │   ├── conftest.py                 # Фикстуры и моки
 │   ├── test_filters/               # Тесты фильтров
@@ -268,7 +268,7 @@ AI: "Финальное решение: X с обработкой ошибок �
 
 1. **Проверить текущую ветку и статус:**
    ```bash
-   cd ~/САРАФАН && git status && git branch -a
+   cd ~/SETKA && git status && git branch -a
    ```
 
 2. **Синхронизироваться:**
