@@ -2576,35 +2576,41 @@ app.conf.beat_schedule = {
         "args": ("kultura",),
         "options": {"expires": 3600},
     },
-    # Sport: 30 12,19 * * *
-    "postopus-sport-12": {
+    # Sport: 30 15, 50 22 * * *
+    # 12:30 → 15:20 и 19:30 → 22:50 (перенос 21.10): в полдень и в семь вечера
+    # рядом уже стоят admin/novost/kultura, и три тяжёлых слота в один час
+    # (112 мин работы) не влезали в час — очередь росла, а периодика (реклама,
+    # рассылки, интейки) выбрасывалась по expires. См. P208.
+    "postopus-sport-15": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=30, hour=12),
+        "schedule": crontab(minute=30, hour=15),
         "args": ("sport",),
         "options": {"expires": 3600},
     },
-    "postopus-sport-19": {
+    "postopus-sport-22": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=30, hour=19),
+        "schedule": crontab(minute=50, hour=22),
         "args": ("sport",),
         "options": {"expires": 3600},
     },
-    # Admin: 20 8,12,20 * * *
+    # Admin: 20 8, 20 9, 20 22 * * *
+    # 12:20 → 09:20 и 20:20 → 22:20 (перенос 21.10): разгружаем полдень и
+    # вечерний пик, где рядом novost.
     "postopus-admin-8": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=20, hour=8),
         "args": ("admin",),
         "options": {"expires": 3600},
     },
-    "postopus-admin-12": {
+    "postopus-admin-9": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=20, hour=12),
+        "schedule": crontab(minute=20, hour=9),
         "args": ("admin",),
         "options": {"expires": 3600},
     },
-    "postopus-admin-20": {
+    "postopus-admin-22": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=20, hour=20),
+        "schedule": crontab(minute=20, hour=22),
         "args": ("admin",),
         "options": {"expires": 3600},
     },
