@@ -95,7 +95,9 @@ def _delete_route(sid: str) -> Tuple[str, str, _FakeResponse]:
     return ("DELETE", f"/{sid}", _FakeResponse(204, None))
 
 
-def _assistant_msg(text: str, tokens: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _assistant_msg(
+    text: str, tokens: Optional[Dict[str, Any]] = None, finish: str = "stop"
+) -> Dict[str, Any]:
     return {
         "type": "assistant",
         "agent": "build",
@@ -105,7 +107,7 @@ def _assistant_msg(text: str, tokens: Optional[Dict[str, Any]] = None) -> Dict[s
             {"type": "text", "text": text},
         ],
         "tokens": tokens if tokens is not None else {"input": 100, "output": 20, "reasoning": 5},
-        "finish": "stop",
+        "finish": finish,
     }
 
 
@@ -192,8 +194,19 @@ def test_parse_messages_collects_text_usage_and_error():
         ]
     )
     assert text == "вердикты"
-    assert usage == {"input": 10, "output": 5}
+    # ``finish`` живёт внутри usage намеренно (см. докстринг parse_messages):
+    # кортеж из трёх элементов — публичный контракт.
+    assert usage == {"input": 10, "output": 5, "finish": "stop"}
     assert error is None
+
+    text, usage, error = parse_messages(
+        [
+            _idle_msg(),
+            _assistant_msg("оборвано", finish="length"),
+        ]
+    )
+    assert text == "оборвано"
+    assert (usage or {}).get("finish") == "length", "причину остановки модель обязана донести"
 
     text, _, error = parse_messages(
         [

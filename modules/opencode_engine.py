@@ -519,10 +519,18 @@ def parse_messages(
     пропускаем), счётчики — в ``tokens``; отказ виден как ``idle.outcome``
     != ``succeeded`` с ``error`` (``provider.no-route``, ``provider.auth``
     и пр.). Сбой важнее текста: при затопленном ответе вердикты не считать.
+
+    Причина остановки (``finish``) кладётся **внутрь** ``usage`` ключом
+    ``finish``: кортеж из трёх элементов — публичный контракт, его зовут тесты
+    и вызывающий код, и четвёртый элемент сломал бы всех. Зачем нужна причина:
+    21.10 пересказ пришёл, оборвавшись на полуслове (775 знаков, «…завалено
+    грудо»), и ушёл бы в ленту — по тексту такое неотличимо от нормального
+    ответа, а ``finish == "length"`` отличает сразу.
     """
     text_chunks: List[str] = []
     usage: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
+    finish: str = ""
     assistant_seen = False
     idle_seen = False
     for msg in messages:
@@ -540,11 +548,14 @@ def parse_messages(
             tokens = msg.get("tokens")
             if isinstance(tokens, dict):
                 usage = tokens
+            finish = str(msg.get("finish") or "")
         elif kind == "idle" and not idle_seen:
             idle_seen = True
             outcome = str(msg.get("outcome") or "")
             if outcome and outcome != "succeeded":
                 error = _error_text(msg.get("error")) or outcome
+    if finish:
+        usage = {**(usage or {}), "finish": finish}
     return "".join(text_chunks).strip(), usage, error
 
 
@@ -673,6 +684,9 @@ def _call_model(
         "content": _normalize_content(text),
         "model": f"opencode/{model_id}",
         "usage": _normalize_usage(usage),
+        # Причина остановки модели — верхним уровнем: вызывающему (пересказ)
+        # она нужна, чтобы не публиковать ответ, оборванный по лимиту токенов.
+        "finish": str((usage or {}).get("finish") or ""),
     }
 
 
