@@ -18,7 +18,10 @@ from modules.radar.bot_intake import (
 
 def test_extract_forward_origin_channel():
     msg = {
-        "forward_origin": {"type": "channel", "chat": {"username": "scitopus", "title": "SciTopus"}}
+        "forward_origin": {
+            "type": "channel",
+            "chat": {"username": "scitopus", "title": "SciTopus"},
+        }
     }
     assert extract_forwarded_channel(msg) == ("scitopus", "SciTopus")
 
@@ -83,7 +86,11 @@ async def test_handle_authorized_adds_channel():
     msg = {
         "chat": {"id": 5},
         "from": {"id": 1},
-        "forward_from_chat": {"type": "channel", "username": "scitopus", "title": "SciTopus"},
+        "forward_from_chat": {
+            "type": "channel",
+            "username": "scitopus",
+            "title": "SciTopus",
+        },
     }
     out = await handle_message(msg, allowed_users={1}, add_channel=_added)
     assert out[0] == 5
@@ -259,11 +266,22 @@ def test_radar_bot_config(monkeypatch):
     assert get_radar_bot_radar_user_id() == 1
 
 
-def test_radar_bot_beat_registered():
+def test_radar_bot_runs_in_daemon_not_in_beat():
+    """Поллинги интейков живут в демоне, а не в расписании beat.
+
+    Причина — не организация, а слот воркера: ожидание события (getUpdates,
+    a_check) занимало единственный слот и днём выбрасывалось по `expires`, то
+    есть радар не принимал сообщения. Демон крутит тот же тик
+    (`scripts/radar_intake_daemon.py` → `modules.radar.intake_runners`).
+    """
+    from tasks import radar_tasks as tasks_radar
     from tasks.celery_app import app
 
-    assert "radar-intake-bot" in app.conf.beat_schedule
-    assert app.conf.beat_schedule["radar-intake-bot"]["task"] == "tasks.radar_tasks.poll_radar_bot"
+    assert "radar-intake-bot" not in app.conf.beat_schedule
+    assert "radar-vk-intake" not in app.conf.beat_schedule
+    # Задачи остаются живыми: ручной тик и диагностика.
+    assert callable(tasks_radar.poll_radar_bot)
+    assert callable(tasks_radar.poll_radar_vk_intake)
 
 
 def test_redis_helper_symbol_exists():

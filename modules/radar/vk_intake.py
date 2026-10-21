@@ -13,6 +13,7 @@ Probe (#020, scripts/probe_vk_messaging.py) подтвердил Long Poll на 
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, Optional, Tuple
 
@@ -49,7 +50,14 @@ def lp_fetch(server: str, key: str, ts, wait: int = LP_WAIT) -> Dict[str, Any]:
     try:
         r = httpx.get(
             url,
-            params={"act": "a_check", "key": key, "ts": ts, "wait": wait, "mode": 2, "version": 3},
+            params={
+                "act": "a_check",
+                "key": key,
+                "ts": ts,
+                "wait": wait,
+                "mode": 2,
+                "version": 3,
+            },
             timeout=wait + 15,
         )
         return r.json()
@@ -133,7 +141,10 @@ async def poll_vk_intake_once(
     api_call = api_call or vk_api_call
     lp_get = lp_get or lp_fetch
 
-    srv = api_call(token, "groups.getLongPollServer", group_id=group_id)
+    # Сетевые вызовы — в поток: в демоне (``scripts/radar_intake_daemon.py``)
+    # этот же тик идёт с ``wait=25`` и общим event loop с телеграм-интейком.
+    # Прямой вызов заблокировал бы цикл на всё ожидание и остановил соседний поллинг.
+    srv = await asyncio.to_thread(api_call, token, "groups.getLongPollServer", group_id=group_id)
     resp = srv.get("response") if isinstance(srv, dict) else None
     if not resp or not resp.get("server"):
         err = (srv or {}).get("error") or {}
@@ -142,7 +153,7 @@ async def poll_vk_intake_once(
     server, key, fresh_ts = resp["server"], resp["key"], resp["ts"]
     ts = ts_get() or fresh_ts
 
-    data = lp_get(server, key, ts)
+    data = await asyncio.to_thread(lp_get, server, key, ts)
     if "failed" in data:
         # 1: ts устарел → берём новый; 2/3: ключ/сервер протух → переинициализация.
         if data.get("failed") == 1 and data.get("ts") is not None:
@@ -172,4 +183,9 @@ async def poll_vk_intake_once(
 
     if data.get("ts") is not None:
         ts_set(str(data["ts"]))
-    return {"ok": True, "updates": len(updates), "processed": processed, "linked": linked}
+    return {
+        "ok": True,
+        "updates": len(updates),
+        "processed": processed,
+        "linked": linked,
+    }

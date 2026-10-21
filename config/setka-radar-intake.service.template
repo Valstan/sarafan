@@ -1,0 +1,27 @@
+# Шаблон systemd-юнита демона интейков радара (scripts/radar_intake_daemon.py).
+# Подставляется скриптом scripts/install_radar_intake_service.sh (__SETKA_ROOT__,
+# __USER__, __ENV_FILE__, __SECRETS_FILE__) — не редактировать установленный файл.
+[Unit]
+Description=SETKA radar intake (VK Bots Long Poll + Telegram getUpdates)
+After=network.target redis.service postgresql.service
+
+[Service]
+EnvironmentFile=-__ENV_FILE__
+EnvironmentFile=-__SECRETS_FILE__
+Type=simple
+User=__USER__
+Group=__USER__
+WorkingDirectory=__SETKA_ROOT__
+Environment="PATH=__SETKA_ROOT__/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=__SETKA_ROOT__"
+ExecStart=__SETKA_ROOT__/venv/bin/python scripts/radar_intake_daemon.py
+StandardOutput=append:__SETKA_ROOT__/logs/radar-intake.log
+StandardError=append:__SETKA_ROOT__/logs/radar-intake.log
+Restart=always
+RestartSec=5s
+# Long poll держит соединение до 25 с — даём ему закрыться самому, а не рвём
+# соединение посреди ответа пользователю (тот же довод, что у setka-vk-bot).
+TimeoutStopSec=60
+
+[Install]
+WantedBy=multi-user.target

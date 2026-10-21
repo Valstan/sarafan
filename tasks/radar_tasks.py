@@ -26,7 +26,11 @@ def poll_radar_sources():
         return {"success": True, "timestamp": datetime.now().isoformat(), **result}
     except Exception as e:
         logger.error(f"poll_radar_sources failed: {e}", exc_info=True)
-        return {"success": False, "timestamp": datetime.now().isoformat(), "error": str(e)}
+        return {
+            "success": False,
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+        }
 
 
 @app.task(name="tasks.radar_tasks.cleanup_old_radar_items")
@@ -45,83 +49,22 @@ def cleanup_old_radar_items():
         return {"success": True, "timestamp": datetime.now().isoformat(), **result}
     except Exception as e:
         logger.error(f"cleanup_old_radar_items failed: {e}", exc_info=True)
-        return {"success": False, "timestamp": datetime.now().isoformat(), "error": str(e)}
+        return {
+            "success": False,
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+        }
 
 
 async def _run_radar_bot():
-    """Один тик intake-бота «Карман»: getUpdates → добавить каналы из форвардов."""
-    from config.runtime import (
-        TELEGRAM_TOKENS,
-        get_radar_bot_allowed_users,
-        get_radar_bot_name,
-        get_radar_bot_radar_user_id,
-    )
+    """Один тик intake-бота «Карман»: getUpdates → добавить каналы из форвардов.
 
-    name = get_radar_bot_name()
-    if not name:
-        return {"skipped": "RADAR_BOT_NAME not set"}
-    token = TELEGRAM_TOKENS.get(name)
-    if not token:
-        return {"skipped": f"no TELEGRAM_TOKEN for {name}"}
+    Сборка зависимостей живёт в ``modules.radar.intake_runners``: тот же тик
+    крутит демон ``setka-radar-intake``, которому нельзя импортировать Celery.
+    """
+    from modules.radar.intake_runners import telegram_intake_once
 
-    allowed = get_radar_bot_allowed_users()
-    if not allowed:
-        # Без allowlist приёмник никому не отвечает (молчит чужим) — не поллим
-        # вовсе, чтобы зря не тревожить общий бот. Владелец задаёт свой tg-id.
-        return {"skipped": "RADAR_BOT_ALLOWED_USERS empty"}
-
-    from modules.bulletin_heartbeat import _redis
-
-    r = _redis()
-    if r is None:
-        return {"skipped": "no redis (offset persistence required)"}
-    offset_key = "setka:radar_bot_offset"
-
-    def offset_get():
-        v = r.get(offset_key)
-        try:
-            return int(v) if v is not None else None
-        except (TypeError, ValueError):
-            return None
-
-    def offset_set(v):
-        r.set(offset_key, int(v))
-
-    radar_user_id = get_radar_bot_radar_user_id()
-
-    async def add_channel(username):
-        from database.connection import AsyncSessionLocal
-        from modules.radar.sources.tg import resolve_source
-        from modules.radar.subscriptions import upsert_subscription
-
-        try:
-            meta = await resolve_source(username)
-        except Exception as e:  # noqa: BLE001 - канал недоступен/приватный
-            return {"status": "error", "error": str(e)[:160]}
-        async with AsyncSessionLocal() as session:
-            res = await upsert_subscription(
-                session, user_id=radar_user_id, source_type="tg", meta=meta
-            )
-        return {
-            "status": "added" if res["created"] else "exists",
-            "title": meta.get("title"),
-        }
-
-    async def link_account(code, chat_id, display_name):
-        from modules.radar.account_link import link_telegram
-
-        return await link_telegram(code, chat_id, display_name=display_name, bot_name=name)
-
-    from modules.radar.bot_intake import poll_radar_bot_once
-
-    return await poll_radar_bot_once(
-        token=token,
-        allowed_users=allowed,
-        add_channel=add_channel,
-        offset_get=offset_get,
-        offset_set=offset_set,
-        link_account=link_account,
-    )
+    return await telegram_intake_once()
 
 
 @app.task(name="tasks.radar_tasks.poll_radar_bot")
@@ -138,64 +81,22 @@ def poll_radar_bot():
         return {"success": True, "timestamp": datetime.now().isoformat(), **result}
     except Exception as e:
         logger.error(f"poll_radar_bot failed: {e}", exc_info=True)
-        return {"success": False, "timestamp": datetime.now().isoformat(), "error": str(e)}
+        return {
+            "success": False,
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+        }
 
 
 async def _run_vk_intake():
-    """Один тик VK-интейка: Bots Long Poll сообщества → привязка VK-лички по коду."""
-    from config.runtime import get_radar_vk_community_id
+    """Один тик VK-интейка: Bots Long Poll сообщества → привязка VK-лички по коду.
 
-    community_id = get_radar_vk_community_id()
-    if not community_id:
-        return {"skipped": "RADAR_VK_COMMUNITY_ID not set"}
+    Сборка зависимостей — в ``modules.radar.intake_runners`` (её же берёт демон
+    ``setka-radar-intake``, который импортировать Celery не может).
+    """
+    from modules.radar.intake_runners import vk_intake_once
 
-    from modules.vk_token_router import load_vk_routing
-
-    _user_token, community_tokens = await load_vk_routing()
-    token = (community_tokens or {}).get(community_id)
-    if not token:
-        return {"skipped": f"no community token for {community_id}"}
-
-    from modules.bulletin_heartbeat import _redis
-
-    r = _redis()
-    if r is None:
-        return {"skipped": "no redis (ts persistence required)"}
-    ts_key = "setka:radar_vk_intake_ts"
-
-    def ts_get():
-        v = r.get(ts_key)
-        if v is None:
-            return None
-        return v.decode() if isinstance(v, (bytes, bytearray)) else str(v)
-
-    def ts_set(v):
-        if v is None:
-            r.delete(ts_key)
-        else:
-            r.set(ts_key, str(v))
-
-    async def link_account(code, vk_user_id, display_name):
-        from modules.radar.account_link import link_vk
-
-        return await link_vk(code, vk_user_id, display_name=display_name, group_id=community_id)
-
-    async def reply(peer_id, text):
-        # Тот же транспорт, что у бота САРАФАНа: пауза канала на 9/14 + лимитер.
-        from modules.ad_cabinet.vk_bot import notify as vk_notify
-
-        await vk_notify.vk_send(token, community_id, peer_id, text)
-
-    from modules.radar.vk_intake import poll_vk_intake_once
-
-    return await poll_vk_intake_once(
-        token=token,
-        group_id=community_id,
-        link_account=link_account,
-        reply=reply,
-        ts_get=ts_get,
-        ts_set=ts_set,
-    )
+    return await vk_intake_once()
 
 
 @app.task(name="tasks.radar_tasks.poll_radar_vk_intake")
@@ -212,7 +113,11 @@ def poll_radar_vk_intake():
         return {"success": True, "timestamp": datetime.now().isoformat(), **result}
     except Exception as e:
         logger.error(f"poll_radar_vk_intake failed: {e}", exc_info=True)
-        return {"success": False, "timestamp": datetime.now().isoformat(), "error": str(e)}
+        return {
+            "success": False,
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+        }
 
 
 @app.task(name="tasks.radar_tasks.check_radar_poll_heartbeat")
@@ -230,7 +135,15 @@ def check_radar_poll_heartbeat():
             )
         )
         logger.info("radar poll watchdog: %s", status)
-        return {"success": True, "status": status, "timestamp": datetime.now().isoformat()}
+        return {
+            "success": True,
+            "status": status,
+            "timestamp": datetime.now().isoformat(),
+        }
     except Exception as e:
         logger.error(f"check_radar_poll_heartbeat failed: {e}", exc_info=True)
-        return {"success": False, "timestamp": datetime.now().isoformat(), "error": str(e)}
+        return {
+            "success": False,
+            "timestamp": datetime.now().isoformat(),
+            "error": str(e),
+        }
