@@ -1,60 +1,53 @@
-# sudo для воркера: белый список привилегированных команд
+# sudo на боксе: разработчику — полный, движку — никакого
 
-Воркер (Celery) и движок классификатора работают под пользователем `valstan`
-и иногда обязаны делать то, что требует root: сменить выход ВПН, перезапустить
-движок. Раньше у `valstan` было `NOPASSWD: ALL` — то есть компрометация воркера
-равнялась root на боксе. С 20.10 без пароля разрешён **только белый список**.
+Граница изоляции на проде проходит **по пользователю**, а не по списку команд.
 
-## Что здесь лежит
-
-| Файл | Куда ставится | Что это |
+| Пользователь | Что под ним работает | sudo |
 |---|---|---|
-| `setka-worker` | `/etc/sudoers.d/setka-worker` | белый список: точные команды, без wildcard'ов и без `ALL` |
+| `valstan` | воркер Celery, релизная процедура, агент-разработчик | `NOPASSWD: ALL` ([`valstan-dev`](valstan-dev)) |
+| `opencode` | нейро-движок классификатора (`opencode-web`) | **нет вообще**; юнит запечатан `NoNewPrivileges=yes` |
 
-Всё остальное (`psql` под postgres, правка `/etc`, установка юнитов, nginx)
-доступно только интерактивно с паролем: `valstan` состоит в группе `sudo`,
-поэтому `sudo` с паролем у него остаётся.
+## Почему так (решение владельца 21.10)
+
+До этого здесь лежал `setka-worker` — белый список привилегированных команд для
+`valstan`. Он закрывал не то: ограничивал **разработчика**, а изолировать надо было
+**прод-нейросеть**. У движка свой пользователь `opencode`, sudo у него нет и не
+было, а юнит уже держит `NoNewPrivileges=yes` — то есть песочница существовала и
+без белого списка. Цена при этом платилась настоящая: каждая новая
+привилегированная команда в релизе требовала правки sudoers **в том же PR**,
+иначе на боксе `sudo: a password is required` — и это выглядело как поломка
+прода. Разработка бюрократизировалась ради свойства, которого у неё не было.
+
+Сторож — [`tests/test_infra/test_sudo_policy.py`](../../tests/test_infra/test_sudo_policy.py).
+Он падает, если:
+
+- в `infra/sudoers/` снова появится перечень команд для `valstan` (регрессия к белому списку);
+- кто-то выдаст права пользователю `opencode` — движку sudo не положен ни в каком виде;
+- из юнита движка пропадёт `NoNewPrivileges=yes` или сменится `User`;
+- из [`docs/OPERATIONS.md`](../../docs/OPERATIONS.md) исчезнет описание политики.
 
 ## Установка / обновление
 
 ```bash
-sudo install -m 0440 -o root -g root infra/sudoers/setka-worker \
-    /etc/sudoers.d/setka-worker
-sudo visudo -c                     # синтаксис всех файлов sudoers
-sudo rm -f /etc/sudoers.d/valstan   # старый NOPASSWD: ALL, если ещё лежит
+sudo install -m 0440 -o root -g root infra/sudoers/valstan-dev \
+    /etc/sudoers.d/valstan-dev
+sudo visudo -c
+sudo rm -f /etc/sudoers.d/setka-worker     # старый белый список, если ещё лежит
 ```
 
-Проверка, что белый список работает и что лишнего не осталось:
+Проверка:
 
 ```bash
-# разрешено — должно ответить без пароля
-sudo -n systemctl status setka
-sudo -n systemctl restart setka-celery-worker
-
-# запрещено — должно ответить «a password is required»
-sudo -n bash -c true
+sudo -n true && echo developer-ok           # без пароля — так и должно быть
+sudo -n -u opencode true                    # отказ: у движка прав нет
+systemctl show opencode-web -p User -p NoNewPrivileges
+                                            # User=opencode, NoNewPrivileges=yes
 ```
 
-## Правило для разработчика
+## Что остаётся human-gate'ом
 
-**Новый привилегированный вызов в коде = правка `setka-worker` в том же PR.**
-Иначе локально и в CI всё зелёное, а на боксе команда падает с
-`sudo: a password is required` — и это выглядит как «сломался прод», а не как
-«забыли строку в белом списке».
-
-Сторож — [`tests/test_infra/test_sudo_allowlist.py`](../../tests/test_infra/test_sudo_allowlist.py):
-он находит `sudo -n <команда>` в `modules/`, `tasks/`, `web/`, `config/` и
-падает, если такой команды нет в белом списке, если в списке появился `ALL`
-или wildcard, и если инструкция про это правило пропала из `docs/OPERATIONS.md`.
-
-## Откат
-
-Один файл, снимается без последствий:
-
-```bash
-sudo rm -f /etc/sudoers.d/setka-worker && sudo visudo -c
-```
-
-После этого привилегированные вызовы воркера требуют пароля: движок перестаёт
-сам менять выход ВПН (fail-open: волна идёт по обычным фильтрам), а релиз
-делается человеком с паролем.
+Полный sudo у `valstan` — про **механику** доступа, а не про разрешение. Гейт на
+destructive-операциях с прод-данными (`ALTER`, `DROP`, `DELETE`, `UPDATE`,
+`systemctl stop`, ротация токенов) остаётся человеческим: [`AGENTS.md`](../../AGENTS.md),
+[#025](../../../brain_matrica/cross-project-ideas/ideas/025-destructive-prod-confirm-same-turn.md).
+`NOPASSWD` снимает вопрос «дадут ли пароль», а не вопрос «стоит ли это делать».
