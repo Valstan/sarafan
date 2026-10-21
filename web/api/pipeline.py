@@ -89,8 +89,15 @@ async def _region_counts(db: AsyncSession, pairs: List[tuple[str, bool]]) -> Dic
 
 
 async def _theme_stats(db: AsyncSession, days: int) -> List[Dict[str, Any]]:
-    """Агрегат ``parsing_stats`` по темам за период."""
-    since = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(days=days)
+    """Агрегат ``parsing_stats`` по темам за период.
+
+    Время в этой таблице — **местное (МСК), naive**: ``max(run_date)`` совпадает
+    с часами бокса, а не с UTC (проверено 21.10: max(run_date)=11:07 при
+    UTC 08:20). Поэтому и окно, и подпись считаются в местном времени, как в
+    ``web/api/parsing_stats.py``; переводом из UTC здесь ничего не трогаем —
+    иначе карта показывала бы «последнюю волну» на три часа в будущем.
+    """
+    since = datetime.now() - timedelta(days=days)
     published = func.count(func.nullif(ParsingStats.published_post_id, 0))
     rows = (
         await db.execute(
@@ -116,9 +123,7 @@ async def _theme_stats(db: AsyncSession, days: int) -> List[Dict[str, Any]]:
                 "avg_seconds": float(avg_seconds or 0),
                 "seconds": float(seconds or 0),
                 "published": int(pub or 0),
-                "max_run_date": (
-                    utc_to_moscow(last_run).strftime("%d.%m %H:%M") if last_run else None
-                ),
+                "max_run_date": last_run.strftime("%d.%m %H:%M") if last_run else None,
             }
         )
     return out
