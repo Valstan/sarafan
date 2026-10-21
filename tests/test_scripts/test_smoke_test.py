@@ -144,6 +144,10 @@ def _run(poll: _FakePoll, *, submit=lambda region, theme: "abc", **overrides) ->
         poll_interval=0,
         submit=submit,
         poll=poll,
+        # Стаб по умолчанию: настоящий ``worker_progress`` ходит в брокер, а
+        # юнит-тест не должен зависеть от живого Celery (и не должен ждать его
+        # таймаут). Тесты про классификацию таймаута передают свой прогресс.
+        progress=lambda: {},
         sleep=lambda _s: None,
         now=_fake_clock(),
         log=lambda _m: None,
@@ -197,10 +201,102 @@ def test_run_smoke_returns_1_on_task_failure():
     assert _run(poll) == 1
 
 
-def test_run_smoke_returns_1_on_timeout():
+def test_run_smoke_returns_busy_on_timeout_without_worker_stats():
+    """Таймаут сам по себе — не провал: без статистики воркера это «не знаю»."""
     # Задача никогда не ready — дедлайн наступает (clock тикает быстрее timeout).
     poll = _FakePoll([{"state": "PROGRESS", "ready": False}])
-    assert _run(poll, timeout=5, now=_fake_clock(step=2.0)) == 1
+    assert _run(poll, timeout=5, now=_fake_clock(step=2.0)) == smoke.EXIT_BUSY
+
+
+# --------------------------------------------------------------------------- #
+# Таймаут: «занято» ≠ «сломано» (exit 3 против exit 1)
+# --------------------------------------------------------------------------- #
+
+
+class _FakeProgress:
+    """Счётчики воркера: снимок «до» и «после» ожидания."""
+
+    def __init__(self, before: Dict[str, int], after: Dict[str, int]):
+        self._before = before
+        self._after = after
+        self.calls = 0
+
+    def __call__(self) -> Dict[str, int]:
+        self.calls += 1
+        return self._before if self.calls == 1 else self._after
+
+
+def _timeout_run(progress, *, log=None, **overrides) -> int:
+    poll = _FakePoll([{"state": "PENDING", "ready": False}])
+    kwargs = dict(timeout=5, now=_fake_clock(step=2.0), progress=progress)
+    if log is not None:
+        kwargs["log"] = log
+    return _run(poll, **kwargs)
+
+
+def test_timeout_with_same_task_progress_is_not_proven_but_pipeline_alive():
+    """Живой прогон 21.10: очередь из ~80 волн, diagnostics ждал 900 с.
+
+    Прод при этом был здоров: волны публиковали. Гейт красил исправный деплой,
+    потому что «PENDING» не отличает «занято» от «сломано». Если за время
+    ожидания воркер выполнил задачи ТОГО ЖЕ вида — шов работает, и это exit 3.
+    """
+    lines: List[str] = []
+    progress = _FakeProgress({"any": 10, "same_task": 4}, {"any": 18, "same_task": 7})
+
+    rc = _timeout_run(progress, log=lines.append)
+
+    assert rc == smoke.EXIT_BUSY == 3
+    assert any("пайплайн жив" in ln and "3 задач" in ln for ln in lines), lines
+
+
+def test_timeout_with_only_foreign_tasks_says_seam_not_proven():
+    lines: List[str] = []
+    progress = _FakeProgress({"any": 10, "same_task": 4}, {"any": 15, "same_task": 4})
+
+    rc = _timeout_run(progress, log=lines.append)
+
+    assert rc == smoke.EXIT_BUSY
+    assert any("шов пайплайна этим не подтверждён" in ln for ln in lines), lines
+
+
+def test_timeout_without_any_progress_is_a_real_failure():
+    """Воркер ответил и не выполнил ничего — вот это уже поломка, а не занятость."""
+    lines: List[str] = []
+    progress = _FakeProgress({"any": 10, "same_task": 4}, {"any": 10, "same_task": 4})
+
+    rc = _timeout_run(progress, log=lines.append)
+
+    assert rc == smoke.EXIT_FAIL == 1
+    assert any("не берёт работу" in ln for ln in lines), lines
+
+
+def test_timeout_without_worker_stats_is_unknown_not_failure():
+    """«Не знаю» нельзя выдавать ни за провал, ни за успех."""
+    lines: List[str] = []
+    progress = _FakeProgress({}, {})
+
+    rc = _timeout_run(progress, log=lines.append)
+
+    assert rc == smoke.EXIT_BUSY
+    assert any("состояние не определено" in ln for ln in lines), lines
+
+
+def test_progress_is_sampled_before_and_after_the_wait():
+    progress = _FakeProgress({"any": 1, "same_task": 1}, {"any": 2, "same_task": 1})
+
+    _timeout_run(progress)
+
+    assert progress.calls == 2
+
+
+def test_count_completed_splits_same_task_from_everything_else():
+    stats = {
+        "celery@box": {"total": {smoke.TASK_NAME: 3, "tasks.celery_app.dispatch_ad_reposts": 10}},
+        "celery@other": {"total": {smoke.TASK_NAME: 2}},
+    }
+
+    assert smoke._count_completed(stats) == {"any": 15, "same_task": 5}
 
 
 def test_run_smoke_returns_1_when_result_fails_evaluation():
