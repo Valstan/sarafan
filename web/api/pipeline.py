@@ -34,7 +34,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from database.connection import get_db_session
 from database.models_extended import ParsingStats
 from modules import engine_guard
-from modules.pipeline_map import attach_regions, group_by_hour, theme_table, totals, wave_slots
+from modules.pipeline_map import (
+    attach_regions,
+    group_by_hour,
+    region_key,
+    theme_table,
+    totals,
+    wave_slots,
+)
 from modules.publisher.postopus_bulletin_headers import theme_title
 from modules.wave_targets import select_regions
 from utils.timezone import utc_to_moscow
@@ -58,17 +65,26 @@ def get_schedule() -> Dict[str, Any]:
     return dict(app.conf.beat_schedule or {})
 
 
-async def _region_counts(db: AsyncSession, themes: List[str]) -> Dict[str, int]:
-    """Сколько регионов заденет слот каждой темы (отбор — как у таска)."""
+async def _region_counts(db: AsyncSession, pairs: List[tuple[str, bool]]) -> Dict[str, int]:
+    """Сколько регионов заденет слот каждой темы (отбор — как у таска).
+
+    Ключ — ``region_key(theme, strict)``: областные темы идут строгим гейтом
+    (единицы регионов), районные — мягким (десятки), и путать их нельзя —
+    именно на этом карта 21.10 показала 2 925 волн в сутки вместо ~1 600.
+    """
     counts: Dict[str, int] = {}
-    for theme in themes:
+    for theme, strict in pairs:
+        key = region_key(theme, strict)
         try:
-            counts[theme] = len(await select_regions(db, theme=theme, strict=False))
+            counts[key] = len(await select_regions(db, theme=theme, strict=strict))
         except Exception:  # noqa: BLE001 — одна тема не должна ломать карту
             logger.warning(
-                "pipeline map: отбор регионов для темы %s не удался", theme, exc_info=True
+                "pipeline map: отбор регионов для темы %s (strict=%s) не удался",
+                theme,
+                strict,
+                exc_info=True,
             )
-            counts[theme] = 0
+            counts[key] = 0
     return counts
 
 
@@ -125,7 +141,13 @@ async def _queue_state() -> Dict[str, Any]:
             socket_connect_timeout=1.0,
         )
         state["queue_depth"] = int(client.llen("celery"))
-        state["unacked"] = int(client.llen("unacked"))
+        # ``unacked`` у redis-транспорта Celery — **хеш**, а не список: ``llen``
+        # на нём падает с WRONGTYPE, и «взято в работу» тихо оставалось пустым
+        # (поймано на первом же прогоне карты 21.10).
+        try:
+            state["unacked"] = int(client.hlen("unacked"))
+        except Exception:  # noqa: BLE001 — на другой версии транспорта это список
+            state["unacked"] = int(client.llen("unacked"))
     except Exception as exc:  # pragma: no cover - сетевой сбой
         state["error"] = f"redis: {exc}"
 
@@ -167,8 +189,8 @@ async def build_map(db: AsyncSession, *, days: int = 7) -> Dict[str, Any]:
             schedule = {}
 
         rows = wave_slots(schedule)
-        themes = sorted({r["theme"] for r in rows if r["theme"]})
-        counts = await _region_counts(db, themes)
+        pairs = sorted({(r["theme"], bool(r["strict"])) for r in rows if r["theme"]})
+        counts = await _region_counts(db, pairs)
         rows = attach_regions(rows, counts)
         stats = await _theme_stats(db, days)
 

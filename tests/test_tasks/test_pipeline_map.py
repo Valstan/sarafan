@@ -86,7 +86,10 @@ def test_hour_group_counts_regions_that_will_land_in_the_slot():
         "postopus-admin-8": _wave("postopus-admin-8", "admin", hour="8"),
         "postopus-kultura-8": _wave("postopus-kultura-8", "kultura", minute=50, hour="8"),
     }
-    rows = pm.attach_regions(pm.wave_slots(schedule), {"admin": 71, "kultura": 73})
+    rows = pm.attach_regions(
+        pm.wave_slots(schedule),
+        {pm.region_key("admin", False): 71, pm.region_key("kultura", False): 73},
+    )
 
     hours = pm.group_by_hour(rows)
 
@@ -94,6 +97,34 @@ def test_hour_group_counts_regions_that_will_land_in_the_slot():
     assert hours[0]["hour"] == 8
     assert hours[0]["regions_total"] == 144
     assert hours[0]["themes"] == ["admin", "kultura"]
+
+
+def test_strict_theme_is_counted_by_its_own_regions():
+    """Областная тема идёт строгим гейтом: два региона, а не семьдесят пять.
+
+    Живой промах 21.10: карта посчитала волны ``proisshestviya`` по мягкому
+    гейту и показала 2 925 волн в сутки вместо ~1 600. Цифра выглядела
+    правдоподобно — ровно поэтому нужен гейт.
+    """
+    schedule = {
+        "postopus-proisshestviya-8": {
+            "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
+            "schedule": crontab(minute=50, hour="8"),
+            "kwargs": {"theme": "proisshestviya", "strict": True},
+        },
+        "postopus-admin-8": _wave("postopus-admin-8", "admin", hour="8"),
+    }
+    rows = pm.attach_regions(
+        pm.wave_slots(schedule),
+        {pm.region_key("proisshestviya", True): 2, pm.region_key("admin", False): 71},
+    )
+
+    by_theme = {r["theme"]: r for r in rows}
+
+    assert by_theme["proisshestviya"]["strict"] is True
+    assert by_theme["proisshestviya"]["regions"] == 2
+    assert by_theme["admin"]["strict"] is False
+    assert by_theme["admin"]["regions"] == 71
 
 
 def test_theme_table_shows_what_a_post_costs_in_waves():
@@ -113,8 +144,10 @@ def test_theme_table_shows_what_a_post_costs_in_waves():
             "max_run_date": "21.10 08:00",
         },
     ]
-    rows = pm.wave_slots({"a": _wave("a", "novost", hour="6")}) + pm.wave_slots(
-        {"b": _wave("b", "detsad", hour="7")}
+    rows = pm.attach_regions(
+        pm.wave_slots({"a": _wave("a", "novost", hour="6")})
+        + pm.wave_slots({"b": _wave("b", "detsad", hour="7")}),
+        {pm.region_key("novost", False): 75, pm.region_key("detsad", False): 59},
     )
 
     table = {

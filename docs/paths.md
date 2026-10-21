@@ -123,4 +123,4 @@ flowchart LR
 
 ## 5) UI (страницы)
 
-`/`, `/regions`, `/regions/links`, `/posts`, `/communities`, `/notifications`, `/tokens`, `/publisher`, `/monitoring`, `/schedule`, `/parsing`
+`/`, `/regions`, `/regions/links`, `/posts`, `/communities`, `/notifications`, `/tokens`, `/publisher`, `/monitoring`, `/schedule`, `/parsing`, `/parsing-stats`, `/pipeline`

@@ -94,6 +94,32 @@ def _entry_expires(entry: Dict[str, Any]) -> Optional[int]:
         return None
 
 
+def _entry_strict(entry: Dict[str, Any]) -> bool:
+    """``strict`` волны: у областных тем он ``True``, и регионов там единицы.
+
+    Промах на этом флаге стоит дорого: проживая 21.10, карта посчитала волны
+    областных тем по 75 регионам вместо 2 и показала 2 925 волн в сутки вместо
+    реальных ~1 600. Ошибка была в сторону «хуже, чем есть», но это ровно тот
+    класс, ради которого карта и строится: цифра выглядит правдоподобно.
+    """
+    kwargs = entry.get("kwargs") or {}
+    if "strict" in kwargs:
+        return bool(kwargs.get("strict"))
+    args = entry.get("args") or ()
+    if len(args) > 1:
+        return bool(args[1])
+    return False
+
+
+def region_key(theme: str, strict: bool) -> str:
+    """Ключ для числа регионов: тема считается отдельно по strict и loose.
+
+    Один регион может попасть в волну темы и строгим, и мягким гейтом, но
+    числа у них разные — поэтому и ключи разные.
+    """
+    return f"{theme}|{'strict' if strict else 'loose'}"
+
+
 def wave_slots(schedule: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Слоты волн: одна строка = один запуск веера в сутки (или реже).
 
@@ -119,6 +145,7 @@ def wave_slots(schedule: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
                         "name": name,
                         "task": task,
                         "theme": _entry_theme(entry),
+                        "strict": _entry_strict(entry),
                         "hour": hour,
                         "minute": minute,
                         "time": f"{hour:02d}:{minute:02d}",
@@ -156,11 +183,15 @@ def group_by_hour(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
 def attach_regions(
     rows: Iterable[Dict[str, Any]], region_counts: Dict[str, int]
 ) -> List[Dict[str, Any]]:
-    """Проставить каждому слоту число регионов, которые он реально заденет."""
+    """Проставить каждому слоту число регионов, которые он реально заденет.
+
+    ``region_counts`` — по ключу ``region_key(theme, strict)``.
+    """
     out: List[Dict[str, Any]] = []
     for row in rows:
         item = dict(row)
-        item["regions"] = int(region_counts.get(item.get("theme") or "", 0))
+        key = region_key(str(item.get("theme") or ""), bool(item.get("strict")))
+        item["regions"] = int(region_counts.get(key, 0))
         out.append(item)
     return out
 
@@ -182,11 +213,18 @@ def theme_table(
     """
     by_theme_stats = {str(row.get("theme") or ""): row for row in stats}
     slots_per_day: Dict[str, float] = defaultdict(float)
+    waves_per_day: Dict[str, float] = defaultdict(float)
+    regions_of_theme: Dict[str, int] = defaultdict(int)
     for row in wave_rows:
-        slots_per_day[str(row.get("theme") or "")] += float(row.get("per_week") or 1.0)
+        theme = str(row.get("theme") or "")
+        per_week = float(row.get("per_week") or 1.0)
+        regions = int(row.get("regions") or 0)
+        slots_per_day[theme] += per_week
+        waves_per_day[theme] += per_week * regions
+        regions_of_theme[theme] = max(regions_of_theme[theme], regions)
 
     themes = sorted(
-        set(slots_per_day) | set(region_counts) | set(by_theme_stats),
+        set(slots_per_day) | set(by_theme_stats),
         key=lambda t: (-slots_per_day.get(t, 0), t),
     )
 
@@ -197,14 +235,14 @@ def theme_table(
         st = by_theme_stats.get(theme) or {}
         runs = int(st.get("runs") or 0)
         published = int(st.get("published") or 0)
-        regions = int(region_counts.get(theme) or 0)
+        regions = int(regions_of_theme.get(theme, 0))
         per_day = slots_per_day.get(theme, 0.0)
         out.append(
             {
                 "theme": theme,
                 "slots_per_day": round(per_day, 2),
                 "regions": regions,
-                "waves_per_day": round(per_day * regions, 1),
+                "waves_per_day": round(waves_per_day.get(theme, 0.0), 1),
                 "runs": runs,
                 "published": published,
                 "avg_seconds": round(float(st.get("avg_seconds") or 0), 1),
