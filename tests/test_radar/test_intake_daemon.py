@@ -11,10 +11,26 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 
 import pytest
 
 from scripts import radar_intake_daemon as daemon
+
+
+def test_daemon_pulls_vault_secrets():
+    """Секреты (TELEGRAM_TOKEN_*, VK) живут в комнате КАРМАНа, а не в env-файле.
+
+    Живой повод 21.10: демон стартовал с «no TELEGRAM_TOKEN for AFONYA» при
+    живом боте — bootstrap секретов не вызывался, в отличие от воркера
+    (`tasks/celery_app.py`). Сторож на уровне текста модуля: импорт-тест такую
+    дыру не ловит, потому что в тестах env уже заполнен.
+    """
+    src = (Path(__file__).resolve().parents[2] / "scripts" / "radar_intake_daemon.py").read_text(
+        encoding="utf-8"
+    )
+
+    assert "bootstrap_secrets()" in src
 
 
 @pytest.mark.asyncio
