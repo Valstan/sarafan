@@ -122,6 +122,34 @@
         </div>
     </div>
 
+    <!-- Периодика -->
+    <div class="card border-0 shadow-sm mb-4">
+        <div class="card-header bg-white d-flex justify-content-between align-items-center">
+            <h6 class="mb-0"><i class="bi bi-clock-history me-1"></i> Периодика: что ещё занимает воркер</h6>
+            <span class="text-muted small" id="periodicNote">длительность измеряется на воркере, а не берётся из лога</span>
+        </div>
+        <div class="card-body p-0">
+            <div class="table-responsive">
+                <table class="table table-sm table-hover mb-0" id="periodicTable">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Задача</th>
+                            <th>Расписание</th>
+                            <th class="text-end">Зап./сутки</th>
+                            <th class="text-end">Средняя</th>
+                            <th class="text-end">Макс</th>
+                            <th class="text-end">Минут слота/сутки</th>
+                            <th class="text-end">Измерений</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        <tr><td colspan="7" class="text-center py-4 text-muted">Загрузка…</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
     <!-- Темы -->
     <div class="card border-0 shadow-sm mb-4">
         <div class="card-header bg-white d-flex justify-content-between align-items-center">
@@ -155,8 +183,9 @@
     <p class="text-muted small mb-0">
         Расписание читается из живого <code>app.conf.beat_schedule</code>, число регионов — тем же
         отбором, что у таска волны (<code>modules.wave_targets</code>), выход тем — из
-        <code>parsing_stats</code> за выбранный период. Кэш расписания — 10 минут,
-        блок «сейчас» — без кэша.
+        <code>parsing_stats</code> за выбранный период. Длительность задач меряет сам воркер
+        (<code>modules/task_timings</code>, последние 60 прогонов): прочерк означает «измерений
+        ещё нет», а не «ноль». Кэш расписания — 10 минут, блок «сейчас» и длительности — без кэша.
     </p>
 </div>
 {% endblock %}
@@ -208,6 +237,7 @@ function renderMap(data) {
 
     renderNow(data.now || {});
     renderSchedule(data.hours || [], data.theme_titles || {});
+    renderPeriodic(data.periodic || [], data.periodic_totals || {});
     renderThemes(data.themes || [], data.theme_titles || {});
 }
 
@@ -265,6 +295,41 @@ function renderSchedule(hours, titles) {
         });
     });
     body.innerHTML = html;
+}
+
+function renderPeriodic(rows, totals) {
+    const body = document.querySelector('#periodicTable tbody');
+    const note = document.getElementById('periodicNote');
+    if (totals && totals.tasks) {
+        note.textContent = totals.measured
+            ? `${totals.minutes_per_day} мин слота в сутки на ${totals.measured} из ${totals.tasks} задач`
+            : 'измерений ещё нет — прибор накопит их за первые прогоны';
+        if (totals.top) {
+            note.textContent += ` · больше всех: ${totals.top} (${totals.top_minutes} мин)`;
+        }
+    }
+    if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-muted">'
+            + 'Периодических задач в расписании не найдено</td></tr>';
+        return;
+    }
+    body.innerHTML = rows.map(r => {
+        const avg = r.avg_seconds == null ? '—' : `${r.avg_seconds} с`;
+        const max = r.max_seconds == null ? '—' : `${r.max_seconds} с`;
+        const perDay = r.minutes_per_day == null ? '—' : `${r.minutes_per_day} мин`;
+        const cls = r.minutes_per_day == null
+            ? 'text-muted'
+            : (r.minutes_per_day >= 30 ? 'text-danger fw-semibold' : '');
+        return '<tr>'
+            + `<td>${esc(r.task_short)} <span class="text-muted small">${esc(r.name)}</span></td>`
+            + `<td class="text-muted small">${esc(r.label)}</td>`
+            + `<td class="text-end">${esc(r.runs_per_day)}</td>`
+            + `<td class="text-end">${esc(avg)}</td>`
+            + `<td class="text-end">${esc(max)}</td>`
+            + `<td class="text-end ${cls}">${esc(perDay)}</td>`
+            + `<td class="text-end text-muted small">${esc(r.samples || '—')}</td>`
+            + '</tr>';
+    }).join('');
 }
 
 function renderThemes(themes, titles) {

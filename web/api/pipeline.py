@@ -11,13 +11,16 @@
   (``modules.wave_targets`` — тот же отбор, что у таска);
 * **выход тем** — ``parsing_stats`` за период: волны, посты, средняя
   длительность. Из этого считается «волн на пост»;
+* **периодика** — те же beat-записи, но не волны, плюс измеренная длительность
+  каждой задачи (``modules.task_timings``): 31 % слота воркера уходит на то,
+  чего на карте раньше не было видно (замер P208);
 * **сейчас** — длина очереди в Redis и активная задача через ``inspect``
   (короткий таймаут: страница не должна висеть, если воркер занят).
 
 Тяжёлая часть (расписание + отбор регионов + агрегат статистики) кэшируется на
 10 минут: расписание меняется только деплоем, отбор — пулом сообществ. Блок
-«сейчас» не кэшируется никогда, иначе он врёт именно в тот момент, когда на
-него смотрят.
+«сейчас» и длительности задач не кэшируются никогда, иначе они врут именно в
+тот момент, когда на них смотрят.
 """
 
 from __future__ import annotations
@@ -33,10 +36,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.connection import get_db_session
 from database.models_extended import ParsingStats
-from modules import engine_guard
+from modules import engine_guard, task_timings
 from modules.pipeline_map import (
     attach_regions,
     group_by_hour,
+    periodic_slots,
+    periodic_table,
+    periodic_totals,
     region_key,
     theme_table,
     totals,
@@ -177,6 +183,15 @@ async def _queue_state() -> Dict[str, Any]:
     return state
 
 
+def snapshot_task_timings(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """Измеренные длительности периодики; отказ прибора — пустая карта, не 500."""
+    try:
+        return task_timings.snapshot({str(r.get("task") or "") for r in rows})
+    except Exception:  # noqa: BLE001 — карта обязана открыться без прибора
+        logger.debug("pipeline map: длительности задач недоступны", exc_info=True)
+        return {}
+
+
 async def build_map(db: AsyncSession, *, days: int = 7) -> Dict[str, Any]:
     """Полная карта: расписание, темы, состояние слота."""
     cached = _CACHE.get("payload")
@@ -208,10 +223,18 @@ async def build_map(db: AsyncSession, *, days: int = 7) -> Dict[str, Any]:
             "themes": table,
             "totals": totals(wave_rows=rows, themes=table, busy_hours=busy),
             "theme_titles": {t["theme"]: theme_title(t["theme"]) for t in table},
+            # Периодика — отдельный список: расписание её меняется деплоем,
+            # поэтому оно кэшируется вместе с волнами, а измеренные
+            # длительности подмешиваются на каждом запросе (см. ниже).
+            "periodic_rows": periodic_slots(schedule),
         }
         _CACHE.update({"stamp": time.time(), "days": days, "payload": schedule_part})
 
     payload = dict(schedule_part)
+    periodic_rows = payload.pop("periodic_rows", []) or []
+    periodic = periodic_table(periodic_rows, snapshot_task_timings(periodic_rows))
+    payload["periodic"] = periodic
+    payload["periodic_totals"] = periodic_totals(periodic)
     payload["generated_at"] = utc_to_moscow(datetime.now(timezone.utc)).strftime(
         "%d.%m.%Y %H:%M МСК"
     )
