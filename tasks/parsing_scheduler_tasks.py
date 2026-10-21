@@ -1048,9 +1048,36 @@ def parse_and_publish_theme(
                 "stats": parser_stats,
             }
 
+    # Замок района: воркер идёт с --concurrency=2, и две волны одного района
+    # (разные темы, один пул сообществ и один курсор дедупа) иначе увидят один
+    # пост новым обе и выпустят дубль. Подробности — modules/wave_lock.py.
+    region_lock_token = ""
+    if not dry_run and not test_mode and region_code != "copy":
+        from modules.wave_lock import acquire as acquire_wave_lock
+
+        region_lock_token = acquire_wave_lock(region_code)
+        if region_lock_token is None:
+            logger.info(
+                "wave lock: район %s занят другой волной — %s пропущена, подхватит следующий слот",
+                region_code,
+                theme,
+            )
+            return {
+                "success": False,
+                "skipped": "region_lock",
+                "region_code": region_code,
+                "theme": theme,
+            }
+
     try:
         # Same persistent loop as other Celery tasks (see utils/celery_asyncio).
-        result = run_coro(_execute())
+        try:
+            result = run_coro(_execute())
+        finally:
+            if region_lock_token:
+                from modules.wave_lock import release as release_wave_lock
+
+                release_wave_lock(region_code, region_lock_token)
 
         # dry_run — полностью read-only: не пишем ParsingStats в БД.
         if dry_run:
