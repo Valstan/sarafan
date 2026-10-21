@@ -6,9 +6,9 @@
 
 ## Главное правило
 
-1. **Единственный поддерживаемый способ для задач САРАФАН — SSH** к хосту, где развёрнут проект (`~/САРАФАН`). Полный shell: `git`, `systemctl`, логи, `curl`, отладка, произвольные команды.
+1. **Единственный поддерживаемый способ для задач САРАФАН — SSH** к хосту, где развёрнут проект (`~/SETKA`). Полный shell: `git`, `systemctl`, логи, `curl`, отладка, произвольные команды.
 2. **MCP-серверы в Cursor/IDE для САРАФАН не используются** — они путают разные VPS и проекты. Агентам и людям: деплой, диагностика и прод всегда через **стандартный SSH** (см. конфиг ниже). Лишние MCP в настройках IDE лучше **отключить** для этого репозитория.
-3. Если сомнение — проверяй **`hostname`**, **`pwd`**, наличие **`~/САРАФАН/main.py`**.
+3. Если сомнение — проверяй **`hostname`**, **`pwd`**, наличие **`~/SETKA/main.py`**.
 
 ---
 
@@ -16,11 +16,11 @@
 
 | Что | Значение |
 |-----|----------|
-| Проект на сервере | `~/САРАФАН` |
+| Проект на сервере | `~/SETKA` |
 | Пользователь | `valstan` (как правило) |
 | API (локально на сервере) | `http://127.0.0.1:8000` (наружу — Nginx) |
-| Сервисы systemd | `sarafan`, `sarafan-celery-worker`, `sarafan-celery-beat`, `sarafan-vk-bot` |
-| Секреты | `/etc/sarafan/sarafan.env` (не коммитить) |
+| Сервисы systemd | `setka`, `setka-celery-worker`, `setka-celery-beat`, `setka-vk-bot` |
+| Секреты | env-файл приложения на боксе, `/etc/setka/*.env` (не коммитить) |
 
 Точный **HostName**, **Port** и **IdentityFile** задаются в **локальном** `~/.ssh/config` (у каждого разработчика свой). Пример структуры (без реальных секретов):
 
@@ -38,13 +38,13 @@ Host sarafan
 
 ```bash
 ssh sarafan
-cd ~/САРАФАН
+cd ~/SETKA
 ```
 
 Проверка, что это САРАФАН:
 
 ```bash
-test -f ~/САРАФАН/main.py && echo OK_САРАФАН
+test -f ~/SETKA/main.py && echo OK_САРАФАН
 ```
 
 ---
@@ -52,12 +52,12 @@ test -f ~/САРАФАН/main.py && echo OK_САРАФАН
 ## Типичные операции по SSH
 
 ```bash
-ssh sarafan "cd ~/САРАФАН && git status && git pull origin main"
-ssh sarafan "systemctl status sarafan sarafan-celery-worker sarafan-celery-beat sarafan-vk-bot --no-pager"
+ssh sarafan "cd ~/SETKA && git status && git pull origin main"
+ssh sarafan "systemctl status setka setka-celery-worker setka-celery-beat setka-vk-bot --no-pager"
 ssh sarafan "curl -sS http://127.0.0.1:8000/api/health/"
 ```
 
-Логи: `~/САРАФАН/logs/` (см. также [`START_HERE.md`](START_HERE.md)).
+Логи: `~/SETKA/logs/` (см. также [`START_HERE.md`](START_HERE.md)).
 
 ---
 

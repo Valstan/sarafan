@@ -30,7 +30,7 @@ Required:
 ### 2. Verify Services Status
 
 ```bash
-systemctl status sarafan sarafan-celery-worker sarafan-celery-beat sarafan-vk-bot
+systemctl status setka setka-celery-worker setka-celery-beat setka-vk-bot
 ```
 
 If services don't exist yet, see setup below.
@@ -42,7 +42,7 @@ If services don't exist yet, see setup below.
 ### Step 1: Pull Latest Code
 
 ```bash
-cd ~/САРАФАН
+cd ~/SETKA
 git pull origin main
 ```
 
@@ -83,13 +83,13 @@ This will:
 
 ```bash
 # Main application
-sudo systemctl restart sarafan
+sudo systemctl restart setka
 
 # Celery worker (processes tasks)
-sudo systemctl restart sarafan-celery-worker
+sudo systemctl restart setka-celery-worker
 
 # Celery beat (schedules tasks — NOW WITH 27 NEW POSTOPUS TASKS)
-sudo systemctl restart sarafan-celery-beat
+sudo systemctl restart setka-celery-beat
 ```
 
 ### Step 5: Verify
@@ -163,14 +163,14 @@ All crontab entries from old_postopus are now Celery Beat schedules:
 
 ```bash
 # App logs (uvicorn stdout/stderr + Python logging — systemd редиректит
-# stdout/stderr в этот файл, см. sarafan.service)
-tail -f ~/САРАФАН/logs/uvicorn_production.log
+# stdout/stderr в этот файл, см. setka.service)
+tail -f ~/SETKA/logs/uvicorn_production.log
 
 # Celery worker logs
-journalctl -u sarafan-celery-worker -f --no-pager
+journalctl -u setka-celery-worker -f --no-pager
 
 # Celery beat logs
-journalctl -u sarafan-celery-beat -f --no-pager
+journalctl -u setka-celery-beat -f --no-pager
 ```
 
 ### Celery Flower (if installed)
@@ -217,16 +217,16 @@ crontab -e
 ### "Module not found" errors
 ```bash
 # Restart services to reload PYTHONPATH
-sudo systemctl restart sarafan sarafan-celery-worker sarafan-celery-beat sarafan-vk-bot
+sudo systemctl restart setka setka-celery-worker setka-celery-beat setka-vk-bot
 ```
 
 ### Celery tasks not running
 ```bash
 # Check beat schedule
-journalctl -u sarafan-celery-beat | grep "postopus"
+journalctl -u setka-celery-beat | grep "postopus"
 
 # Check worker picks up tasks
-journalctl -u sarafan-celery-worker | grep "parsing_scheduler"
+journalctl -u setka-celery-worker | grep "parsing_scheduler"
 ```
 
 ### Database tables missing

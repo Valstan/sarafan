@@ -65,7 +65,7 @@ modules/
 
 ### Активация окружения:
 ```bash
-cd ~/САРАФАН
+cd ~/SETKA
 source venv/bin/activate
 ```
 
@@ -136,7 +136,7 @@ Host: localhost:5432
 ## 🗂️ Структура проекта
 
 ```
-САРАФАН/
+SETKA/
 ├── main.py              # FastAPI приложение
 ├── config/              # Конфигурация (токены)
 ├── database/            # БД модели и подключение
@@ -182,12 +182,12 @@ Host: localhost:5432
 ## 💾 Бэкапы
 
 **Автоматический бэкап:** Ежедневно в 3:00 AM  
-**Расположение:** `~/САРАФАН/backup/`  
+**Расположение:** `~/SETKA/backup/`  
 **Хранение:** Последние 7 бэкапов
 
 Ручной бэкап:
 ```bash
-~/САРАФАН/scripts/backup_database.sh
+~/SETKA/scripts/backup_database.sh
 ```
 
 ---
@@ -196,7 +196,7 @@ Host: localhost:5432
 
 **Health checks:** Каждые 5 минут  
 **Telegram алерты:** При ошибках и предупреждениях  
-**Логи:** `~/САРАФАН/logs/`
+**Логи:** `~/SETKA/logs/`
 
 ---
 

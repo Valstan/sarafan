@@ -3,7 +3,7 @@
 ## 1) Быстрый запуск и проверка
 
 ```bash
-cd ~/САРАФАН
+cd ~/SETKA
 source venv/bin/activate
 python main.py
 ```
@@ -157,7 +157,7 @@ cd ~/SETKA
 Сводка состояния:
 
 ```bash
-cd ~/САРАФАН
+cd ~/SETKA
 bash scripts/check-setka.sh
 ```
 
