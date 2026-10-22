@@ -15,10 +15,17 @@
   что выкинули алгоритмы), а именно на неё опирается будущее снятие фильтров.
 
 Объём посчитан на проде 2026-08-19: окно 72 часа = 7774 строки по 29 регионам,
-то есть 78 батчей за круг и ~620 вызовов в сутки при прогоне раз в 3 часа.
-Батчи идут через общий с парсером per-token тормоз (см.
+то есть 78 батчей за круг. Замер 22.10: окно выросло до **~15 000 строк**,
+8 кругов в сутки, круг 290–368 с и ~14 500 записанных строк в каждом. Batches
+идут через общий с парсером per-token тормоз (см.
 ``vk_monitor/post_metrics.py``), поэтому круг занимает десятки секунд — время,
 на которое сессия БД специально отпускается (см. :func:`refresh_metrics`).
+
+**Запись — пачками.** Раньше на каждую строку шёл свой ``UPDATE``: 14 500
+кругов до Postgres внутри одной транзакции, и это была половина времени круга.
+Теперь одна пачка = один ``WITH v(...) AS (VALUES ...) UPDATE ... FROM v``
+(:func:`_apply_batch`), а ``RETURNING lip`` даёт честный счёт изменённых строк
+там, где ``rowcount`` у CTE-формы в SQLite приходит ``-1``.
 """
 
 from __future__ import annotations
@@ -38,6 +45,12 @@ _WALL_RE = re.compile(r"wall(-?\d+)_(\d+)\s*$")
 # Поля метрик, которые таска пишет в аудит. Порядок не важен, важен состав:
 # всё, чего ВК не прислал, не должно затирать уже измеренное.
 _METRIC_FIELDS = ("views", "likes", "comments", "reposts")
+
+# Сколько строк аудита уходит одним ``UPDATE ... FROM (VALUES ...)``. 500 — это
+# 3 500 биндов на запрос: далеко от потолка Postgres (65 535) и SQLite (32 766),
+# но и не «по одной строке». Замер 22.10: круг переписывал ~14 500 строк
+# отдельными запросами и шёл 290–368 с.
+_BATCH_ROWS = 500
 
 
 def ref_from_post_url(url: Optional[str]) -> Optional[Ref]:
@@ -235,13 +248,97 @@ async def select_refresh_candidates(
     return out, unparsable
 
 
-def _rowcount(result) -> int:
-    """``rowcount`` драйвера, приведённый к неотрицательному числу.
+def _batch_statement(rows: List[Dict[str, Any]], now: datetime, *, casts: bool):
+    """Собрать один ``WITH v(...) AS (VALUES ...) UPDATE ... FROM v`` на пачку.
 
-    Некоторые драйверы отдают -1, когда счёт недоступен; отрицательное число в
-    сумме «сколько строк изменилось» врало бы в другую сторону.
+    Почему текст, а не Core-конструктор. ``values()`` в ``UPDATE ... FROM``
+    SQLAlchemy не связывает: параметры теряются (``[parameters: [{}]]``), а
+    алиас со списком колонок (``AS v(lip, views, ...)``) SQLite не понимает
+    вовсе. CTE понимают оба диалекта.
+
+    ``casts`` — только для PostgreSQL. Там ``VALUES`` с ``NULL`` в колонке
+    получает тип ``text``, и ``COALESCE`` падает на несовпадении типов; явный
+    ``CAST`` это снимает. В SQLite ``CAST(... AS TIMESTAMP)`` наоборот испортил
+    бы дату (числовая близость типа съедает строку), поэтому без кастов.
     """
-    return max(int(getattr(result, "rowcount", 0) or 0), 0)
+    from sqlalchemy import Boolean, DateTime, Integer, String, bindparam
+    from sqlalchemy import text as sa_text
+
+    def cast(name: str, sql_type: str) -> str:
+        return f"CAST(:{name} AS {sql_type})" if casts else f":{name}"
+
+    tuples = []
+    params = []
+    for i, row in enumerate(rows):
+        values_sql = ", ".join(
+            [
+                cast(f"lip_{i}", "TEXT"),
+                cast(f"views_{i}", "INTEGER"),
+                cast(f"likes_{i}", "INTEGER"),
+                cast(f"comments_{i}", "INTEGER"),
+                cast(f"reposts_{i}", "INTEGER"),
+                cast(f"pub_{i}", "TIMESTAMP"),
+                cast(f"has_{i}", "BOOLEAN"),
+            ]
+        )
+        tuples.append(f"({values_sql})")
+        params.extend(
+            [
+                bindparam(f"lip_{i}", row["lip"], type_=String),
+                bindparam(f"views_{i}", row["views"], type_=Integer),
+                bindparam(f"likes_{i}", row["likes"], type_=Integer),
+                bindparam(f"comments_{i}", row["comments"], type_=Integer),
+                bindparam(f"reposts_{i}", row["reposts"], type_=Integer),
+                bindparam(f"pub_{i}", row["published_at"], type_=DateTime),
+                bindparam(f"has_{i}", row["has_metrics"], type_=Boolean),
+            ]
+        )
+    params.append(bindparam("stamp_now", now, type_=DateTime))
+
+    sql = (
+        "WITH v(lip, views, likes, comments, reposts, published_at, has_metrics) AS "
+        "(VALUES " + ", ".join(tuples) + ") "
+        "UPDATE collected_post_audit SET "
+        "views = COALESCE(v.views, collected_post_audit.views), "
+        "likes = COALESCE(v.likes, collected_post_audit.likes), "
+        "comments = COALESCE(v.comments, collected_post_audit.comments), "
+        "reposts = COALESCE(v.reposts, collected_post_audit.reposts), "
+        "published_at = COALESCE(collected_post_audit.published_at, v.published_at), "
+        "metrics_updated_at = CASE WHEN v.has_metrics THEN "
+        + cast("stamp_now", "TIMESTAMP")
+        + " ELSE collected_post_audit.metrics_updated_at END "
+        "FROM v "
+        "WHERE collected_post_audit.lip = v.lip "
+        "AND (v.has_metrics OR "
+        "(collected_post_audit.published_at IS NULL AND v.published_at IS NOT NULL)) "
+        # RETURNING, а не rowcount: у CTE-формы UPDATE в SQLite ``rowcount``
+        # приходит ``-1``, и «обновлено 0» включило бы ложный гейт
+        # ``no_metrics_fetched``. Возвращённые lip'ы — это ровно изменённые
+        # строки, на обоих диалектах.
+        "RETURNING collected_post_audit.lip"
+    )
+    return sa_text(sql).bindparams(*params)
+
+
+async def _apply_batch(session, rows: List[Dict[str, Any]], now: datetime) -> int:
+    """Один UPDATE на пачку строк: ``WITH ... UPDATE ... FROM v``.
+
+    Зачем пачкой. Замер 22.10: круг обновлял **~14 500 строк** отдельными
+    ``UPDATE``, и таска шла 290–368 с, стоя в единственном слоте воркера
+    (48 мин в сутки). Строк столько не потому, что они меняются, — столько их
+    в окне 72 ч, и каждая переписывалась своим запросом. Пачка снимает
+    круги до Postgres: вместо 14 500 запросов — 29.
+
+    ``COALESCE`` в ``SET`` держит главное обещание :func:`apply_metrics`:
+    поле, которого ВК не прислал (``NULL`` в пачке), не затирает измеренное,
+    а ``published_at`` заполняется только когда его ещё нет.
+
+    ``WHERE`` отсекает строки, которые всё равно не изменились бы: строка без
+    единой метрики и с уже проставленной датой — это не «обновление», и
+    считать её изменённой значило бы врать в гейт ``no_metrics_fetched``.
+    """
+    res = await session.execute(_batch_statement(rows, now, casts=_is_postgres(session)))
+    return len(res.scalars().all())
 
 
 async def apply_metrics(
@@ -249,9 +346,12 @@ async def apply_metrics(
 ) -> int:
     """Записать метрики в аудит. Возвращает число РЕАЛЬНО изменённых строк.
 
-    Считаем ``rowcount``, а не количество ответов ВК: гейт
+    Считаем реально изменённые строки, а не количество ответов ВК: гейт
     ``no_metrics_fetched`` в :func:`refresh_metrics` должен значить «в БД
     ничего не поменялось», иначе он снова разрешит тихий круг вхолостую.
+    Счёт берётся из ``RETURNING lip``, а не из ``rowcount``: пачка уходит одним
+    ``UPDATE``, но у CTE-формы в SQLite ``rowcount`` приходит ``-1``, и ноль
+    вместо правды включил бы гейт на здоровом круге.
 
     ``published_at`` перезаписывается только когда его ещё нет: дата поста не
     меняется, а ответ ВК может её и не принести.
@@ -262,12 +362,8 @@ async def apply_metrics(
     строка становилась бы одновременно «свежей» и «не меренной», а витрина
     показывала бы прочерк на посте, который вчера был измерен.
     """
-    from sqlalchemy import update
-
-    from database.models_extended import CollectedPostAudit
-
     now = datetime.utcnow()
-    updated = 0
+    rows: List[Dict[str, Any]] = []
     for ref, m in metrics_by_ref.items():
         lip = lip_by_ref.get(ref)
         if not lip:
@@ -276,36 +372,27 @@ async def apply_metrics(
         published_at = m.get("published_at")
         if not measured and not published_at:
             continue
+        rows.append(
+            {
+                "lip": lip,
+                "views": measured.get("views"),
+                "likes": measured.get("likes"),
+                "comments": measured.get("comments"),
+                "reposts": measured.get("reposts"),
+                "published_at": published_at,
+                "has_metrics": bool(measured),
+            }
+        )
 
-        values: Dict[str, Any] = dict(measured)
-        if measured:
-            # Штамп свежести — только когда есть что штамповать.
-            values["metrics_updated_at"] = now
-
-        stmt = update(CollectedPostAudit).where(CollectedPostAudit.lip == lip)
-        if published_at:
-            res = await session.execute(
-                stmt.where(CollectedPostAudit.published_at.is_(None)).values(
-                    published_at=published_at, **values
-                )
-            )
-            filled_date = _rowcount(res)
-            updated += filled_date
-            # Второй UPDATE — только если первый ни во что не попал. lip
-            # уникален, поэтому обе ветки бьют в ОДНУ строку: без условия
-            # строка с пустой датой обновлялась бы дважды подряд и дважды же
-            # считалась. На первом прод-круге published_at пуст у всех 7774
-            # строк — таска отрапортовала бы updated вдвое больше checked, и
-            # цифра, по которой читают исход круга, обещала бы больше, чем
-            # меряет.
-            if values and not filled_date:
-                res = await session.execute(
-                    stmt.where(CollectedPostAudit.published_at.isnot(None)).values(**values)
-                )
-                updated += _rowcount(res)
-        else:
-            res = await session.execute(stmt.values(**values))
-            updated += _rowcount(res)
+    updated = 0
+    for start in range(0, len(rows), _BATCH_ROWS):
+        updated += await _apply_batch(session, rows[start : start + _BATCH_ROWS], now)
+    # Запись шла текстом, мимо ORM: объекты, уже поднятые в этой сессии, об
+    # этом не знают и продолжали бы отдавать старые числа (в таске их нет —
+    # там на руках только кортежи (ref, lip), но в тестах и в ручных прогонах
+    # они есть). expire_all не ходит в БД, он только помечает объекты
+    # протухшими.
+    session.expire_all()
     await session.commit()
     return updated
 
