@@ -459,6 +459,71 @@ async def test_apply_metrics_counts_an_already_dated_row_once(db_session):
 
 
 @pytest.mark.asyncio
+async def test_apply_metrics_writes_rows_in_batches(db_session, monkeypatch):
+    """Круг пишет пачками, а не по запросу на строку.
+
+    Замер 22.10: ~14 500 отдельных UPDATE за круг, 290–368 с на таске, 48 мин
+    слота в сутки. Пачка — это одна поездка в Postgres на 500 строк; здесь
+    потолок искусственно сжат до 2, чтобы границы были видны.
+    """
+    from modules.classifier import metrics_refresh
+
+    for i in range(1, 4):
+        db_session.add(_row(f"8_{i}", -1, i, published_at=datetime.utcnow()))
+    await db_session.commit()
+
+    metrics = {
+        (-1, i): {"views": 10 * i, "likes": i, "comments": 0, "reposts": 0, "published_at": None}
+        for i in range(1, 4)
+    }
+    lip_by_ref = {(-1, i): f"8_{i}" for i in range(1, 4)}
+
+    chunks = []
+    real = metrics_refresh._apply_batch
+
+    async def spy(session, rows, now):
+        chunks.append(len(rows))
+        return await real(session, rows, now)
+
+    monkeypatch.setattr(metrics_refresh, "_BATCH_ROWS", 2)
+    monkeypatch.setattr(metrics_refresh, "_apply_batch", spy)
+
+    assert await metrics_refresh.apply_metrics(db_session, metrics, lip_by_ref) == 3
+    assert chunks == [2, 1]
+
+
+@pytest.mark.asyncio
+async def test_apply_metrics_skips_rows_that_would_not_change(db_session):
+    """Дата уже есть, метрик нет — писать нечего, и это НЕ «обновлённая строка».
+
+    Иначе гейт ``no_metrics_fetched`` («проверено много, обновлено ноль — это
+    отказ») не сработал бы никогда: пачка отметила бы такие строки изменёнными.
+    """
+    existing_date = datetime.utcnow() - timedelta(days=2)
+    db_session.add(_row("8_9", -1, 9, published_at=existing_date, views=7))
+    await db_session.commit()
+
+    metrics = {
+        (-1, 9): {
+            "views": None,
+            "likes": None,
+            "comments": None,
+            "reposts": None,
+            "published_at": datetime.utcnow() - timedelta(hours=1),
+        }
+    }
+
+    assert await apply_metrics(db_session, metrics, {(-1, 9): "8_9"}) == 0
+
+    row = (
+        await db_session.execute(select(CollectedPostAudit).where(CollectedPostAudit.lip == "8_9"))
+    ).scalar_one()
+    assert row.published_at == existing_date
+    assert row.views == 7
+    assert row.metrics_updated_at is None
+
+
+@pytest.mark.asyncio
 async def test_load_published_lips_narrows_to_candidates(db_session):
     """Вопрос задаётся только про кандидатов окна — ответ от этого не меняется.
 
