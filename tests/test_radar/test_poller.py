@@ -1,5 +1,6 @@
 """Tests for modules/radar/poller — fan-out, fail-isolation, watchdog (Ф0.2)."""
 
+import asyncio
 from datetime import datetime
 from unittest.mock import MagicMock, patch
 
@@ -55,7 +56,7 @@ async def test_poll_inserts_new_items_and_updates_meta():
             FetchedItem(external_id="2", published_at=datetime(2026, 6, 12, 11)),
         ]
 
-    fake = _FakeSession([src], insert_rowcounts=[1, 0])
+    fake = _FakeSession([src], insert_rowcounts=[1])
     with (
         patch("database.connection.AsyncSessionLocal", return_value=fake),
         patch("modules.radar.sources.get_fetcher", return_value=fetch),
@@ -64,12 +65,75 @@ async def test_poll_inserts_new_items_and_updates_meta():
         summary = await poller.poll_all_sources()
 
     assert summary == {"sources": 1, "new_items": 1, "failed": 0}
-    assert fake.inserts == 2  # оба поста ушли в INSERT, второй погашен ON CONFLICT
+    # Одна пачка на источник, а не запрос на элемент: 21.10 каждый отдельный
+    # INSERT был кругом до Postgres внутри той же транзакции.
+    assert fake.inserts == 1
     assert src.fail_count == 0
     assert src.last_polled_at is not None
     assert src.last_item_at == datetime(2026, 6, 12, 11)
     assert fake.committed
     hb.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_sources_are_fetched_concurrently():
+    """Источники не ждут друг друга: иначе один медленный релей держит прогон.
+
+    Замер 21.10: пять источников по очереди = 78 с на прогон, 187 мин в сутки
+    единственного слота. Проверяем не секундомером, а фактом одновременности:
+    два фетча держат счётчик «сколько сейчас внутри» и оба успевают войти.
+    """
+    first, second = _source(id=1), _source(id=2, key="-2")
+    inside = {"now": 0, "peak": 0}
+
+    async def fetch(_):
+        inside["now"] += 1
+        inside["peak"] = max(inside["peak"], inside["now"])
+        await asyncio.sleep(0)
+        inside["now"] -= 1
+        return []
+
+    semaphore = asyncio.Semaphore(2)
+    await asyncio.gather(
+        poller._fetch_source(first, fetch, semaphore),
+        poller._fetch_source(second, fetch, semaphore),
+    )
+
+    assert inside["peak"] == 2
+
+
+@pytest.mark.asyncio
+async def test_semaphore_caps_concurrency():
+    """Потолок одновременных походов в сеть уважается."""
+    sources = [_source(id=i, key=f"-{i}") for i in range(1, 4)]
+    inside = {"now": 0, "peak": 0}
+
+    async def fetch(_):
+        inside["now"] += 1
+        inside["peak"] = max(inside["peak"], inside["now"])
+        await asyncio.sleep(0)
+        inside["now"] -= 1
+        return []
+
+    semaphore = asyncio.Semaphore(1)
+    await asyncio.gather(*(poller._fetch_source(src, fetch, semaphore) for src in sources))
+
+    assert inside["peak"] == 1
+
+
+def test_rows_for_source_dedupes_within_batch():
+    """Дубли внутри пачки снимаем до INSERT: ON CONFLICT видит только БД."""
+    items = [
+        FetchedItem(external_id="7", published_at=datetime(2026, 6, 12, 9)),
+        FetchedItem(external_id="7", published_at=datetime(2026, 6, 12, 12)),
+        FetchedItem(external_id="8", published_at=datetime(2026, 6, 12, 10)),
+    ]
+
+    rows, newest = poller._rows_for_source(42, items, now=datetime(2026, 6, 12, 13))
+
+    assert [row["external_id"] for row in rows] == ["7", "8"]
+    assert {row["source_id"] for row in rows} == {42}
+    assert newest == datetime(2026, 6, 12, 10)
 
 
 @pytest.mark.asyncio
