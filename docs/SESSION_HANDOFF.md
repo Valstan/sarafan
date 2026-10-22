@@ -2,10 +2,10 @@
 
 > Sticky-note для непрерывности между сессиями разработки SETKA. Перезаписывается через [`/close_session`](../.claude/commands/close_session.md) — историю смотри через `git log --follow -- docs/SESSION_HANDOFF.md`.
 
-**Status:** ACTIVE
+**Status:** ACTIVE -> IDLE (нитка частично закрыта: две из трёх периодик ушли из слота; classify — проба в следующей сессии)
 **Updated:** 2026-10-22
 **Branch:** main
-**Last release in prod:** `bb7b476` (#967 — параллельный фетч метрик); до него `1c490a0` (#965) и `311c705` (#964)
+**Last release in prod:** `fcecaf5` (#969 — письмо-рефлекс в mailbox; `bb7b476` #967 — параллельный фетч метрик на проде с кругом 97.6 с; до него `88c0af0` #968 — handoff + `7789ba0` #966 — разбор classify, `1c490a0` #965 — батч-запись метрик, `311c705` #964 — радар в демон)
 
 ---
 
