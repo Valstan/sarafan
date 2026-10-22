@@ -1,9 +1,11 @@
 """Общий батч-фетчер метрик постов (wall.getById).
 
-Единственное место, где парсится ответ ВК по метрикам. Тесты держат два
-свойства: NULL не превращается в 0, и падение одного батча не уносит остальные.
+Единственное место, где парсится ответ ВК по метрикам. Тесты держат три
+свойства: NULL не превращается в 0, падение одного батча не уносит остальные,
+и параллельный режим не превращает круг в залп (тормоз зовётся на каждый батч).
 """
 
+import threading
 from datetime import datetime
 
 import pytest
@@ -143,3 +145,146 @@ def test_throttle_happens_even_when_the_batch_fails(_no_real_throttle):
 
     assert out == {}
     assert len(_no_real_throttle) == 2
+
+
+def _factory_recording(clients):
+    """Фабрика «своя копия api на поток», как в проде (vk_api + requests.Session)."""
+
+    class Client:
+        class wall:
+            @staticmethod
+            def getById(posts):
+                ids = [int(p.split("_")[1]) for p in posts.split(",")]
+                return [{"owner_id": -1, "id": i, "likes": {"count": 1}} for i in ids]
+
+    def make():
+        client = Client
+        clients.append(client)
+        return client
+
+    return make
+
+
+def test_workers_run_batches_in_parallel():
+    """``workers`` > 1 действительно распараллеливает, а не идёт по очереди.
+
+    Доказательство без опоры на секунды: два потока встречаются на барьере.
+    Если второй батч запустился бы только после первого, барьер не собрался бы
+    и тест упал бы по таймауту — то есть «параллельно» здесь проверяется
+    детерминированно, а не замером времени.
+    """
+    barrier = threading.Barrier(2, timeout=10)
+    seen = []
+
+    class Client:
+        class wall:
+            @staticmethod
+            def getById(posts):
+                if len(seen) < 2:
+                    seen.append(posts)
+                    barrier.wait()
+                return [{"owner_id": -1, "id": int(posts.split("_")[-1]), "likes": {"count": 1}}]
+
+    def factory():
+        return Client
+
+    out = fetch_metrics_for_token(
+        None,
+        [(-1, i) for i in range(200)],
+        token="tok",
+        batch_size=100,
+        workers=2,
+        api_factory=factory,
+    )
+
+    assert barrier.broken is False
+    assert len(seen) == 2
+    assert len(out) == 2, "метрики обоих батчей обязаны доехать"
+
+
+def test_workers_keep_every_batch_on_the_shared_throttle(_no_real_throttle):
+    """Параллельность не превращает круг в залп: тормоз зовётся на каждый батч.
+
+    Это и есть причина, по которой втрое больше потоков не значит втрое больше
+    запросов в секунду для ВК — частоту держит тот же per-token лимитер.
+    """
+    out = fetch_metrics_for_token(
+        None,
+        [(-1, i) for i in range(350)],
+        token="tok-B",
+        batch_size=100,
+        workers=3,
+        api_factory=_factory_recording([]),
+    )
+
+    assert len(out) == 350
+    assert sorted(_no_real_throttle) == [("tok-B", "wall.getById")] * 4
+
+
+def test_workers_do_not_lose_the_other_batches_on_failure():
+    """Один упавший батч в параллельном режиме не уносит соседние."""
+    lock = threading.Lock()
+    seen = {"n": 0}
+
+    class Client:
+        class wall:
+            @staticmethod
+            def getById(posts):
+                with lock:
+                    seen["n"] += 1
+                    n = seen["n"]
+                if n == 1:
+                    raise RuntimeError("VK упал")
+                return [{"owner_id": -1, "id": n, "likes": {"count": n}}]
+
+    out = fetch_metrics_for_token(
+        None,
+        [(-1, i) for i in range(300)],
+        token="tok",
+        batch_size=100,
+        workers=3,
+        api_factory=lambda: Client,
+    )
+
+    assert len(out) == 2, "два живых батча должны пережить отказ третьего"
+
+
+def test_workers_are_capped_by_the_number_of_batches():
+    """Потоков не больше, чем батчей: на двух пачках третий не поднимается."""
+    clients = []
+    out = fetch_metrics_for_token(
+        None,
+        [(-1, i) for i in range(150)],
+        token="tok",
+        batch_size=100,
+        workers=4,
+        api_factory=_factory_recording(clients),
+    )
+
+    assert len(out) == 150
+    assert len(clients) <= 2, "лишний поток = лишняя копия api на пустом месте"
+
+
+def test_workers_above_one_does_not_touch_the_passed_api():
+    """В параллельном пути переданный ``api`` не используется вовсе.
+
+    Так исключается общий ``requests.Session`` на несколько потоков: если
+    потоки начнут ходить через переданный объект, тест это увидит.
+    """
+
+    class Shared:
+        class wall:
+            @staticmethod
+            def getById(posts):  # pragma: no cover - сюда попадать не должны
+                raise AssertionError("общий api в параллельном режиме трогать нельзя")
+
+    out = fetch_metrics_for_token(
+        Shared,
+        [(-1, i) for i in range(200)],
+        token="tok",
+        batch_size=100,
+        workers=2,
+        api_factory=_factory_recording([]),
+    )
+
+    assert len(out) == 200

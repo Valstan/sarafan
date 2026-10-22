@@ -29,6 +29,8 @@ Env vars:
                                       # подачи в постулаты → подсветка в панели
   CLASSIFIER_RULES_SNAPSHOT_PATH      # файл снапшота выученных правил (beat);
                                       # дефолт logs/classifier_learned_rules_snapshot.md
+  METRICS_FETCH_WORKERS=3     # сколько батчей wall.getById тянуть параллельно
+                              # (круг обновления метрик, 1..4; 1 = выключить)
   RATING_VIEWS_ALPHA=0.25     # показатель степени при просмотрах в рейтинге
                               # отбора; 0.5 = нынешняя post_popularity, 0 = охват
 """
@@ -181,6 +183,22 @@ def get_headless_chunk_size() -> int:
         return max(1, min(40, int(os.getenv("CLASSIFIER_HEADLESS_CHUNK", "10"))))
     except ValueError:
         return 10
+
+
+def get_metrics_fetch_workers() -> int:
+    """Сколько батчей ``wall.getById`` тянуть параллельно (env ``METRICS_FETCH_WORKERS``).
+
+    Границы 1..4. Больше и не нужно: частоту для ВК задаёт не наша сеть, а общий
+    per-token тормоз (``enforce_token_rate_limit``, 0.4 с на вызов ≈ 2.5 запроса
+    в секунду) — он выравнивает поток запросов при любом числе потоков, а потоки
+    убирают простой на ожидании ответа. Замер на проде 22.10: круг обновления
+    метрик — **151 батч**, в один поток 265 с, в три потока 87 с, разобранных
+    метрик столько же (15 003). ``1`` — выключить (поведение до 22.10).
+    """
+    try:
+        return max(1, min(4, int(os.getenv("METRICS_FETCH_WORKERS", "3"))))
+    except ValueError:
+        return 3
 
 
 def read_postulates() -> str:

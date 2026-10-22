@@ -35,6 +35,7 @@ import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
+from config.classifier import get_metrics_fetch_workers
 from modules.classifier.audit_window import AUDIT_WINDOW_HOURS, in_window, window_cutoff
 from modules.vk_monitor.post_metrics import Ref
 
@@ -439,17 +440,22 @@ async def refresh_metrics(session, *, hours: int = AUDIT_WINDOW_HOURS) -> Dict[s
             "unparsable_urls": unparsable,
         }
 
-    # Отпускаем соединение с БД перед походом в ВК. Круг из 78 батчей идёт
-    # через per-token тормоз (0.4 с на вызов) — это полминуты-минута, восемь
-    # раз в сутки. Держать всё это время открытую транзакцию значит держать
-    # Postgres в idle-in-transaction: висит соединение из пула, а с ним
-    # горизонт autovacuum. Ничего из выбранного не протухнет: дальше в руках
-    # только кортежи (ref, lip), ORM-объектов мы не держим.
+    # Отпускаем соединение с БД перед походом в ВК. Круг из 151 батча идёт
+    # через per-token тормоз (0.4 с на вызов) — замер 22.10: 265 с в один
+    # поток, 87 с в три. Держать всё это время открытую транзакцию значит
+    # держать Postgres в idle-in-transaction: висит соединение из пула, а с
+    # ним горизонт autovacuum. Ничего из выбранного не протухнет: дальше в
+    # руках только кортежи (ref, lip), ORM-объектов мы не держим.
     await session.commit()
 
     api = vk_api.VkApi(token=token).get_api()
     lip_by_ref = {ref: lip for ref, lip in live}
-    metrics = fetch_metrics_for_token(api, [ref for ref, _ in live], token=token)
+    metrics = fetch_metrics_for_token(
+        api,
+        [ref for ref, _ in live],
+        token=token,
+        workers=get_metrics_fetch_workers(),
+    )
 
     # Транзакция под запись открывается заново — следующим обращением к сессии.
     updated = await apply_metrics(session, metrics, lip_by_ref)
