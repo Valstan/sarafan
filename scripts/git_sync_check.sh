@@ -35,8 +35,17 @@ issues=""
 branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
 
 # 1. Незакоммиченные / неотслеживаемые изменения.
-if [ -n "$(git status --porcelain 2>/dev/null)" ]; then
-  dirty=$(git status --porcelain 2>/dev/null | wc -l | tr -d ' ')
+#
+# `-c core.autocrlf=true` — не косметика. Репозиторий живёт на Windows с
+# autocrlf=true: в рабочем дереве CRLF, в индексе LF, и git нормализует их при
+# чтении. Но скрипт зовут из разных bash: Git Bash видит пользовательский
+# gitconfig, а WSL-овский `bash` (он же первый в PATH) — нет, и тогда все
+# CRLF-файлы выглядят изменёнными (замер 25.10: 1494 файла «грязных» при чистом
+# дереве). Ложное «грязно» здесь дороже пропуска: следующий `git add -A` из того
+# же bash закоммитил бы CRLF-шум по всему репозиторию. Явная нормализация делает
+# ответ одинаковым из любой оболочки.
+if [ -n "$(git -c core.autocrlf=true status --porcelain 2>/dev/null)" ]; then
+  dirty=$(git -c core.autocrlf=true status --porcelain 2>/dev/null | wc -l | tr -d ' ')
   issues="${issues}- Незакоммиченные/неотслеживаемые правки: ${dirty} файл(ов).\n"
 fi
 
