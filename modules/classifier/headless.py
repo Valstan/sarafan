@@ -74,8 +74,21 @@ def chat(**kwargs: Any) -> Dict[str, Any]:
     else:
         result = _deepseek_chat(**kwargs)
 
-    engine_guard.note_result(bool(result.get("ok")), str(result.get("reason") or ""))
+    engine_guard.note_result(bool(result.get("ok")), _guard_reason(result))
     return result
+
+
+def _guard_reason(result: Dict[str, Any]) -> str:
+    """Причина отказа так, как её понимает предохранитель.
+
+    ``engine_all_failed`` — общий контракт «движок не ответил», но у него
+    разные причины с разной реакцией. Исчерпанная квота аккаунта приходит
+    флагом ``quota`` и превращается в свой класс: у него отдельный, длинный
+    предохранитель, потому что повтор через пять минут её не снимает.
+    """
+    if result.get("quota"):
+        return "quota_exhausted"
+    return str(result.get("reason") or "")
 
 
 # Сколько постов уходит в один вызов. Больше — дешевле (постулаты не

@@ -66,6 +66,7 @@ from config.opencode import (
     get_base_url,
     get_model_chain,
     get_model_timeout,
+    get_model_variant,
     get_serve_max_lifetime,
     get_serve_rss_kill_mb,
     get_server_password,
@@ -131,17 +132,42 @@ _NETWORK_GATE_MARKERS = (
     "abusive traffic",
 )
 
+# Признаки исчерпанной квоты АККАУНТА (замер 24.10: «Free usage limit reached.
+# Subscribe to OpenCode Go», первый раз 23.10 06:48, 664 записи за двое суток).
+# Это не тот же класс, что гейт по IP: квота считается по аккаунту, и смена
+# выхода ВПН её не снимает — проверено пятью поворотами подряд (DE, PL, NL, US,
+# PL). Держим отдельной причиной, потому что реакция другая: перебирать модели
+# бессмысленно (квота общая), а лечится она только сбросом идентичности или
+# ожиданием сброса квоты.
+_QUOTA_MARKERS = (
+    "free usage limit reached",
+    "free usage exceeded",
+    "subscribe to opencode go",
+)
+
 # Причины, после которых имеет смысл менять выход ВПН (обе меряются на проде
 # 20.10): IP-гейт («abusive traffic from this IP») и ``http_429 Rate limit
 # exceeded`` на всей цепочке. Второе — тоже per-IP: в 19:40 все три модели
 # отвечали 429, а через секунду после смены сервера тот же запрос прошёл
 # (замер: поворот → ``Да`` за 4,9 с). Поворот случается только когда легла ВСЯ
 # цепочка: 429 одной модели — обычный фолбэк, ВПН не трогаем.
-_EGRESS_TRIGGER_REASONS = ("network_gate", "http_429")
+#
+# ``quota_exhausted`` стоит здесь по решению владельца 24.10: перебор серверов
+# при исчерпанной квоте аккаунта он оставил («оставить как есть»), хотя замер
+# говорит, что адрес тут ни при чём. Держим его последним, чтобы порядок
+# причин читался как «сначала то, что действительно per-IP».
+_EGRESS_TRIGGER_REASONS = ("network_gate", "http_429", "quota_exhausted")
 
 # Файл-метка паузы между поворотами выхода: воркер многопроцессный, поэтому
 # метка на диске, а не в памяти процесса.
 _EGRESS_ROTATE_STAMP = "setka_egress_rotate.stamp"
+
+# Файл-метка «квота аккаунта кончилась»: её читает боксовый таймер смены
+# идентичности (``infra/neural/neural-identity-reset.sh``). Сам движок serve не
+# выгружает: он в этот момент стоит в единственном слоте воркера, и выгрузка
+# внутри волны публикации означала бы ожидание рестарта в этом слоте. Возраст
+# метки = сколько времени квота мертва; первый отказ её ставит, успех снимает.
+_QUOTA_STAMP = "setka_engine_quota.stamp"
 
 
 def _port_of(base_url: str) -> int:
@@ -500,8 +526,15 @@ def _reason_from_error(error: str) -> str:
     узнаём по тексту (``network_gate``) — у него нет HTTP-кода, и от смены
     модели он не проходит; отказ без кода (``provider.no-route``) —
     ``model_error``.
+
+    Исчерпанная квота аккаунта (``quota_exhausted``) проверяется **до** кода:
+    она приходит тем же ``http_429``, что и per-IP лимит, и различить их можно
+    только по тексту. Различить обязательно — реакция разная: per-IP лимит
+    снимается сменой выхода (замер 20.10), квота аккаунта — нет (замер 24.10).
     """
     low = (error or "").lower()
+    if any(marker in low for marker in _QUOTA_MARKERS):
+        return "quota_exhausted"
     if any(marker in low for marker in _NETWORK_GATE_MARKERS):
         return "network_gate"
     head = error.split(":", 1)[0]
@@ -616,6 +649,37 @@ def _rotate_egress(detail: str = "") -> bool:
     return ok
 
 
+def _quota_stamp_path() -> str:
+    """Путь метки «квота аккаунта кончилась» (общий с боксовым таймером)."""
+    return os.path.join(tempfile.gettempdir(), _QUOTA_STAMP)
+
+
+def _mark_quota() -> None:
+    """Поставить метку квоты, не обновляя её возраст при повторных отказах.
+
+    Возраст метки — единственный сигнал «сколько квота уже мертва», и обновлять
+    его на каждом отказе нельзя: тогда таймер сброса идентичности никогда не
+    увидит, что лимит держится долго (класс отказа без симптома — всё зелёное,
+    а пересказа нет).
+    """
+    path = _quota_stamp_path()
+    if os.path.exists(path):
+        return
+    try:
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(str(int(time.time())))
+    except OSError:
+        logger.debug("opencode-engine: метку квоты не поставить", exc_info=True)
+
+
+def _clear_quota_mark() -> None:
+    """Снять метку квоты: движок ответил, значит квота снова есть."""
+    try:
+        os.unlink(_quota_stamp_path())
+    except OSError:
+        pass
+
+
 def _call_model(
     model_id: str, prompt: str, label: str, timeout: Optional[float] = None
 ) -> Dict[str, Any]:
@@ -628,11 +692,20 @@ def _call_model(
     # Сессия сразу с моделью и запретами инструментов: у v2 модель — свойство
     # сессии, а не сообщения (у prompt поля model нет; строка/объект в теле
     # промпта молча игнорируются — пробы 17.10).
+    #
+    # ``variant`` — уровень рассуждений (low/high/max у deepseek и glm). До
+    # 24.10 он не передавался вовсе, и «DeepSeek high» существовал только в
+    # решении владельца, а не в запросе: движок работал на дефолте платформы.
+    model_ref: Dict[str, Any] = {"id": model_id, "providerID": "opencode"}
+    variant = get_model_variant(model_id)
+    if variant:
+        model_ref["variant"] = variant
+
     status, session = _post_json(
         "/api/session",
         {
             "title": f"classify:{label}",
-            "model": {"id": model_id, "providerID": "opencode"},
+            "model": model_ref,
             "permissions": CLASSIFY_SESSION_PERMISSIONS,
         },
         min(timeout, 30.0),
@@ -776,6 +849,7 @@ def chat(
 
     reasons: List[str] = []
     gate_detail = ""
+    quota_hit = False
     per_model_cap = get_model_timeout()
     # Две попытки: первая — как есть; если вся цепочка легла на гейт free-тира
     # по IP или на лимит (429) — меняем выход ВПН (если бокс это разрешил) и
@@ -802,6 +876,7 @@ def chat(
                 else _call_model(model_id, prompt, label)
             )
             if result.get("ok"):
+                _clear_quota_mark()
                 return result
             reason = str(result.get("reason") or "?")
             detail = str(result.get("detail") or "")[:120]
@@ -811,6 +886,16 @@ def chat(
             logger.warning("opencode-engine: модель %s отказала (%s %s)", model_id, reason, detail)
             if reason in _FATAL_REASONS:
                 # Отказ контура (нет адреса serve) — следующая модель не поможет.
+                break
+            if reason == "quota_exhausted":
+                # Квота free-тира считается по АККАУНТУ, а не по модели: если
+                # она кончилась, следующая модель каталога упрётся в ту же
+                # стену. Перебор цепочки здесь — не фолбэк, а три лишних
+                # запроса в единственном слоте воркера (замер 24.10: 664 отказа
+                # за двое суток, из них большая часть — перебор при мёртвой
+                # квоте). Модели перебираем только когда причина другая.
+                quota_hit = True
+                _mark_quota()
                 break
         if deadline is not None and deadline - time.monotonic() <= 5.0:
             # На поворот ВПН и второй проход бюджета уже нет.
@@ -823,4 +908,8 @@ def chat(
         "ok": False,
         "reason": "engine_all_failed",
         "detail": "; ".join(reasons),
+        # Признак класса отказа для предохранителя: квота аккаунта лечится не
+        # повтором через 5 минут, а сбросом идентичности или ожиданием, поэтому
+        # у неё отдельный, длинный предохранитель (engine_guard).
+        "quota": quota_hit,
     }

@@ -25,11 +25,17 @@ Env vars:
   ENGINE_BREAKER_ENABLED=1       # предохранитель движка: 0 — выключить
   ENGINE_BREAKER_FAILS=3         # сколько отказов по лимиту/сети подряд
   ENGINE_BREAKER_COOLDOWN=300    # на сколько секунд он закрывает вызовы, сек
+  ENGINE_BREAKER_QUOTA_COOLDOWN  # отдельный, длинный предохранитель для класса
+                                 # «квота аккаунта кончилась», сек; дефолт 1800
+  OPENCODE_MODEL_VARIANTS        # карта «модель=уровень рассуждений», напр.
+                                 # «deepseek-v4.1-flash-free=high,
+                                 # glm-5.3-flash-free=high»; пусто = дефолт
+                                 # (deepseek и glm — high, см. ниже)
   OPENCODE_MODEL_CHAIN           # CSV цепочка фолбэков: первая живая модель
                                  # отвечает. Дефолт — замер 20.10 со своего
                                  # бокса: deepseek-v4.1-flash-free первый
                                  # (решение владельца), дальше glm-5.3 /
-                                 # mimo-v2.6 / longcat-2.5. Заведомо мёртвой
+                                 # mimo-v2.6 / flint-40b. Заведомо мёртвой
                                  # головы в цепочке быть не должно — она
                                  # съедает таймаут на каждом чанке.
   OPENCODE_SPILL_GLOB            # маска temp-мусора opencode; дефолт .bcdf*.so
@@ -44,18 +50,32 @@ Env vars:
 from __future__ import annotations
 
 import os
-from typing import List
+from typing import Dict, List
 
 # Замер 20.10 (движок v2.0.32, свой бокс): список моделей платформы сменился —
 # `space-bunny-free` из каталога ушёл (голова цепочки съедала бы таймаут),
 # `deepseek-v4.1-flash-free` отвечает за ~2,7 с и стоит первым по решению
 # владельца. Остальные — проверенные 20.10 фолбэки того же каталога.
+#
+# 24.10: `longcat-2.5-preview-free` из цепочки убран — в каталоге `/api/model`
+# его нет (там 9 моделей), и мёртвая голова съедала таймаут на каждом чанке.
+# Вместо него — `flint-40b-free` из того же живого каталога.
 DEFAULT_MODEL_CHAIN = [
     "deepseek-v4.1-flash-free",
     "glm-5.3-flash-free",
     "mimo-v2.6-flash-free",
-    "longcat-2.5-preview-free",
+    "flint-40b-free",
 ]
+
+# Уровень рассуждений по модели (решение владельца 24.10). У DeepSeek и GLM —
+# `high`, а НЕ `max`: на максимуме обе галлюцинируют, а high — предыдущий к
+# максимуму уровень и лучший баланс. Остальным моделям свой максимум владелец
+# ставит поштучно через `OPENCODE_MODEL_VARIANTS`, поэтому в дефолте их нет:
+# «максимальный у всех» — неверное правило, у разных моделей оптимум разный.
+DEFAULT_MODEL_VARIANTS = {
+    "deepseek-v4.1-flash-free": "high",
+    "glm-5.3-flash-free": "high",
+}
 
 DEFAULT_BASE_URL = "http://127.0.0.1:4096"
 
@@ -180,6 +200,34 @@ def get_model_chain() -> List[str]:
     return chain or list(DEFAULT_MODEL_CHAIN)
 
 
+def get_model_variants() -> Dict[str, str]:
+    """Карта «id модели → уровень рассуждений» (``variant`` в ссылке модели).
+
+    Env ``OPENCODE_MODEL_VARIANTS="id=high,id2=max"``; значение ``-``/``off``
+    снимает вариант с модели (платформа возьмёт свой дефолт). Пусто — дефолт
+    файла: deepseek и glm на ``high``.
+    """
+    raw = (os.getenv("OPENCODE_MODEL_VARIANTS") or "").strip()
+    if not raw:
+        return dict(DEFAULT_MODEL_VARIANTS)
+    out: Dict[str, str] = {}
+    for item in raw.replace(";", ",").split(","):
+        item = item.strip()
+        if not item or "=" not in item:
+            continue
+        model_id, variant = item.split("=", 1)
+        model_id, variant = model_id.strip(), variant.strip().lower()
+        if not model_id or variant in ("", "-", "off", "none"):
+            continue
+        out[model_id] = variant
+    return out
+
+
+def get_model_variant(model_id: str) -> str:
+    """Уровень рассуждений для модели; пусто — вариант не передаём."""
+    return get_model_variants().get((model_id or "").strip(), "")
+
+
 def get_serve_rss_kill_mb() -> int:
     """Потолок RSS ребёнка serve в МБ (OOM-аудит 14.10)."""
     try:
@@ -226,6 +274,44 @@ def get_egress_rotate_cooldown() -> float:
         return max(0.0, float(os.getenv("NEURAL_EGRESS_ROTATE_COOLDOWN", "600")))
     except ValueError:
         return 600.0
+
+
+def get_identity_reset_cmd() -> List[str]:
+    """Команда смены идентичности анонимного аккаунта; пусто — выключено.
+
+    Зачем отдельный механизм, если есть поворот выхода. Замер 24.10: пять
+    поворотов ВПН подряд (DE, PL, NL, US, PL — разные адреса) не сняли
+    ``Free usage limit reached``. Квота free-тира считается по аккаунту, а
+    анонимный аккаунт опознаётся по локальному состоянию движка, а не по IP:
+    смена выхода не создаёт новый аккаунт. Создаёт его сброс состояния —
+    и только он (решение владельца 24.10, с явным пониманием, что это обход
+    лимита вендора).
+
+    Процедура целиком живёт на боксе (``infra/neural/neural-identity-reset.sh``):
+    выгрузить движок со всеми процессами → сменить сервер и страну ВПН →
+    сбросить идентичность → поднять → проверить free-тир ОДНИМ коротким
+    сообщением. Движок только просит, политика — настройка бокса.
+    """
+    raw = (os.getenv("NEURAL_IDENTITY_RESET_CMD") or "").strip()
+    if not raw:
+        return []
+    import shlex
+
+    return shlex.split(raw)
+
+
+def get_identity_reset_cooldown() -> float:
+    """Пауза между сбросами идентичности, сек (дефолт 6 часов).
+
+    Дороже поворота выхода: движок на это время выгружается целиком, а он же
+    веб-кабинет владельца. Шесть часов — чтобы неудачный сброс не превратился
+    в цикл «подняли-выгрузили» и чтобы владелец, работающий в кабинете, не
+    терял сессию каждые десять минут.
+    """
+    try:
+        return max(0.0, float(os.getenv("NEURAL_IDENTITY_RESET_COOLDOWN", "21600")))
+    except ValueError:
+        return 21600.0
 
 
 def get_spill_max_age_sec() -> float:

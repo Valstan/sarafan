@@ -642,6 +642,40 @@ def test_default_chain_excludes_geo_dead_models():
     assert DEFAULT_MODEL_CHAIN[0] == "deepseek-v4.1-flash-free"
 
 
+def test_default_chain_priority_is_deepseek_then_glm():
+    """Решение владельца 24.10: DeepSeek первый, GLM второй, прочие — в крайнем случае."""
+    from config.opencode import DEFAULT_MODEL_CHAIN
+
+    assert DEFAULT_MODEL_CHAIN[:2] == ["deepseek-v4.1-flash-free", "glm-5.3-flash-free"]
+    # longcat ушёл из каталога платформы (замер 24.10, `/api/model`): мёртвая
+    # голова стоила таймаута на каждом чанке.
+    assert "longcat-2.5-preview-free" not in DEFAULT_MODEL_CHAIN
+
+
+def test_model_variants_default_high_for_deepseek_and_glm(monkeypatch):
+    """У DeepSeek и GLM — high, а не max: на максимуме обе галлюцинируют."""
+    from config import opencode as oc
+
+    monkeypatch.delenv("OPENCODE_MODEL_VARIANTS", raising=False)
+    assert oc.get_model_variant("deepseek-v4.1-flash-free") == "high"
+    assert oc.get_model_variant("glm-5.3-flash-free") == "high"
+    # Модели вне карты получают дефолт платформы, а не выдуманный уровень.
+    assert oc.get_model_variant("mimo-v2.6-flash-free") == ""
+
+
+def test_model_variants_env_override_and_off(monkeypatch):
+    from config import opencode as oc
+
+    monkeypatch.setenv(
+        "OPENCODE_MODEL_VARIANTS",
+        "deepseek-v4.1-flash-free=max, flint-40b-free=xhigh, mimo-v2.6-flash-free=off",
+    )
+    assert oc.get_model_variant("deepseek-v4.1-flash-free") == "max"
+    assert oc.get_model_variant("flint-40b-free") == "xhigh"
+    assert oc.get_model_variant("mimo-v2.6-flash-free") == ""
+    assert oc.get_model_variant("glm-5.3-flash-free") == ""
+
+
 def test_serve_limits_from_env(monkeypatch):
     from config import opencode as oc
 
@@ -1011,3 +1045,94 @@ def test_rotate_egress_disabled_without_command(monkeypatch):
 
     monkeypatch.delenv("NEURAL_EGRESS_ROTATE_CMD", raising=False)
     assert engine._rotate_egress("gate") is False
+
+
+# --- 24.10: уровень рассуждений, класс «квота аккаунта», экономия запросов ---
+
+QUOTA_ERROR = (
+    "http_429: Free usage limit reached. Subscribe to OpenCode Go to keep going:"
+    " https://opencode.ai/go"
+)
+
+
+def test_call_model_passes_reasoning_variant(monkeypatch, engine_on):
+    """``variant`` едет в ссылке модели: до 24.10 он не передавался вовсе."""
+    monkeypatch.setenv("OPENCODE_MODEL_CHAIN", "deepseek-v4.1-flash-free")
+    transport = _use_transport(
+        monkeypatch,
+        [
+            _session_route("ses_v"),
+            _prompt_route(),
+            _wait_route(),
+            _message_route(_idle_msg(), _assistant_msg('{"verdicts": []}')),
+            _delete_route("ses_v"),
+        ],
+    )
+
+    result = chat(user="посты", label="variant")
+
+    assert result["ok"] is True
+    assert transport.calls[0]["body"]["model"] == {
+        "id": "deepseek-v4.1-flash-free",
+        "providerID": "opencode",
+        "variant": "high",
+    }
+
+
+def test_reason_from_error_detects_account_quota():
+    """Квота аккаунта и per-IP лимит приходят одним 429 — различаем по тексту."""
+    from modules.opencode_engine import _reason_from_error
+
+    assert _reason_from_error(QUOTA_ERROR) == "quota_exhausted"
+    # per-IP лимит остаётся собой: у него другая реакция (смена выхода).
+    assert _reason_from_error("http_429: Rate limit exceeded") == "http_429"
+
+
+def test_chat_stops_chain_on_quota(monkeypatch, engine_on):
+    """Квота аккаунта общая для всех моделей: цепочку не перебираем."""
+    from modules import opencode_engine as engine
+
+    monkeypatch.setenv(
+        "OPENCODE_MODEL_CHAIN",
+        "deepseek-v4.1-flash-free,glm-5.3-flash-free,mimo-v2.6-flash-free",
+    )
+    calls = {"models": 0, "rotate": 0, "mark": 0}
+
+    def fake_call(model_id, prompt, label):
+        calls["models"] += 1
+        return {"ok": False, "reason": "quota_exhausted", "detail": QUOTA_ERROR}
+
+    monkeypatch.setattr(engine, "_call_model", fake_call)
+    monkeypatch.setattr(
+        engine,
+        "_rotate_egress",
+        lambda detail="": calls.__setitem__("rotate", calls["rotate"] + 1) or True,
+    )
+    monkeypatch.setattr(engine, "_mark_quota", lambda: calls.__setitem__("mark", calls["mark"] + 1))
+
+    result = engine.chat(user="u")
+
+    assert result["ok"] is False
+    assert result["quota"] is True
+    # Одна модель на попытку вместо трёх: квота не про модель, и каждый лишний
+    # перебор — сожжённый запрос в единственном слоте воркера.
+    assert calls["models"] == 2, "цепочка перебиралась при мёртвой квоте"
+    assert calls["rotate"] == 1, "поворот выхода для этого класса владелец оставил"
+    assert calls["mark"] == 2, "метку квоты ставит каждая неудачная попытка"
+
+
+def test_quota_mark_keeps_first_age_and_clears(monkeypatch, tmp_path):
+    """Возраст метки = сколько квота мертва; повторный отказ его не обновляет."""
+    from modules import opencode_engine as engine
+
+    monkeypatch.setattr(engine.tempfile, "gettempdir", lambda: str(tmp_path))
+    engine._mark_quota()
+    path = tmp_path / engine._QUOTA_STAMP
+    assert path.exists()
+    first = path.read_text(encoding="utf-8")
+
+    engine._mark_quota()
+    assert path.read_text(encoding="utf-8") == first, "возраст метки перезаписан"
+
+    engine._clear_quota_mark()
+    assert not path.exists()
