@@ -161,3 +161,51 @@ def test_chat_success_resets_counter(engine, monkeypatch):
     _fail("http_429", 2)
     headless.chat(user="пост")
     assert engine_guard.snapshot()["failures_in_row"] == 0
+
+
+def test_quota_opens_breaker_immediately_with_long_fuse(clock, monkeypatch):
+    """Квота аккаунта — свой класс: один отказ открывает, пауза длинная.
+
+    Замер 24.10: квота держится сутками и сменой выхода не снимается. Порог в
+    три отказа здесь вреден — второй и третий отказ стоят запросов, а сообщают
+    то же самое.
+    """
+    monkeypatch.setenv("ENGINE_BREAKER_COOLDOWN", "300")
+    monkeypatch.setenv("ENGINE_BREAKER_QUOTA_COOLDOWN", "1800")
+
+    engine_guard.note_result(False, "quota_exhausted")
+    assert engine_guard.allow() is False, "квота обязана закрывать вызовы сразу"
+
+    snap = engine_guard.snapshot()
+    assert snap["last_reason"] == "quota_exhausted"
+    assert snap["quota_cooldown"] == 1800.0
+
+    # Обычная пятиминутная пауза квоту не отпускает.
+    clock.advance(600)
+    assert engine_guard.allow() is False
+
+    clock.advance(1300)
+    assert engine_guard.allow() is True
+
+
+def test_headless_passes_quota_flag_to_breaker(engine, clock, monkeypatch):
+    """Флаг ``quota`` из движка становится отдельной причиной предохранителя."""
+    monkeypatch.setenv("ENGINE_BREAKER_QUOTA_COOLDOWN", "1800")
+    monkeypatch.setattr(
+        headless,
+        "engine_enabled",
+        lambda: True,
+    )
+    import modules.opencode_engine as opencode_engine
+
+    monkeypatch.setattr(
+        opencode_engine,
+        "chat",
+        lambda **kw: {"ok": False, "reason": "engine_all_failed", "quota": True},
+    )
+
+    result = headless.chat(user="u")
+
+    assert result["ok"] is False
+    assert engine_guard.allow() is False
+    assert engine_guard.snapshot()["last_reason"] == "quota_exhausted"

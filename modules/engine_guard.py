@@ -29,6 +29,10 @@ Env:
   ENGINE_BREAKER_ENABLED=1     # 0 — выключить (аварийный откат без деплоя)
   ENGINE_BREAKER_FAILS=3       # сколько отказов подряд открывают предохранитель
   ENGINE_BREAKER_COOLDOWN=300  # на сколько секунд он открывается
+  ENGINE_BREAKER_QUOTA_COOLDOWN=1800
+                               # отдельный, длинный предохранитель для класса
+                               # «квота аккаунта кончилась»: он открывается
+                               # сразу (порог не нужен) и держится долго
 """
 
 from __future__ import annotations
@@ -56,8 +60,16 @@ _THROTTLE_REASONS = frozenset(
         "timeout",
         "engine_all_failed",
         "engine_disabled",
+        "quota_exhausted",
     }
 )
+
+# Квота free-тира кончилась (``Free usage limit reached``) — это не «лимит на
+# пять минут», а состояние аккаунта: замер 24.10 показал, что оно держится
+# сутками и сменой выхода ВПН не снимается. Поэтому у него свой предохранитель,
+# который открывается СРАЗУ (порог не нужен: квота общая для всех моделей, и
+# второй отказ ничего нового не сообщает) и держится долго.
+_QUOTA_REASON = "quota_exhausted"
 
 _lock = threading.Lock()
 _state: Dict[str, Any] = {
@@ -86,6 +98,22 @@ def _cooldown() -> float:
         return max(0.0, float(os.getenv("ENGINE_BREAKER_COOLDOWN", "300")))
     except ValueError:
         return 300.0
+
+
+def _quota_cooldown() -> float:
+    """Сколько держать вызовы закрытыми при исчерпанной квоте аккаунта, сек.
+
+    Дефолт 30 минут. Квота free-тира (по отчётам сообщества — около 200 запросов
+    в сутки на аккаунт) сама восстанавливается медленно, поэтому частый повтор —
+    это не «попробовать ещё раз», а сожжённые запросы в единственном слоте
+    воркера: замер 24.10 — 664 отказа за двое суток при мёртвой квоте. Тридцать
+    минут — компромисс: волна не ждёт впустую, а если квота вернулась, пересказ
+    возвращается сам.
+    """
+    try:
+        return max(0.0, float(os.getenv("ENGINE_BREAKER_QUOTA_COOLDOWN", "1800")))
+    except ValueError:
+        return 1800.0
 
 
 def _is_throttle(reason: str) -> bool:
@@ -128,17 +156,30 @@ def note_result(ok: bool, reason: str = "") -> None:
         if not _is_throttle(reason):
             return
 
-        _state["failures"] += 1
         _state["last_reason"] = reason
-        if _state["failures"] < _threshold():
-            return
+        quota = reason == _QUOTA_REASON
+        if not quota:
+            _state["failures"] += 1
+            if _state["failures"] < _threshold():
+                return
 
-        cooldown = _cooldown()
+        # У квоты свой, длинный предохранитель и порог не нужен: она общая для
+        # всего каталога моделей, поэтому второй отказ ничего нового не
+        # сообщает, а стоит ещё одного запроса в слоте воркера.
+        cooldown = _quota_cooldown() if quota else _cooldown()
         if cooldown <= 0:
             return
         _state["open_until"] = now + cooldown
         _state["opens"] += 1
         _state["failures"] = 0
+        if quota:
+            logger.warning(
+                "engine breaker: квота free-тира кончилась (%s) — на %.0f с вызовы"
+                " пропускаются; снимается сбросом идентичности или ожиданием",
+                reason,
+                cooldown,
+            )
+            return
         logger.warning(
             "engine breaker: движок лимитит (%s) — на %.0f с вызовы пропускаются,"
             " волны идут по обычным фильтрам",
@@ -162,6 +203,7 @@ def snapshot() -> Dict[str, Any]:
             "last_reason": _state["last_reason"],
             "threshold": _threshold(),
             "cooldown": _cooldown(),
+            "quota_cooldown": _quota_cooldown(),
         }
 
 

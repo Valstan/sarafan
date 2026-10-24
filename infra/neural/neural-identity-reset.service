@@ -1,0 +1,15 @@
+[Unit]
+Description=Neural identity reset - new anonymous account after a dead free-tier quota
+After=network-online.target neural-vpn.service privoxy.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# --apply обязателен: без него скрипт только показывает, что сделал бы.
+# Выгрузка движка рвёт сессию веб-кабинета владельца, поэтому решение
+# «выполнять» принимает установка (unit), а не случайный ручной запуск.
+ExecStart=/usr/local/lib/neural/neural-identity-reset.sh --apply
+Nice=10
+# Сброс дольше, чем обычная проверка: остановка движка, поворот ВПН, подъём и
+# одна проба модели. Потолок — чтобы зависший сброс не блокировал следующий.
+TimeoutStartSec=300

@@ -1,0 +1,11 @@
+[Unit]
+Description=Neural identity reset check every 15 minutes
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=15min
+AccuracySec=1min
+Unit=neural-identity-reset.service
+
+[Install]
+WantedBy=timers.target
