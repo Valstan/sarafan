@@ -45,7 +45,7 @@
 
 ## ⏳ В процессе
 
-- **P210** [🔴 Квота free-тира считается по аккаунту, а не по IP: движку нужна смена идентичности](pending/P210-kvota-free-tira-po-akkauntu-smena-identichnosti.md) · `⏱ 2026-10-24 · snooze 0 · fresh · с 23.10 664 отказа «Free usage limit reached» (Rate limit exceeded — 0), пять поворотов ВПН не помогли → квота по аккаунту; в коде: variant high, longcat убран, класс quota_exhausted без перебора моделей, длинный предохранитель, сценарий сброса идентичности; не выкачено (P196)`
+- **P210** [🔴 Квота free-тира: блок следует за сетью бокса, локальной идентичности нет](pending/P210-kvota-free-tira-po-akkauntu-smena-identichnosti.md) · `⏱ 2026-10-25 · snooze 0 · fresh · движок стоит с 22.10 22:59, пять поворотов ВПН не помогли; признака аккаунта локально нет (account* — 0 строк) → сброс невыполним; variant high подтверждён живьём; за владельцем: Go / другой выход / ждать`
 
 - **P205** [⏳ Нейро-движок на своём боксе: движок и ВПН-плечо живут 20.10](pending/P205-neuro-dvizhok-na-svoem-bokse-vpn-plecho-zhivet.md) · `⏱ 2026-10-20 · snooze 0 · fresh · движок и ВПН-плечо живут, egress privoxy→socks, пересказ перед публикацией (ADR-0010, откат POST_REWRITE_ENABLED=0); класс отказа сменился 23.10 — квота аккаунта, см. P210`
 
