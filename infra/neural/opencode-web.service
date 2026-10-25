@@ -20,6 +20,11 @@ Environment=NO_PROXY=127.0.0.1,localhost
 ExecStart=/usr/local/bin/opencode serve --hostname 127.0.0.1 --port 49374
 Restart=on-failure
 RestartSec=5
+# Штатная остановка (`systemctl stop`) приходит процессу как SIGTERM, и бинарь
+# opencode выходит с кодом 130. Без этой строки каждый stop оставлял юнит в
+# `failed` (замер 25.10: проба квоты гасит движок на каждом шаге и после себя),
+# то есть «остановили по своей команде» выглядело как авария.
+SuccessExitStatus=130
 # Vestigial on boxes without memory accounting (see README.md): kept as intent,
 # the enforced guard is opencode-rss-guard.timer.
 MemoryHigh=384M

@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from typing import Any, Dict, List
@@ -60,6 +61,10 @@ class FakeSteps:
         self.calls.append("start")
         return (self.start_ok, "" if self.start_ok else "юнит не поднялся")
 
+    def engine_reset(self):
+        self.calls.append("reset")
+        return (True, "")
+
     def probe(self):
         value = self.probes[self._probe_i % len(self.probes)]
         self._probe_i += 1
@@ -70,6 +75,7 @@ class FakeSteps:
         return probe.Steps(
             engine_stop=self.engine_stop,
             engine_start=self.engine_start,
+            engine_reset=self.engine_reset,
             rotate=self.rotate,
             exit_addr=self.exit_addr,
             probe=self.probe,
@@ -109,6 +115,90 @@ def test_pick_password_prefers_server_name():
     assert probe.pick_password({}) == ""
 
 
+def test_wanted_env_key_is_narrow_allowlist():
+    assert probe.wanted_env_key("CLASSIFIER_ENGINE")
+    assert probe.wanted_env_key("OPENCODE_MODEL_CHAIN")
+    assert probe.wanted_env_key("NEURAL_EGRESS_ROTATE_COOLDOWN")
+    assert probe.wanted_env_key("ENGINE_BREAKER_QUOTA_COOLDOWN")
+    # Секреты и прочий env приложения в пробу не едут.
+    assert not probe.wanted_env_key("DATABASE_URL")
+    assert not probe.wanted_env_key("VK_TOKEN_VALSTAN")
+    assert not probe.wanted_env_key("CLASSIFIER_INGEST_KEY")
+
+
+def test_load_app_env_sets_missing_and_keeps_existing(tmp_path, monkeypatch):
+    env = tmp_path / "setka.env"
+    env.write_text(
+        "CLASSIFIER_ENGINE=opencode\n"
+        'OPENCODE_MODEL_CHAIN="deepseek-v4.1-flash-free,glm-5.3-flash-free"\n'
+        "OPENCODE_MODEL_VARIANTS=\n"
+        "DATABASE_URL=postgresql://secret\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("OPENCODE_MODEL_CHAIN", "mine")
+    monkeypatch.delenv("OPENCODE_MODEL_VARIANTS", raising=False)
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    monkeypatch.delenv("CLASSIFIER_ENGINE", raising=False)
+
+    found = probe.load_app_env(str(env))
+
+    assert found["CLASSIFIER_ENGINE"] == "opencode"
+    assert os.environ["CLASSIFIER_ENGINE"] == "opencode"
+    # Заданное извне не перетирается.
+    assert os.environ["OPENCODE_MODEL_CHAIN"] == "mine"
+    # Пустое значение не подставляется: иначе перебило бы дефолт.
+    assert "OPENCODE_MODEL_VARIANTS" not in os.environ
+    # Чужой ключ не просочился ни в окружение, ни в отчёт.
+    assert "DATABASE_URL" not in os.environ
+    assert "DATABASE_URL" not in found
+
+
+def test_load_app_env_missing_file_is_silent():
+    assert probe.load_app_env("C:/definitely/not/here.env") == {}
+
+
+def test_prepare_env_defaults_engine_to_opencode(tmp_path, monkeypatch):
+    missing = str(tmp_path / "missing.env")
+    monkeypatch.setattr(probe, "APP_ENV", missing)
+    monkeypatch.setattr(probe, "ANON_ENV", missing)
+    monkeypatch.delenv("CLASSIFIER_ENGINE", raising=False)
+    monkeypatch.delenv("OPENCODE_BASE_URL", raising=False)
+    monkeypatch.setenv("NEURAL_EGRESS_ROTATE_CMD", "sudo -n rotate")
+
+    probe.prepare_env()
+
+    assert os.environ["CLASSIFIER_ENGINE"] == "opencode"
+    assert os.environ["OPENCODE_BASE_URL"] == probe.DEFAULT_BASE_URL
+    # Автоповорот выхода на время пробы выключен.
+    assert os.environ["NEURAL_EGRESS_ROTATE_CMD"] == ""
+    assert probe.engine_ready() is True
+
+
+def test_app_env_engine_key_reaches_the_engine(tmp_path, monkeypatch):
+    """Ровно тот отказ 25.10: без env движок выключен, проба мерит пустоту."""
+    env = tmp_path / "setka.env"
+    env.write_text("CLASSIFIER_ENGINE=opencode\n", encoding="utf-8")
+    monkeypatch.setattr(probe, "APP_ENV", str(env))
+    monkeypatch.setattr(probe, "ANON_ENV", str(tmp_path / "missing.env"))
+    monkeypatch.delenv("CLASSIFIER_ENGINE", raising=False)
+
+    probe.prepare_env()
+
+    assert probe.engine_ready() is True
+
+
+def test_prepare_env_keeps_explicit_engine(tmp_path, monkeypatch):
+    missing = str(tmp_path / "missing.env")
+    monkeypatch.setattr(probe, "APP_ENV", missing)
+    monkeypatch.setattr(probe, "ANON_ENV", missing)
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "deepseek")
+
+    probe.prepare_env()
+
+    assert os.environ["CLASSIFIER_ENGINE"] == "deepseek"
+    assert probe.engine_ready() is False
+
+
 def test_decide_classifies_vendor_failures():
     assert probe.decide({"ok": True, "reason": "ok"}) == "success"
     # отказы вендора: пробуем другой выход
@@ -131,8 +221,9 @@ def test_first_hop_success_stops_engine():
     assert len(result["hops"]) == 1
     # порядок шага: поворот -> адрес -> стоп -> старт -> проба
     assert fake.calls[:5] == ["rotate", "exit:1.1.1.1|DE", "stop", "start", "probe"]
-    # движок погашен в конце (владелец просил не держать его включённым)
-    assert fake.calls[-1] == "stop"
+    # движок погашен в конце (владелец просил не держать его включённым),
+    # и с него снято состояние failed после штатной остановки
+    assert fake.calls[-2:] == ["stop", "reset"]
     assert result["engine_left_running"] is False
 
 
