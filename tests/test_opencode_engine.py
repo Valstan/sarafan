@@ -652,13 +652,13 @@ def test_default_chain_priority_is_deepseek_then_glm():
     assert "longcat-2.5-preview-free" not in DEFAULT_MODEL_CHAIN
 
 
-def test_model_variants_default_high_for_deepseek_and_glm(monkeypatch):
-    """У DeepSeek и GLM — high, а не max: на максимуме обе галлюцинируют."""
+def test_model_variants_default_max_for_deepseek_and_glm(monkeypatch):
+    """Решение владельца 25.10: у обеих голов цепочки — максимальный уровень."""
     from config import opencode as oc
 
     monkeypatch.delenv("OPENCODE_MODEL_VARIANTS", raising=False)
-    assert oc.get_model_variant("deepseek-v4.1-flash-free") == "high"
-    assert oc.get_model_variant("glm-5.3-flash-free") == "high"
+    assert oc.get_model_variant("deepseek-v4.1-flash-free") == "max"
+    assert oc.get_model_variant("glm-5.3-flash-free") == "max"
     # Модели вне карты получают дефолт платформы, а не выдуманный уровень.
     assert oc.get_model_variant("mimo-v2.6-flash-free") == ""
 
@@ -1075,7 +1075,7 @@ def test_call_model_passes_reasoning_variant(monkeypatch, engine_on):
     assert transport.calls[0]["body"]["model"] == {
         "id": "deepseek-v4.1-flash-free",
         "providerID": "opencode",
-        "variant": "high",
+        "variant": "max",
     }
 
 

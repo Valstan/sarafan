@@ -17,6 +17,15 @@
 3. ``systemctl start opencode-web`` — свежий клиент;
 4. **один** короткий вызов модели через ``modules.opencode_engine.chat``.
 
+Окружение проба собирает сама: запуск идёт из sudo-шелла, а юнит ``setka``
+получает env из systemd, поэтому без чтения ``/etc/setka/setka.env`` шаг мерил
+не квоту, а собственную конфигурацию. Именно так и вышло 25.10: в шелле не было
+``CLASSIFIER_ENGINE=opencode``, ``chat`` вернул ``engine_disabled``, и проба
+отчиталась «движок выключен» вместо ответа вендора. Теперь ключи движка
+подтягиваются из env-файла приложения (узкий allowlist, значения не печатаются),
+а при его отсутствии движок включается по умолчанию — мерить нечего, если он
+заведомо выключен.
+
 Никакого таймера и автоповтора здесь нет и не появится: это диагностика
 развилки P210 («другой выход» / «подписка Go»), а не обход лимита вендора.
 Каждый шаг тратит один вызов модели, поэтому потолок шагов обязателен, а
@@ -60,6 +69,12 @@ if str(ROOT) not in sys.path:
 ENGINE_UNIT = "opencode-web"
 EGRESS_SCRIPT = "/etc/neural/egress.d/10-nextgenvpn.sh"
 ANON_ENV = "/etc/opencode-web/anon.env"
+APP_ENV = "/etc/setka/setka.env"
+# Ключи приложения, которые нужны пробе. Allowlist узкий и по имени, а не
+# «весь файл»: env-файл приложения содержит секреты, и тащить их в окружение
+# диагностического скрипта незачем.
+APP_ENV_NAMES = ("CLASSIFIER_ENGINE",)
+APP_ENV_PREFIXES = ("OPENCODE_", "NEURAL_", "ENGINE_BREAKER_")
 DEFAULT_BASE_URL = "http://127.0.0.1:49374"
 SOCKS = "127.0.0.1:10808"
 PROBE_PROMPT = "Ответь одним словом: работает?"
@@ -101,6 +116,32 @@ def pick_password(env_file_values: Dict[str, str]) -> str:
     )
 
 
+def wanted_env_key(key: str) -> bool:
+    """Нужен ли ключ приложения пробе (узкий allowlist, см. APP_ENV_*)."""
+    return key in APP_ENV_NAMES or key.startswith(APP_ENV_PREFIXES)
+
+
+def load_app_env(path: Optional[str] = None) -> Dict[str, str]:
+    """Подтянуть ключи движка из env-файла приложения, не перетирая заданные.
+
+    Возвращает то, что нашлось в файле (для отчёта), но **не печатает значения**:
+    среди ключей есть пароль serve. Пустое значение не подставляется — иначе
+    пустая строка в файле перебила бы дефолт.
+    """
+    try:
+        text = Path(path or APP_ENV).read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return {}
+    found: Dict[str, str] = {}
+    for key, value in parse_env_file(text).items():
+        if not wanted_env_key(key):
+            continue
+        found[key] = value
+        if value and not (os.getenv(key) or "").strip():
+            os.environ[key] = value
+    return found
+
+
 def decide(result: Dict[str, Any]) -> str:
     """Что делать после шага: success | rotate | stop."""
     if result.get("ok"):
@@ -121,7 +162,8 @@ def sh(cmd: List[str], timeout: float) -> Tuple[int, str, str]:
 
 
 def prepare_env() -> None:
-    """Дополнить окружение для клиента движка, не перетирая заданное извне."""
+    """Собрать окружение пробы: env приложения + адрес и пароль serve."""
+    load_app_env()
     if not (os.getenv("OPENCODE_BASE_URL") or "").strip():
         os.environ["OPENCODE_BASE_URL"] = DEFAULT_BASE_URL
     if not (os.getenv("OPENCODE_SERVER_PASSWORD") or "").strip():
@@ -132,12 +174,35 @@ def prepare_env() -> None:
         password = pick_password(parse_env_file(text))
         if password:
             os.environ["OPENCODE_SERVER_PASSWORD"] = password
+    # Проба мерит движок opencode. Если env не сказал иного — включаем его:
+    # иначе ``chat`` вернёт ``engine_disabled`` и шаг не измерит ничего.
+    if not (os.getenv("CLASSIFIER_ENGINE") or "").strip():
+        os.environ["CLASSIFIER_ENGINE"] = "opencode"
     # Выход на время пробы меняет только этот скрипт (см. докстринг).
     os.environ["NEURAL_EGRESS_ROTATE_CMD"] = ""
 
 
+def engine_ready() -> bool:
+    """Включён ли движок opencode с точки зрения классификатора."""
+    from config.opencode import engine_enabled
+
+    return bool(engine_enabled())
+
+
 def engine(action: str) -> Tuple[bool, str]:
     rc, out, err = sh(["systemctl", action, ENGINE_UNIT], timeout=60)
+    return rc == 0, (err or out)[:200]
+
+
+def reset_failed() -> Tuple[bool, str]:
+    """Снять с юнита состояние ``failed`` после штатной остановки.
+
+    Причина заведена в самом юните (``SuccessExitStatus=130``), но проба может
+    стартовать на боксе, где строка ещё не выкачена: тогда после нашего
+    ``stop`` юнит остаётся ``failed``, и это читается как авария движка.
+    ``reset-failed`` возвращает честное ``inactive``.
+    """
+    rc, out, err = sh(["systemctl", "reset-failed", ENGINE_UNIT], timeout=30)
     return rc == 0, (err or out)[:200]
 
 
@@ -197,6 +262,7 @@ class Steps:
 
     engine_stop: Optional[Callable[[], Tuple[bool, str]]] = None
     engine_start: Optional[Callable[[], Tuple[bool, str]]] = None
+    engine_reset: Optional[Callable[[], Tuple[bool, str]]] = None
     rotate: Optional[Callable[[], Tuple[bool, str]]] = None
     exit_addr: Optional[Callable[[], Optional[str]]] = None
     probe: Optional[Callable[[], Dict[str, Any]]] = None
@@ -206,6 +272,8 @@ class Steps:
             self.engine_stop = lambda: engine("stop")
         if self.engine_start is None:
             self.engine_start = lambda: engine("start")
+        if self.engine_reset is None:
+            self.engine_reset = reset_failed
         if self.rotate is None:
             self.rotate = rotate_egress
         if self.exit_addr is None:
@@ -290,6 +358,7 @@ def run_cycle(
         stop_reason = "hops_exhausted"
     if not leave_running:
         steps.engine_stop()
+        steps.engine_reset()
 
     return {
         "success": success,
@@ -373,6 +442,15 @@ def main(argv: Optional[List[str]] = None) -> int:
         return 3
 
     prepare_env()
+    if not engine_ready():
+        # Мерить нечего: шаг вернул бы engine_disabled, потратив поворот ВПН.
+        print(
+            "движок opencode выключен (CLASSIFIER_ENGINE != opencode) — "
+            "проба измерила бы свою конфигурацию, а не квоту",
+            file=sys.stderr,
+        )
+        release_lock()
+        return 2
     steps = Steps()
     if args.direct:
         steps.exit_addr = lambda: exit_address(True)
