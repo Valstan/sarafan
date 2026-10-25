@@ -199,6 +199,44 @@ def test_prepare_env_keeps_explicit_engine(tmp_path, monkeypatch):
     assert probe.engine_ready() is False
 
 
+def test_normalize_reason_maps_engine_aggregate():
+    """Агрегат движка не должен останавливать пробу на настоящей квоте."""
+    assert probe.normalize_reason({"ok": True, "reason": "ok"}) == "ok"
+    assert (
+        probe.normalize_reason(
+            {
+                "ok": False,
+                "reason": "engine_all_failed",
+                "detail": "deepseek-v4.1-flash-free:quota_exhausted",
+                "quota": True,
+            }
+        )
+        == "quota_exhausted"
+    )
+    # Флага нет — класс читается из detail (движок его не всегда ставит).
+    assert (
+        probe.normalize_reason(
+            {"ok": False, "reason": "engine_all_failed", "detail": "glm-5.3-flash-free:http_429"}
+        )
+        == "http_429"
+    )
+    assert (
+        probe.normalize_reason(
+            {"ok": False, "reason": "engine_all_failed", "detail": "x:network_gate"}
+        )
+        == "network_gate"
+    )
+    # Локальная причина внутри агрегата остаётся локальной: поворот не поможет.
+    assert (
+        probe.normalize_reason(
+            {"ok": False, "reason": "engine_all_failed", "detail": "mimo:network"}
+        )
+        == "engine_all_failed"
+    )
+    # Не агрегат — возвращается как есть.
+    assert probe.normalize_reason({"ok": False, "reason": "network"}) == "network"
+
+
 def test_decide_classifies_vendor_failures():
     assert probe.decide({"ok": True, "reason": "ok"}) == "success"
     # отказы вендора: пробуем другой выход

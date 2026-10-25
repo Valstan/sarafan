@@ -150,6 +150,29 @@ def decide(result: Dict[str, Any]) -> str:
     return "rotate" if reason in VENDOR_REASONS else "stop"
 
 
+def normalize_reason(result: Dict[str, Any]) -> str:
+    """Причина отказа в терминах пробы, а не в терминах движка.
+
+    Движок склеивает отказы моделей цепочки в ``engine_all_failed``, а класс
+    отказа кладёт в ``detail`` строкой ``<модель>:<причина>`` и в флаг
+    ``quota``. Пробе нужен именно класс: 25.10 она остановилась на первом шаге,
+    увидев агрегат при настоящей причине ``quota_exhausted``, и гипотеза
+    «холодный старт + свежий выход» осталась непроверенной.
+    """
+    if result.get("ok"):
+        return "ok"
+    reason = str(result.get("reason") or "?")
+    if reason != "engine_all_failed":
+        return reason
+    if result.get("quota"):
+        return "quota_exhausted"
+    detail = str(result.get("detail") or "")
+    for candidate in ("quota_exhausted", "http_429", "network_gate"):
+        if candidate in detail:
+            return candidate
+    return reason
+
+
 # --- шаги на боксе ----------------------------------------------------------
 
 
@@ -250,7 +273,7 @@ def probe_once() -> Dict[str, Any]:
     result = chat(user=PROBE_PROMPT, label="quota-probe", timeout=PROBE_TIMEOUT)
     return {
         "ok": bool(result.get("ok")),
-        "reason": str(result.get("reason") or ("ok" if result.get("ok") else "?")),
+        "reason": normalize_reason(result),
         "detail": str(result.get("detail") or "")[:160],
         "reply": str(result.get("content") or "")[:120],
     }
