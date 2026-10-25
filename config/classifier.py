@@ -178,11 +178,33 @@ def distill_enabled() -> bool:
 
 
 def get_headless_chunk_size() -> int:
-    """Постов в одном вызове модели (env ``CLASSIFIER_HEADLESS_CHUNK``). Границы 1..40."""
+    """Постов в одном вызове модели (env ``CLASSIFIER_HEADLESS_CHUNK``). Границы 1..40.
+
+    Дефолт 20 с 25.10 (было 10): замер дал ~75 чанков на прогон из 200 постов
+    (``chunk_posts`` режет внутри региона), то есть ~600 вызовов в сутки — это
+    больше квоты free-тира целиком. См. ``headless.DEFAULT_CHUNK_SIZE``.
+    """
     try:
-        return max(1, min(40, int(os.getenv("CLASSIFIER_HEADLESS_CHUNK", "10"))))
+        return max(1, min(40, int(os.getenv("CLASSIFIER_HEADLESS_CHUNK", "20"))))
     except ValueError:
-        return 10
+        return 20
+
+
+def get_prepublish_min_candidates() -> int:
+    """Порог, ниже которого prepublish НЕ зовёт модель (env ``..._MIN_CANDIDATES``).
+
+    Замер 25.10: из 1319 вызовов гейта за сутки **946 приходились на один**
+    кандидат и 735 на два. Постулаты в промпте одинаковы для любой пачки, то
+    есть такой вызов стоит почти столько же, сколько пачка из десяти, — а в
+    выпуск всё равно попадает не больше ``MAX_POSTS_PER_BULLETIN`` (3) постов.
+    Ниже порога волна идёт по детерминированным фильтрам: это та же политика
+    fail-open, что и при отказе движка, только выбранная заранее, а не после
+    таймаута. Границы 1..40; ``1`` возвращает прежнее поведение.
+    """
+    try:
+        return max(1, min(40, int(os.getenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "3"))))
+    except ValueError:
+        return 3
 
 
 def get_metrics_fetch_workers() -> int:

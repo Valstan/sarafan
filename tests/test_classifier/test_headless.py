@@ -311,3 +311,92 @@ def test_system_prompt_states_what_urgent_means_and_what_it_is_not():
     assert "отключения" in TASK_PROMPT
     assert "НЕ считаются" in TASK_PROMPT
     assert "importance" in TASK_PROMPT
+
+
+# --- размер пачки и деление при обрыве JSON (25.10) ------------------------- #
+
+
+def _many(n: int, region: str = "mi"):
+    return [
+        {"lip": f"{region}_{i}", "region_code": region, "text": f"пост {i}", "theme": "novost"}
+        for i in range(n)
+    ]
+
+
+def _posts_in(user_prompt: str):
+    """lip'ы, которые реально уехали в промпт (по строкам ``lip:``)."""
+    return [
+        line.split("lip: ", 1)[1].strip()
+        for line in user_prompt.splitlines()
+        if line.startswith("lip: ")
+    ]
+
+
+def test_chunk_default_is_twenty(monkeypatch):
+    """Дефолт 20, а не 10: 75 чанков на прогон — это больше суточной квоты."""
+    from config.classifier import get_headless_chunk_size
+
+    monkeypatch.delenv("CLASSIFIER_HEADLESS_CHUNK", raising=False)
+    assert get_headless_chunk_size() == 20
+    assert headless.DEFAULT_CHUNK_SIZE == 20
+
+
+def test_unparseable_chunk_is_split_in_half_and_retried(monkeypatch):
+    """Обрыв JSON на большой пачке не теряет её целиком: делим пополам.
+
+    Вызов уже оплачен, и без деления вердикты пропадали бы по всем постам
+    пачки сразу — то есть цена большого чанка падала бы на редком отказе
+    целиком, а не частично.
+    """
+    posts = _many(20)
+    calls = []
+
+    def fake_chat(**kw):
+        calls.append(kw)
+        lips = _posts_in(kw["user"])
+        if len(lips) > 10:
+            return {"ok": False, "reason": "llm_unparseable", "usage": {"total_tokens": 5000}}
+        body = json.dumps({"verdicts": [_verdict(lip) for lip in lips]}, ensure_ascii=False)
+        return {"ok": True, "content": body, "usage": {"total_tokens": 100}}
+
+    monkeypatch.setattr(headless, "chat", fake_chat)
+    run = headless.classify_posts(posts, postulates="x", chunk_size=20)
+
+    assert len(calls) == 3, "одна большая пачка + две половины"
+    assert run["failures"] == []
+    assert sorted(v.lip for v in run["verdicts"]) == sorted(p["lip"] for p in posts)
+    # Оплаченный неудачный вызов остаётся в учёте расхода.
+    assert run["tokens"] == 5000 + 100 + 100
+
+
+def test_network_failure_is_not_split(monkeypatch):
+    """Квота и сеть делением не лечатся — лишние вызовы только жгут квоту."""
+    posts = _many(20)
+    calls = []
+
+    def fake_chat(**kw):
+        calls.append(kw)
+        return {"ok": False, "reason": "quota_exhausted", "usage": None}
+
+    monkeypatch.setattr(headless, "chat", fake_chat)
+    run = headless.classify_posts(posts, postulates="x", chunk_size=20)
+
+    assert len(calls) == 1
+    assert run["failures"] == ["quota_exhausted"]
+
+
+def test_split_retry_happens_only_once(monkeypatch):
+    """Половины тоже не разобрались — пишем два отказа, третьего деления нет."""
+    posts = _many(20)
+    calls = []
+
+    def fake_chat(**kw):
+        calls.append(kw)
+        return {"ok": False, "reason": "llm_unparseable", "usage": None}
+
+    monkeypatch.setattr(headless, "chat", fake_chat)
+    run = headless.classify_posts(posts, postulates="x", chunk_size=20)
+
+    assert len(calls) == 3
+    assert run["failures"] == ["llm_unparseable", "llm_unparseable"]
+    assert run["verdicts"] == []
