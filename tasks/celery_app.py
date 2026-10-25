@@ -2387,12 +2387,6 @@ app.conf.beat_schedule = {
         "args": ("reklama",),
         "options": {"expires": 3600},
     },
-    "postopus-reklama-14": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=5, hour=14),
-        "args": ("reklama",),
-        "options": {"expires": 3600},
-    },
     "postopus-reklama-19": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=5, hour=19),
@@ -2426,34 +2420,16 @@ app.conf.beat_schedule = {
         "schedule": crontab(minute=30, hour=8),
         "options": {"expires": 3600},
     },
-    # Novost (news): 40 6,11,12,16,18,20 * * *
+    # Novost (news): 40 6,12,20 * * *  (сокращено 25.10: с 6 слотов до 3, утро/день/вечер)
     "postopus-novost-6": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=40, hour=6),
         "args": ("novost",),
         "options": {"expires": 3600},
     },
-    "postopus-novost-11": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=40, hour=11),
-        "args": ("novost",),
-        "options": {"expires": 3600},
-    },
     "postopus-novost-12": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=40, hour=12),
-        "args": ("novost",),
-        "options": {"expires": 3600},
-    },
-    "postopus-novost-16": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=40, hour=16),
-        "args": ("novost",),
-        "options": {"expires": 3600},
-    },
-    "postopus-novost-18": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=40, hour=18),
         "args": ("novost",),
         "options": {"expires": 3600},
     },
@@ -2473,116 +2449,14 @@ app.conf.beat_schedule = {
     # регионы с communities ИМЕННО этой темы (районы не затрагиваются — у них
     # таких сообществ нет). Слоты разнесены 7:30–22:00 на :50/:10 (свободны от
     # :40/:45/:20/:30 базовых тем). Старые postopus-kirov-oblast-* (каскад) сняты.
-    "postopus-proisshestviya-8": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=8),
-        "kwargs": {"theme": "proisshestviya", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-proisshestviya-14": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=14),
-        "kwargs": {"theme": "proisshestviya", "strict": True},
-        "options": {"expires": 3600},
-    },
+    # Областные тематические волны (community-mode oblast, 2026-05).
+    # Сокращено 25.10: с ~13 слотов до 2 — proisshestviya (вечер) и
+    # tatarstan-oblast (вечер). Остальные oblast-темы убраны для экономии
+    # вызовов модели на фоне квоты free-тира.
     "postopus-proisshestviya-20": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=50, hour=20),
         "kwargs": {"theme": "proisshestviya", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-zhkh-7": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=7),
-        "kwargs": {"theme": "zhkh", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-zhkh-15": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=15),
-        "kwargs": {"theme": "zhkh", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-selhoz-9": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=9),
-        "kwargs": {"theme": "selhoz", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-selhoz-16": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=16),
-        "kwargs": {"theme": "selhoz", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-nauka-10": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=10),
-        "kwargs": {"theme": "nauka", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-nauka-17": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=17),
-        "kwargs": {"theme": "nauka", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-promyshlennost-11": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=11),
-        "kwargs": {"theme": "promyshlennost", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-promyshlennost-19": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=19),
-        "kwargs": {"theme": "promyshlennost", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-molodezh-12": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=12),
-        "kwargs": {"theme": "molodezh", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-molodezh-18": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=18),
-        "kwargs": {"theme": "molodezh", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-zdorovie-13": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=13),
-        "kwargs": {"theme": "zdorovie", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-zdorovie-21": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=50, hour=21),
-        "kwargs": {"theme": "zdorovie", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-priroda-12": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=10, hour=12),
-        "kwargs": {"theme": "priroda", "strict": True},
-        "options": {"expires": 3600},
-    },
-    "postopus-priroda-19": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=10, hour=19),
-        "kwargs": {"theme": "priroda", "strict": True},
-        "options": {"expires": 3600},
-    },
-    # Татарстан (областной каскадная сводка из главных групп bal/kukmor).
-    # Детей всего 2 — 2 слота/сутки достаточно (чаще = повторы). minute=45 как
-    # у kirov-oblast (после волн novost :40). Публикует при наличии
-    # community-токена COMM_239149826 (см. миграцию 016).
-    "postopus-tatarstan-oblast-9": {
-        "task": "tasks.parsing_scheduler_tasks.parse_and_publish_theme",
-        "schedule": crontab(minute=45, hour=9),
-        "kwargs": {"region_code": "tatarstan_obl", "theme": "oblast"},
         "options": {"expires": 3600},
     },
     "postopus-tatarstan-oblast-19": {
@@ -2591,7 +2465,7 @@ app.conf.beat_schedule = {
         "kwargs": {"region_code": "tatarstan_obl", "theme": "oblast"},
         "options": {"expires": 3600},
     },
-    # Kultura (culture): 20 7,13,16,19,21 * * *
+    # Kultura (culture): 20 7,13,19 * * *  (сокращено 25.10: с 5 слотов до 3, утро/день/вечер)
     "postopus-kultura-7": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=20, hour=7),
@@ -2604,69 +2478,29 @@ app.conf.beat_schedule = {
         "args": ("kultura",),
         "options": {"expires": 3600},
     },
-    "postopus-kultura-16": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=20, hour=16),
-        "args": ("kultura",),
-        "options": {"expires": 3600},
-    },
     "postopus-kultura-19": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=20, hour=19),
         "args": ("kultura",),
         "options": {"expires": 3600},
     },
-    "postopus-kultura-21": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=20, hour=21),
-        "args": ("kultura",),
-        "options": {"expires": 3600},
-    },
-    # Sport: 30 15, 50 22 * * *
-    # 12:30 → 15:20 и 19:30 → 22:50 (перенос 21.10): в полдень и в семь вечера
-    # рядом уже стоят admin/novost/kultura, и три тяжёлых слота в один час
-    # (112 мин работы) не влезали в час — очередь росла, а периодика (реклама,
-    # рассылки, интейки) выбрасывалась по expires. См. P208.
-    "postopus-sport-15": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=30, hour=15),
-        "args": ("sport",),
-        "options": {"expires": 3600},
-    },
+    # Sport: 50 22 * * *  (сокращено 25.10: с 2 слотов до 1, вечер;
+    # полдень убран — рядом novost/kultura)
     "postopus-sport-22": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=50, hour=22),
         "args": ("sport",),
         "options": {"expires": 3600},
     },
-    # Admin: 20 8, 20 9, 20 22 * * *
-    # 12:20 → 09:20 и 20:20 → 22:20 (перенос 21.10): разгружаем полдень и
-    # вечерний пик, где рядом novost.
-    "postopus-admin-8": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=20, hour=8),
-        "args": ("admin",),
-        "options": {"expires": 3600},
-    },
-    "postopus-admin-9": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=20, hour=9),
-        "args": ("admin",),
-        "options": {"expires": 3600},
-    },
+    # Admin: 20 22 * * *  (сокращено 25.10: с 3 слотов до 1, ночь;
+    # утро/день убраны — рядом novost/kultura/reklama)
     "postopus-admin-22": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=20, hour=22),
         "args": ("admin",),
         "options": {"expires": 3600},
     },
-    # Union: 30 11,17 * * *
-    "postopus-union-11": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=30, hour=11),
-        "args": ("union",),
-        "options": {"expires": 3600},
-    },
+    # Union: 30 17 * * *  (сокращено 25.10: с 2 слотов до 1, вечер)
     "postopus-union-17": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=30, hour=17),
