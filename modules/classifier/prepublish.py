@@ -118,7 +118,11 @@ async def blocked_lips_before_publish(
         return set()
 
     try:
-        from config.classifier import classifier_disabled, get_headless_chunk_size
+        from config.classifier import (
+            classifier_disabled,
+            get_headless_chunk_size,
+            get_prepublish_min_candidates,
+        )
 
         if classifier_disabled():
             return set()
@@ -144,6 +148,24 @@ async def blocked_lips_before_publish(
                 " (все уже размечены), блокирует=%d",
                 region_code,
                 len(items),
+                len(known & {i["lip"] for i in items}),
+            )
+            return known
+
+        # Порог «звать модель только на пачку». Стоимость вызова задают
+        # постулаты, а не посты: один кандидат и десять стоят почти одинаково,
+        # при этом в выпуск попадает не больше трёх постов. Замер 25.10: 946
+        # вызовов из 1319 были ради одного кандидата. Ниже порога — обычные
+        # фильтры (та же fail-open политика, что при отказе движка).
+        floor = get_prepublish_min_candidates()
+        if len(fresh) < floor:
+            logger.info(
+                "classifier prepublish: регион=%s кандидатов=%d новых=%d — меньше"
+                " порога %d, модель не зовём (fail-open, блокирует=%d)",
+                region_code,
+                len(items),
+                len(fresh),
+                floor,
                 len(known & {i["lip"] for i in items}),
             )
             return known

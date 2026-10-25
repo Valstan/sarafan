@@ -93,8 +93,17 @@ def _guard_reason(result: Dict[str, Any]) -> str:
 
 # Сколько постов уходит в один вызов. Больше — дешевле (постулаты не
 # переплачиваются), но длиннее ответ и выше риск, что модель начнёт экономить на
-# последних постах чанка. 10 — компромисс, вынесен в аргумент ради замера.
-DEFAULT_CHUNK_SIZE = 10
+# последних постах чанка.
+#
+# 20 с 25.10 (было 10). Причина — замер: фоновая классификация делает 8 прогонов
+# по 200 постов в сутки, а ``chunk_posts`` режет пачку **внутри региона**
+# (склеивать районы нельзя: модель решает ``merge_with`` и сослалась бы на пост,
+# которого не видела). При размере 10 это давало ~75 чанков на прогон, то есть
+# ~600 вызовов в сутки — больше квоты free-тира целиком. При 20 — ~30 чанков
+# (~240 вызовов), потому что большинство регионов укладывается в один вызов.
+# Цена: ответ на 20 вердиктов длиннее, поэтому обрыв JSON стал реальнее — его
+# ловит ``_SPLIT_RETRY_REASONS`` в ``classify_posts`` (делим пачку пополам).
+DEFAULT_CHUNK_SIZE = 20
 # Потолок ответа. На один вердикт уходит ~120 токенов (тема, действие, короткое
 # обоснование), 10 вердиктов ≈ 1200; берём с запасом на длинные reasoning.
 # 240 вместо 220 с 2026-09-22: вердикт подрос на два поля (``urgent``,
@@ -105,6 +114,11 @@ _MAX_TOKENS_PER_POST = 240
 # Текст поста в промпте. Длиннее — деньги без пользы: тема и действие видны по
 # первым абзацам, а хвост длинных постов это обычно контакты и хэштеги.
 _POST_TEXT_CAP = 2000
+
+# Отказы, которые лечатся меньшей пачкой: модель не отдала JSON целиком
+# (обрезанный ответ, сломанный разбор). Сеть, квота и «пустой ответ» в этот
+# набор не входят — деление пачки их не исправит, только сожжёт вызовы.
+_SPLIT_RETRY_REASONS = ("truncated", "llm_unparseable")
 
 TASK_PROMPT = """Ты — редактор районной новостной ленты ВКонтакте. Тебе дают пачку
 собранных постов. По КАЖДОМУ вынеси вердикт по правилам ниже.
@@ -396,17 +410,31 @@ def classify_posts(
     tokens = 0
     chunks = chunk_posts(with_text, chunk_size)
 
-    def _drain() -> None:
+    def _run(chunk: List[Dict[str, Any]], depth: int = 0) -> None:
         nonlocal tokens
-        for chunk in chunks:
-            res = classify_chunk(chunk, postulates=postulates, model=model, timeout=timeout)
-            usage = res.get("usage") or {}
-            tokens += int(usage.get("total_tokens") or 0)
-            if not res.get("ok"):
-                failures.append(str(res.get("reason")))
-                continue
+        res = classify_chunk(chunk, postulates=postulates, model=model, timeout=timeout)
+        usage = res.get("usage") or {}
+        tokens += int(usage.get("total_tokens") or 0)
+        if res.get("ok"):
             all_verdicts.extend(res["verdicts"])
             problems.extend(res["problems"])
+            return
+        reason = str(res.get("reason"))
+        # Пачка больше — ответ длиннее, и обрыв на середине JSON теряет вердикты
+        # по ВСЕМ её постам, хотя вызов уже оплачен. Поэтому пачку, которую
+        # модель не отдала целиком, делим пополам и повторяем ровно один раз:
+        # в редком отказе это два вызова вместо одного, зато оплаченные посты
+        # не пропадают. Отказ сети и квоты делением не лечится — его не трогаем.
+        if depth == 0 and len(chunk) > 1 and reason in _SPLIT_RETRY_REASONS:
+            middle = len(chunk) // 2
+            _run(chunk[:middle], depth + 1)
+            _run(chunk[middle:], depth + 1)
+            return
+        failures.append(reason)
+
+    def _drain() -> None:
+        for chunk in chunks:
+            _run(chunk)
 
     if engine_enabled():
         # Serve живёт ровно на батч (oneshot): воркер/таска его не носит

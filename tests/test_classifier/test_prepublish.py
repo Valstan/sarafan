@@ -19,6 +19,12 @@ from modules.classifier.schema import ClassifierVerdict
 @pytest.fixture(autouse=True)
 def _enable_gate(monkeypatch):
     monkeypatch.setenv("CLASSIFIER_PREPUBLISH_ENABLED", "1")
+    # Тесты ниже проверяют, что происходит ПОСЛЕ вызова модели, а их пачки —
+    # в один-два поста. С 25.10 у гейта есть порог «на пачку меньше трёх
+    # модель не зовём», поэтому здесь он опущен до 1: иначе эти тесты молча
+    # перестали бы проверять блокировку. Сам порог проверяют отдельные тесты
+    # в конце файла — они снимают переменную и работают с дефолтом.
+    monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "1")
     monkeypatch.setattr(prepublish, "_lips_with_verdict", _no_known_verdicts, raising=False)
 
 
@@ -304,3 +310,94 @@ async def test_silent_engine_with_text_still_warns(db_session, monkeypatch, capl
         )
     assert [r for r in caplog.records if r.levelno >= logging.WARNING]
     assert "движок молчит" in caplog.text
+
+
+# --- порог «звать модель только на пачку» (25.10) --------------------------- #
+
+
+def _count_calls(monkeypatch):
+    """Подменить классификатор счётчиком: важно ЧИСЛО вызовов, не вердикты."""
+    calls = []
+
+    def fake(items, **kw):
+        calls.append(list(items))
+        return {"verdicts": [], "failures": [], "problems": [], "chunks": 1, "tokens": 10}
+
+    monkeypatch.setattr("modules.classifier.headless.classify_posts", fake)
+    monkeypatch.setattr("modules.classifier.rules.render_effective_postulates", _fake_postulates)
+    return calls
+
+
+@pytest.mark.asyncio
+async def test_small_wave_does_not_call_the_model(db_session, monkeypatch, caplog):
+    """Два кандидата при дефолтном пороге 3 — вызова нет.
+
+    Замер 25.10: 946 вызовов из 1319 были ради ОДНОГО кандидата, и каждый
+    оплачивал постулаты целиком. В выпуск при этом попадает не больше трёх
+    постов, так что вызов на пачку из одного — деньги за воздух.
+    """
+    import logging
+
+    monkeypatch.delenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", raising=False)
+    calls = _count_calls(monkeypatch)
+
+    with caplog.at_level(logging.INFO, logger="modules.classifier.prepublish"):
+        blocked = await prepublish.blocked_lips_before_publish(
+            db_session,
+            [_vk_post(-1, 11, "раз"), _vk_post(-1, 12, "два")],
+            region_code="mi",
+        )
+
+    assert blocked == set(), "fail-open: без вердикта волна идёт по фильтрам"
+    assert calls == [], "модель не должна была вызываться"
+    assert "меньше" in caplog.text and "порога 3" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_threshold_is_about_fresh_candidates_only(db_session, monkeypatch):
+    """Порог считается по НОВЫМ постам: уже размеченные не должны его добивать."""
+    monkeypatch.delenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", raising=False)
+
+    async def _known_first(session, lips, region_code):
+        return {"1_21"}
+
+    monkeypatch.setattr(prepublish, "_lips_with_verdict", _known_first)
+    calls = _count_calls(monkeypatch)
+
+    blocked = await prepublish.blocked_lips_before_publish(
+        db_session,
+        [_vk_post(-1, 21, "уже размечен"), _vk_post(-1, 22, "новый")],
+        region_code="mi",
+    )
+
+    assert blocked == set()
+    assert calls == [], "свежих один — ниже порога, хотя кандидатов два"
+
+
+@pytest.mark.asyncio
+async def test_wave_at_threshold_calls_the_model(db_session, monkeypatch):
+    """Три свежих кандидата — порог пройден, вызов есть."""
+    monkeypatch.delenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", raising=False)
+    calls = _count_calls(monkeypatch)
+
+    await prepublish.blocked_lips_before_publish(
+        db_session,
+        [_vk_post(-1, 31, "а"), _vk_post(-1, 32, "б"), _vk_post(-1, 33, "в")],
+        region_code="mi",
+    )
+
+    assert len(calls) == 1
+    assert len(calls[0]) == 3
+
+
+def test_min_candidates_env_bounds(monkeypatch):
+    from config.classifier import get_prepublish_min_candidates
+
+    monkeypatch.delenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", raising=False)
+    assert get_prepublish_min_candidates() == 3
+    monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "0")
+    assert get_prepublish_min_candidates() == 1, "0 вернул бы прежнее поведение молча"
+    monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "999")
+    assert get_prepublish_min_candidates() == 40
+    monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "не число")
+    assert get_prepublish_min_candidates() == 3
