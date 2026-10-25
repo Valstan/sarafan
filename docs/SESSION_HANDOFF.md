@@ -5,6 +5,9 @@
 **Status:** ACTIVE
 **Updated:** 2026-10-25
 **Branch:** main
+**Last commit:** `b3c93f9` (#981 full, #981 merged, PR 981 squash-merged)
+**Prod deploy:** NOT EXECUTED — SSH P196 dead (3× sshretry.ps1 fail), restart `setka-celery-beat` queued
+**Next (SSH alive):** `git pull` + `systemctl restart setka-celery-beat`; verify beat_schedule 14 slots
 **Last release in prod:** `fcecaf5` (#969) — код #971 на прод **не выкачен**; `main` ушёл вперёд на #972 (документ) и #973 (гейт CRLF), деплой им не нужен
 
 ---
