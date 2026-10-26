@@ -44,11 +44,12 @@
   пуст или не задан — берутся **все** активные регионы с
   ``parent_region_id = region.id`` и ``vk_group_id IS NOT NULL``.
 
-Backward-compat
+Снятая обёртка
 ================
 
-Старый ``modules.kirov_oblast_bulletin.run_kirov_oblast_bulletin`` остаётся как
-тонкий wrapper и просто вызывает ``run_cascaded_bulletin(region_code="kirov_obl")``.
+Старый ``modules/kirov_oblast_bulletin.run_kirov_oblast_bulletin`` удалён 2026-10-26:
+его единственным call-site был тест. Область собирается напрямую —
+``run_cascaded_bulletin(region_code="kirov_obl")``.
 """
 
 from __future__ import annotations

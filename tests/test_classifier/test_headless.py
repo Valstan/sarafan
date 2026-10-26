@@ -332,13 +332,13 @@ def _posts_in(user_prompt: str):
     ]
 
 
-def test_chunk_default_is_twenty(monkeypatch):
-    """Дефолт 20, а не 10: 75 чанков на прогон — это больше суточной квоты."""
+def test_chunk_default_is_forty(monkeypatch):
+    """Дефолт 40: размер чанка — прямой множитель расхода квоты (ceil(n / chunk))."""
     from config.classifier import get_headless_chunk_size
 
     monkeypatch.delenv("CLASSIFIER_HEADLESS_CHUNK", raising=False)
-    assert get_headless_chunk_size() == 20
-    assert headless.DEFAULT_CHUNK_SIZE == 20
+    assert get_headless_chunk_size() == 40
+    assert headless.DEFAULT_CHUNK_SIZE == 40
 
 
 def test_unparseable_chunk_is_split_in_half_and_retried(monkeypatch):

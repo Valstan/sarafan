@@ -2380,38 +2380,18 @@ app.conf.beat_schedule = {
     # POSTOPUS MIGRATION: Crontab replacement → Celery Beat
     # Original crontab entries migrated from old_postopus
     # ========================================================================
-    # Reklama (ads): 5 10,14,19 * * *
-    "postopus-reklama-10": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=5, hour=10),
-        "args": ("reklama",),
-        "options": {"expires": 3600},
-    },
+    # Reklama (ads): 5 19 * * *  (сокращено 26.10: слот 10:05 снят — дублировал
+    # 19:05 той же темой при вдвое меньшем выходе публикаций на волну).
     "postopus-reklama-19": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=5, hour=19),
         "args": ("reklama",),
         "options": {"expires": 3600},
     },
-    # Тема "sosed" (два слота 10:20 и 20:20) СНЯТА 2026-09-14 по решению владельца.
-    #
-    # Соседский обмен новостями существовал в двух механиках, и работала из них
-    # одна. Замер за 30 дней перед снятием:
-    #   * тема "sosed" (парсинг сообществ category="sosed" ВНУТРИ своего района):
-    #     собрано 4109 постов, оставлено фильтром 25, опубликовано сводок — НОЛЬ;
-    #     сообществ такой категории во всей сети всего два;
-    #   * "bulletin-share-neighbors-daily" ниже (репост #Новости с главных групп
-    #     соседних районов): 25 опубликованных сводок за то же окно.
-    # Два слота в сутки тратили вызовы ВК и работу фильтров, не давая ничего.
-    #
-    # Владелец: «соседи обмениваются новостями с ближними соседями, по одной в
-    # день, чтобы друг друга поддерживать; если это делается разными путями —
-    # оставь один работающий, остальное удали». Оставлен тот, что и описывает
-    # эту функцию: cross-region обмен раз в сутки.
-    #
-    # Имя темы нигде не удалено — оно остаётся валидным ключом переопределений
-    # (POSTOPUS_BULLETIN_THEMES) и меткой классификатора. Снят только запуск.
-    #
+    # Тема "sosed" (два слота 10:20 и 20:20) СНЯТА 2026-09-14: из 4109 собранных
+    # постов публикаций ноль, соседский обмен исправно делает
+    # "bulletin-share-neighbors-daily" ниже. Имя темы остаётся валидным ключом
+    # переопределений и меткой классификатора — снят только запуск.
     # Соседский обмен новостями (cross-region): раз в сутки утром. Каждый регион
     # с непустым Region.neighbors репостит #Новости с главных групп соседей.
     # Движок — modules.cascaded_bulletin.run_neighbor_bulletin.
@@ -2420,16 +2400,11 @@ app.conf.beat_schedule = {
         "schedule": crontab(minute=30, hour=8),
         "options": {"expires": 3600},
     },
-    # Novost (news): 40 6,12,20 * * *  (сокращено 25.10: с 6 слотов до 3, утро/день/вечер)
+    # Novost (news): 40 6,20 * * *  (сокращено 25.10: с 6 слотов до 3, утро/день/вечер;
+    # 26.10 снят дневной 12:40 — выход на волну 7.8 % против 63 % у утренней)
     "postopus-novost-6": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=40, hour=6),
-        "args": ("novost",),
-        "options": {"expires": 3600},
-    },
-    "postopus-novost-12": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=40, hour=12),
         "args": ("novost",),
         "options": {"expires": 3600},
     },
@@ -2439,20 +2414,11 @@ app.conf.beat_schedule = {
         "args": ("novost",),
         "options": {"expires": 3600},
     },
-    # ───────────────────────────────────────────────────────────────────────
-    # Областные тематические волны (community-mode oblast, 2026-05).
-    # kirov_obl перешёл с каскада (сводка-сводок из районов) на свой пул
-    # communities по темам — публикует тематические сводки как район.
-    # Базовые темы (novost/sport/kultura/admin) область получает на ОБЩИХ волнах
-    # postopus-<theme>-* (после снятия хардкод-исключения kirov_obl). Ниже —
-    # волны под расширенную областную повестку. strict=True: волна берёт только
-    # регионы с communities ИМЕННО этой темы (районы не затрагиваются — у них
-    # таких сообществ нет). Слоты разнесены 7:30–22:00 на :50/:10 (свободны от
-    # :40/:45/:20/:30 базовых тем). Старые postopus-kirov-oblast-* (каскад) сняты.
-    # Областные тематические волны (community-mode oblast, 2026-05).
-    # Сокращено 25.10: с ~13 слотов до 2 — proisshestviya (вечер) и
-    # tatarstan-oblast (вечер). Остальные oblast-темы убраны для экономии
-    # вызовов модели на фоне квоты free-тира.
+    # Областные тематические волны (community-mode oblast, 2026-05): kirov_obl
+    # публикует тематические сводки как район со своего пула communities, базовые
+    # темы получает на общих волнах postopus-<theme>-*. Ниже — расширенная
+    # повестка. strict=True: волна берёт только регионы с communities ИМЕННО этой
+    # темы. Сокращено 25.10 с ~13 слотов до 2 ради квоты free-тира.
     "postopus-proisshestviya-20": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=50, hour=20),
@@ -2465,22 +2431,11 @@ app.conf.beat_schedule = {
         "kwargs": {"region_code": "tatarstan_obl", "theme": "oblast"},
         "options": {"expires": 3600},
     },
-    # Kultura (culture): 20 7,13,19 * * *  (сокращено 25.10: с 5 слотов до 3, утро/день/вечер)
+    # Kultura (culture): 20 7 * * *  (26.10: с 3 слотов до 1 — утренний давал
+    # 38 % выхода на волну, дневной 20 %, вечерний 22 % при той же цене вызова)
     "postopus-kultura-7": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=20, hour=7),
-        "args": ("kultura",),
-        "options": {"expires": 3600},
-    },
-    "postopus-kultura-13": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=20, hour=13),
-        "args": ("kultura",),
-        "options": {"expires": 3600},
-    },
-    "postopus-kultura-19": {
-        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
-        "schedule": crontab(minute=20, hour=19),
         "args": ("kultura",),
         "options": {"expires": 3600},
     },
@@ -2514,35 +2469,12 @@ app.conf.beat_schedule = {
         "args": ("detsad",),
         "options": {"expires": 3600},
     },
-    # Addons (roulette): 20 6,11,18,22 * * *
-    # Тема "addons" (четыре слота 6:20, 11:20, 18:20, 22:20) СНЯТА 2026-09-22
-    # по решению владельца.
-    #
-    # Замысел владельца дословно: «addons было задумано изначально как выпуск
-    # новостей не из района, а извне — добавка: научпоп, путешествия, музыка,
-    # кино, вообще какие-то общие развлечения».
-    #
-    # Замер за 7 дней перед снятием показал, что тема делала не это. Из 1752
-    # её публикаций классификатор отнёс к «кругозору» лишь 139 — восемь
-    # процентов. Остальные 92 %: новости 537, дети и образование 330,
-    # администрация 297, культура 221, спорт 141, объявления 78, соседи 9 —
-    # то есть обычный районный материал тех самых категорий, у которых есть
-    # свои темы.
-    #
-    # Механизм объясняет перекос: собственных сообществ у темы не было НИ В
-    # ОДНОМ из 57 регионов, поэтому её волна уходила в запасной путь «читать
-    # весь пул района» и публиковала то, что не забрали волны остальных тем.
-    # Получился не выпуск извне, а канал перелива районного контента.
-    #
-    # Исходную задачу при этом исправно делает другой канал — ежедневная
-    # рассылка «Кругозор» (modules/krugozor_broadcast.py, 20:00): 21.09 она
-    # разослала сводку в 54 региона из 54 из 12 активных сообществ.
-    #
-    # Цена снятия названа владельцу числом и принята им: 26 % публикаций сети.
-    #
-    # Имя темы нигде не удалено — оно остаётся валидным ключом переопределений
-    # и меткой классификатора, как и у снятой 14.09 темы "sosed". Снят только
-    # запуск. Разбор целиком — docs/pending/P180.
+    # Тема "addons" (четыре слота 6:20, 11:20, 18:20, 22:20) СНЯТА 2026-09-22:
+    # из 1752 публикаций к «кругозору» относились 8 %, остальное — обычный
+    # районный материал, который забирают волны своих тем (собственных сообществ
+    # у темы не было ни в одном регионе). Кругозор делает krugozor-broadcast.
+    # Имя темы остаётся ключом переопределений; снят только запуск. Разбор —
+    # docs/pending/P180.
     # Discovery health-recheck — еженедельно (ПН 04:00 MSK).
     # Обходит все Region.is_active=True; для каждого Community.is_active=True
     # делает wall.get + AI-категоризацию, обновляет health_status / last_post_at
@@ -2592,21 +2524,11 @@ app.conf.beat_schedule = {
         "schedule": crontab(minute=10, hour=4, day_of_month="1"),
         "options": {"expires": 6 * 3600, "catchup": False},
     },
-    # Rolling discovery — ОТКЛЮЧЕНО 2026-06-02 (по решению владельца).
-    #
-    # ⚠️ Причина отключения снята 2026-08-12: нейро-классификация переведена с
-    # Groq (403, бюджета не было) на DeepSeek (D-024), и ключ есть. Условие
-    # «вернуть, когда к discovery подключат нейро-фильтр» наступило. Слот
-    # оставлен выключенным сознательно: включение меняет объём авто-подбора и
-    # расход токенов, это решение владельца, а не следствие смены движка.
-    #
-    # Алгоритмический авто-подбор кандидатов БЕЗ нейро-классификации
-    # даёт ~98% мусора: на Туже из 136 авто-кандидатов годных ≈0 — омонимы
-    # («Тужа» ↔ фраза «не тужи(ть)»), чужие сёла (Ситки→Аляска,
-    # Михайловское→Карелия), коммерция, Киров-wide паблики. Без нейронки в петле
-    # подбор ведём ВРУЧНУЮ через скил `/discover_communities` (читаем посты,
-    # классифицируем в чате). Вернуть, когда к discovery подключат нейро-фильтр.
-    # См. tasks.discovery_tasks.discover_rolling_one_region.
+    # Rolling discovery — ОТКЛЮЧЕНО 2026-06-02. Авто-подбор кандидатов без
+    # нейро-фильтра даёт ~98 % мусора (омонимы, чужие сёла, коммерция), поэтому
+    # подбор ведём вручную скилом `/discover_communities`. Нейро-фильтр появился
+    # 2026-08-12, но включение меняет объём авто-подбора и расход токенов —
+    # это решение владельца, а не следствие смены движка.
     # "discovery-rolling-daily": {
     #     "task": "tasks.discovery_tasks.discover_rolling_one_region",
     #     "schedule": crontab(hour=3, minute=30),
@@ -2615,16 +2537,28 @@ app.conf.beat_schedule = {
     #         "catchup": False,
     #     },
     # },
-    # Copy Setka (network repost): 7,37 * * * *
-    "postopus-copy-setka-07": {
+    # Copy Setka (network repost): 24 волны в сутки в окне 07:00–23:00 MSK.
+    # Было 48 (каждый час :07 и :37 круглосуточно). Сокращено 26.10 вместе с
+    # квотой: :07 и :47 в нечётных часах (7,9,…,21) + :37 в чётных (8,10,…,22).
+    # Последняя волна 22:37 — окно закрыто к 23:00, ночью кросспостингу делать
+    # нечего: районные ленты в это время не читают. Минута :37 держит зазор от
+    # тройки часовых проверок уведомлений (:15/:28/:57), см.
+    # tests/test_notifications/test_beat_stagger.py.
+    "postopus-copy-setka-odd-07": {
         "task": "tasks.parsing_scheduler_tasks.parse_and_publish_theme",
-        "schedule": crontab(minute=7),
+        "schedule": crontab(minute=7, hour="7-21/2"),
         "kwargs": {"region_code": "copy", "theme": "setka"},
         "options": {"expires": 1800},
     },
-    "postopus-copy-setka-37": {
+    "postopus-copy-setka-odd-47": {
         "task": "tasks.parsing_scheduler_tasks.parse_and_publish_theme",
-        "schedule": crontab(minute=37),
+        "schedule": crontab(minute=47, hour="7-21/2"),
+        "kwargs": {"region_code": "copy", "theme": "setka"},
+        "options": {"expires": 1800},
+    },
+    "postopus-copy-setka-even-37": {
+        "task": "tasks.parsing_scheduler_tasks.parse_and_publish_theme",
+        "schedule": crontab(minute=37, hour="8-22/2"),
         "kwargs": {"region_code": "copy", "theme": "setka"},
         "options": {"expires": 1800},
     },
