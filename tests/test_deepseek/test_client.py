@@ -16,6 +16,8 @@ from modules import deepseek_client as dc
 def _key(monkeypatch):
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test-key")
     monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+    monkeypatch.delenv("DEEPSEEK_BALANCE_COOLDOWN", raising=False)
+    dc.reset_balance_breaker()
 
 
 def _api(status, payload):
@@ -83,6 +85,65 @@ def test_http_status_survives_in_reason(monkeypatch, status):
 def test_blank_content_is_empty_response(monkeypatch):
     monkeypatch.setattr(dc, "call_api", _api(200, _completion("   ")))
     assert dc.chat(user="вопрос")["reason"] == "empty_response"
+
+
+# ─── Предохранитель «нет денег»: 402 не повторяем (замер 26.10) ─────────────
+
+
+def test_402_opens_breaker_and_stops_calling_network(monkeypatch):
+    """Первый 402 — один вызов; следующие отвечают локально.
+
+    Живой прогон recheck 26.10: 2448 вызовов подряд, все 402, 27 минут слота.
+    Предохранитель превращает это в один настоящий вызов и 2447 локальных.
+    """
+    calls = {"n": 0}
+
+    def fake(body, *, api_key, base_url, timeout, label="deepseek"):
+        calls["n"] += 1
+        return 402, {"error": "Insufficient Balance"}
+
+    monkeypatch.setattr(dc, "call_api", fake)
+
+    first = dc.chat(user="вопрос")
+    second = dc.chat(user="вопрос")
+
+    assert first["reason"] == "http_402"
+    assert second["reason"] == "http_402"
+    assert "no network call" in second["detail"]
+    assert calls["n"] == 1, "второй вызов обязан не ходить в сеть"
+
+
+def test_breaker_does_not_touch_other_refusals(monkeypatch):
+    """429/500 по-прежнему пробуются: это временные отказы, их лечит повтор."""
+    monkeypatch.setattr(dc, "call_api", _api(429, {"error": "rate"}))
+
+    assert dc.chat(user="вопрос")["reason"] == "http_429"
+    assert dc.balance_blocked_for() == 0.0
+
+
+def test_breaker_expires_so_topped_up_account_recovers(monkeypatch):
+    """Кулдаун конечный: пополнили счёт — вызов после окна снова настоящий."""
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(dc.time, "monotonic", lambda: clock["t"])
+    monkeypatch.setenv("DEEPSEEK_BALANCE_COOLDOWN", "60")
+
+    statuses = [402, 200]
+    calls = {"n": 0}
+
+    def fake(body, *, api_key, base_url, timeout, label="deepseek"):
+        calls["n"] += 1
+        return statuses[min(calls["n"] - 1, 1)], _completion("ок")
+
+    monkeypatch.setattr(dc, "call_api", fake)
+
+    assert dc.chat(user="вопрос")["reason"] == "http_402"
+    assert dc.balance_blocked_for() == 60.0
+
+    clock["t"] += 61
+    out = dc.chat(user="вопрос")
+
+    assert out["ok"] is True, "после окна предохранитель обязан сняться сам"
+    assert calls["n"] == 2
 
 
 def test_missing_choices_is_empty_response(monkeypatch):

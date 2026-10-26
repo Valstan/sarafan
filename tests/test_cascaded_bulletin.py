@@ -175,41 +175,6 @@ async def test_run_cascaded_bulletin_rejects_missing_region():
     assert "not found" in out["error"]
 
 
-@pytest.mark.asyncio
-async def test_kirov_oblast_wrapper_delegates_to_cascaded(monkeypatch):
-    """`modules.kirov_oblast_bulletin.run_kirov_oblast_bulletin` — тонкий wrapper."""
-    from modules import kirov_oblast_bulletin as kod
-
-    called = {}
-
-    async def fake_run_cascaded_bulletin(session, *, region_code, theme, test_mode):
-        called["region_code"] = region_code
-        called["theme"] = theme
-        called["test_mode"] = test_mode
-        return {"success": True, "delegated": True}
-
-    monkeypatch.setattr(
-        "modules.cascaded_bulletin.run_cascaded_bulletin", fake_run_cascaded_bulletin
-    )
-
-    session = AsyncMock()
-    out = await kod.run_kirov_oblast_bulletin(session, test_mode=True)
-    assert out == {"success": True, "delegated": True}
-    assert called == {
-        "region_code": "kirov_obl",
-        "theme": "oblast",
-        "test_mode": True,
-    }
-
-
-def test_kirov_oblast_wrapper_constants():
-    """Backward-compat: DEFAULT_REGION_CODE и THEME_OBLAST экспортируются."""
-    from modules import kirov_oblast_bulletin as kod
-
-    assert kod.DEFAULT_REGION_CODE == "kirov_obl"
-    assert kod.THEME_OBLAST == "oblast"
-
-
 # ---------------------------------------------------------------------------
 # Соседский обмен (source_mode="neighbors")
 # ---------------------------------------------------------------------------

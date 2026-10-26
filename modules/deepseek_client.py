@@ -24,6 +24,8 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import time
 import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
@@ -31,6 +33,42 @@ from typing import Any, Dict, List, Optional, Tuple
 from config.deepseek import get_api_key, get_base_url, get_max_tokens, get_model, get_timeout
 
 logger = logging.getLogger(__name__)
+
+# Предохранитель «нет денег на счету».
+#
+# ``http_402`` (Insufficient Balance) — единственный отказ DeepSeek, который НЕ
+# лечится повтором: ни пауза, ни другой промпт, ни уменьшение пачки его не
+# снимут, снимет только платёж. При этом он выглядит как обычная ошибка вызова,
+# поэтому каждый потребитель честно пробует снова — и платит за это слотом
+# воркера. Живой замер 26.10: еженедельный recheck discovery сделал 2448
+# вызовов подряд, все 402, и занял 27 минут слота при нулевом результате.
+#
+# Поэтому первый же 402 открывает предохранитель на уровне клиента: до истечения
+# кулдауна ``chat`` отвечает локально, не ходя в сеть. Кулдаун конечный
+# намеренно — пополнили счёт, и следующий вызов после окна снова настоящий;
+# вечная блокировка потребовала бы рестарта воркера, а это худший вид поломки:
+# тихий.
+_BALANCE_COOLDOWN_DEFAULT = 1800.0
+_balance_blocked_until: float = 0.0
+
+
+def _balance_cooldown() -> float:
+    """Сколько секунд не звонить после ``402`` (env ``DEEPSEEK_BALANCE_COOLDOWN``)."""
+    try:
+        return max(0.0, float(os.getenv("DEEPSEEK_BALANCE_COOLDOWN", _BALANCE_COOLDOWN_DEFAULT)))
+    except ValueError:
+        return _BALANCE_COOLDOWN_DEFAULT
+
+
+def reset_balance_breaker() -> None:
+    """Снять предохранитель немедленно (ручная проверка после пополнения, тесты)."""
+    global _balance_blocked_until
+    _balance_blocked_until = 0.0
+
+
+def balance_blocked_for() -> float:
+    """Сколько секунд ещё действует предохранитель; ``0.0`` — не действует."""
+    return max(0.0, _balance_blocked_until - time.monotonic())
 
 
 def finish_reason(response: Dict[str, Any]) -> str:
@@ -187,11 +225,22 @@ def chat(
     отменяет разбор на стороне вызывающего: режим гарантирует синтаксис, а не
     схему.
     """
+    global _balance_blocked_until
+
     key = api_key if api_key is not None else get_api_key()
     if not key:
         return {"ok": False, "reason": "no_api_key"}
     if not (user or "").strip():
         return {"ok": False, "reason": "empty_prompt"}
+    blocked = balance_blocked_for()
+    if blocked > 0:
+        # Форма отказа та же, что у настоящего 402: потребители уже ветвятся по
+        # ``http_402``, и локальный ответ не должен выглядеть новой поломкой.
+        return {
+            "ok": False,
+            "reason": "http_402",
+            "detail": f"insufficient_balance (cooldown {int(blocked)}s, no network call)",
+        }
 
     messages: List[Dict[str, str]] = []
     if system and system.strip():
@@ -216,6 +265,17 @@ def chat(
     )
     if status == 0:
         return {"ok": False, "reason": "network", "detail": response.get("error")}
+    if status == 402:
+        # Первый 402 стоит одного вызова, остальные — ноль: см. комментарий у
+        # ``_balance_blocked_until``.
+        cooldown = _balance_cooldown()
+        _balance_blocked_until = time.monotonic() + cooldown
+        logger.warning(
+            "deepseek: 402 Insufficient Balance — вызовы модели приостановлены на %d с "
+            "(label=%s)",
+            int(cooldown),
+            label,
+        )
     if not (200 <= status < 300):
         return {"ok": False, "reason": f"http_{status}", "detail": response.get("error")}
 

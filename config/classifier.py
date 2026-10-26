@@ -180,14 +180,17 @@ def distill_enabled() -> bool:
 def get_headless_chunk_size() -> int:
     """Постов в одном вызове модели (env ``CLASSIFIER_HEADLESS_CHUNK``). Границы 1..40.
 
-    Дефолт 20 с 25.10 (было 10): замер дал ~75 чанков на прогон из 200 постов
-    (``chunk_posts`` режет внутри региона), то есть ~600 вызовов в сутки — это
-    больше квоты free-тира целиком. См. ``headless.DEFAULT_CHUNK_SIZE``.
+    Дефолт 40 с 26.10 (было 20, до того 10). Причина — замер 26.10: квота
+    free-тира тратится вызовами, а не волнами, и число вызовов на пачку равно
+    ``ceil(кандидатов / chunk)``. На живых данных два широких слота дали
+    165 вызовов при 40 против 194 при 20. Потолок 40 — предел ``_MAX_TOKENS``
+    ответа: дальше модель начинает экономить на последних постах пачки.
+    См. ``headless.DEFAULT_CHUNK_SIZE`` и ``docs/OPTIMIZATION_PLAN_2026-10.md``.
     """
     try:
-        return max(1, min(40, int(os.getenv("CLASSIFIER_HEADLESS_CHUNK", "20"))))
+        return max(1, min(40, int(os.getenv("CLASSIFIER_HEADLESS_CHUNK", "40"))))
     except ValueError:
-        return 20
+        return 40
 
 
 def get_prepublish_min_candidates() -> int:
@@ -200,11 +203,16 @@ def get_prepublish_min_candidates() -> int:
     Ниже порога волна идёт по детерминированным фильтрам: это та же политика
     fail-open, что и при отказе движка, только выбранная заранее, а не после
     таймаута. Границы 1..40; ``1`` возвращает прежнее поведение.
+
+    Дефолт 15 с 26.10 (было 3). Матрица «порог × чанк» на живых данных:
+    при ``floor=3`` два широких слота давали 165 вызовов, при 15 — 48.
+    Цена названа владельцу: волны с 3–14 кандидатами нейро-проверку больше
+    не проходят. См. ``docs/OPTIMIZATION_PLAN_2026-10.md``.
     """
     try:
-        return max(1, min(40, int(os.getenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "3"))))
+        return max(1, min(40, int(os.getenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "15"))))
     except ValueError:
-        return 3
+        return 15
 
 
 def get_metrics_fetch_workers() -> int:

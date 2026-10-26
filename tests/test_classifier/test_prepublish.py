@@ -338,7 +338,7 @@ async def test_small_wave_does_not_call_the_model(db_session, monkeypatch, caplo
     """
     import logging
 
-    monkeypatch.delenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", raising=False)
+    monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "3")
     calls = _count_calls(monkeypatch)
 
     with caplog.at_level(logging.INFO, logger="modules.classifier.prepublish"):
@@ -376,8 +376,13 @@ async def test_threshold_is_about_fresh_candidates_only(db_session, monkeypatch)
 
 @pytest.mark.asyncio
 async def test_wave_at_threshold_calls_the_model(db_session, monkeypatch):
-    """Три свежих кандидата — порог пройден, вызов есть."""
-    monkeypatch.delenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", raising=False)
+    """Ровно столько свежих кандидатов, сколько в пороге, — вызов есть.
+
+    Порог задаётся здесь явно, а не берётся дефолтом: тест про механику
+    «кандидатов >= порога → зовём», и смена продуктового дефолта не должна
+    его переписывать.
+    """
+    monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "3")
     calls = _count_calls(monkeypatch)
 
     await prepublish.blocked_lips_before_publish(
@@ -394,10 +399,10 @@ def test_min_candidates_env_bounds(monkeypatch):
     from config.classifier import get_prepublish_min_candidates
 
     monkeypatch.delenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", raising=False)
-    assert get_prepublish_min_candidates() == 3
+    assert get_prepublish_min_candidates() == 15
     monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "0")
     assert get_prepublish_min_candidates() == 1, "0 вернул бы прежнее поведение молча"
     monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "999")
     assert get_prepublish_min_candidates() == 40
     monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "не число")
-    assert get_prepublish_min_candidates() == 3
+    assert get_prepublish_min_candidates() == 15
