@@ -45,7 +45,7 @@
 
 ## ⏳ В процессе
 
-- **P210** [⏳ Квота free-тира: объём сокращён до ~190 вызовов/сутки](pending/P210-kvota-free-tira-po-akkauntu-smena-identichnosti.md) — `⏱ 2026-10-25 · snooze 0 · fresh` — движок мёртв по квоте с 22.10 22:59; проба 25.10: адрес лечит на минуты, не на сутки. 26.10 выбрано сокращение объёма (chunk=40, floor=15, слоты 12→8, copy-setka 24/07–23) — [план](OPTIMIZATION_PLAN_2026-10.md)
+- **P210** [⏳ Квота free-тира: сокращение объёма выкачено 27.10 — замер 28.10](pending/P210-kvota-free-tira-po-akkauntu-smena-identichnosti.md) — `⏱ 2026-10-25 · snooze 0 · fresh` — chunk=40, floor=15, слоты 12→8, copy-setka 24/07–23 (#983 на проде 27.10); прогноз 228 вызовов/сутки вместо 736 — [план](OPTIMIZATION_PLAN_2026-10.md)
 
 - **P205** [⏳ Нейро-движок на своём боксе: движок и ВПН-плечо живут 20.10](pending/P205-neuro-dvizhok-na-svoem-bokse-vpn-plecho-zhivet.md) · `⏱ 2026-10-20 · snooze 0 · fresh · движок и ВПН-плечо живут, egress privoxy→socks, пересказ перед публикацией (ADR-0010, откат POST_REWRITE_ENABLED=0); класс отказа сменился 23.10 — квота аккаунта, см. P210`
 
