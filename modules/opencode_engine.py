@@ -76,6 +76,7 @@ from config.opencode import (
     get_timeout,
     no_spawn,
 )
+from modules import engine_guard
 
 logger = logging.getLogger(__name__)
 
@@ -646,6 +647,11 @@ def _rotate_egress(detail: str = "") -> bool:
             fh.write(str(int(now)))
     except OSError:
         pass
+    if ok:
+        # Предохранитель ставился на прежний адрес, а его больше нет: снять,
+        # иначе остаток прогона короткозамкнётся на локальном отказе при живом
+        # выходе (замер 27.10: 7 из 8 прогонов умерли `breaker_open`).
+        engine_guard.rotation_happened(detail)
     return ok
 
 

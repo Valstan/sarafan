@@ -212,7 +212,7 @@ def get_model_variants() -> Dict[str, str]:
 
     Env ``OPENCODE_MODEL_VARIANTS="id=high,id2=max"``; значение ``-``/``off``
     снимает вариант с модели (платформа возьмёт свой дефолт). Пусто — дефолт
-    файла: deepseek и glm на ``high``.
+    файла: deepseek и glm на ``max`` (решение владельца 25.10).
     """
     raw = (os.getenv("OPENCODE_MODEL_VARIANTS") or "").strip()
     if not raw:
