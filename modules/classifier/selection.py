@@ -14,7 +14,7 @@
 пропускают спам, за который блокируют аккаунт владельца (бан до 18.08.2026).
 
 **Политика деградации — решение владельца, а не общий приём.** Если вердиктов
-на регион нет (DeepSeek лёг, ключ кончился, сайт провайдера упал):
+по кандидатам волны нет (DeepSeek лёг, ключ кончился, сайт провайдера упал):
 
 1. **Первая волна — пропускается.** Ничего не публикуем и ждём.
 2. **Вторая волна подряд — публикуем алгоритмами**, но ТОЛЬКО её саму.
@@ -30,6 +30,16 @@
 расписанию тем, и «вторая волна подряд» считается внутри своей темы — у
 ``novost`` и ``afisha`` разные календари, смешивать их счётчики значит
 пропускать публикации там, где всё в порядке.
+
+**Граница триггера — кандидаты волны, а не регион (27.10).** Пока движок
+отвечает, разница не видна: свежие посты судит ``prepublish`` той же волны, и
+``publish`` у них уже есть. Но когда квота мертва, в окне остаются только
+вчерашние вердикты: регион «размечен», а кандидаты — нет, и отбор молча
+выкидывал всё, не доходя до политики деградации. Замер 27.10: 8818 кандидатов
+→ 98 постов, 85 % волн с ``отобрано=0``; ``skip-wave`` — 2 раза, ``fallback`` —
+0 из 609. Поэтому ``apply_wave_selection`` спрашивает
+:func:`fetch_wave_judged_lips` про конкретных кандидатов, и только пустой ответ
+считает «движок не смотрел».
 """
 
 from __future__ import annotations
@@ -181,6 +191,49 @@ async def fetch_publish_lips(session, region_code: str) -> Set[str]:
     десяток тестов, подменяющих её монкейпатчем.
     """
     return set(await fetch_publish_map(session, region_code))
+
+
+async def fetch_wave_judged_lips(session, lips: Set[str], region_code: str) -> Optional[Set[str]]:
+    """Какие из этих lip'ов движок РАССМАТРИВАЛ (любой вердикт, не только publish).
+
+    Нужно, чтобы различить два разных ``отобрано=0``: «движок посмотрел и запретил»
+    и «движок не смотрел вовсе». Второе — состояние деградации: 27.10 квота
+    free-тира стояла, вердиктов на свежие посты не было, и волна молча
+    публиковала ноль при 20–30 кандидатах (замер: 8818 кандидатов → 98 постов,
+    85 % волн пустые). Политика деградации владельца при этом не срабатывала:
+    её триггер смотрел на вердикты региона целиком, а не на кандидатов волны.
+
+    Возвращает ``None``, если проверить не удалось. Вызывающий обязан прочитать
+    это как «судил» и не переключаться на алгоритмы: публиковать непроверенное
+    из-за сбоя БД — ровно тот риск, ради которого отбор по меткам и заведён.
+    """
+    if not lips:
+        return set()
+    if session is None:
+        return None
+
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import select
+
+    try:
+        from config.classifier import get_source_days
+        from database.models_extended import ContentClassification
+
+        cutoff = datetime.utcnow() - timedelta(days=get_source_days())
+        rows = (
+            await session.execute(
+                select(ContentClassification.lip).where(
+                    ContentClassification.lip.in_(list(lips)),
+                    ContentClassification.region_code == region_code,
+                    ContentClassification.created_at >= cutoff,
+                )
+            )
+        ).all()
+        return {str(lip) for (lip,) in rows}
+    except Exception as e:  # noqa: BLE001 — усилитель, не точка отказа
+        logger.warning("classifier selection: проверка вердиктов волны не удалась: %s", e)
+        return None
 
 
 def _skip_key(region_code: str, theme: str) -> str:
@@ -534,12 +587,45 @@ async def apply_wave_selection(
         except Exception:  # noqa: BLE001 — без Redis политика деградирует сама
             logger.debug("classifier selection: redis unavailable", exc_info=True)
 
+        # Триггер деградации считается ПО КАНДИДАТАМ ВОЛНЫ, а не по региону.
+        # Пока движок жив, свежие посты судит `prepublish` этой же волны, и они
+        # попадают в `publish_lips`. Когда он мёртв по квоте, в окне остаются
+        # только вчерашние вердикты: регион «размечен», кандидаты — нет, и отбор
+        # молча выкидывал всё (замер 27.10: 8818 кандидатов → 98 постов, 85 %
+        # волн с `отобрано=0`). Политика владельца (первая волна — пропуск,
+        # вторая — алгоритмы) не срабатывала ни разу: смотреть надо было на
+        # волну. `None` = проверить не удалось → ведём себя как раньше.
+        #
+        # Спрашиваем только про посты С ТЕКСТОМ: headless такие пропускает
+        # намеренно (`has_text`), вердикта у них не будет никогда, и без этого
+        # фильтра волна из одних безтекстовых считалась бы «движок молчит».
+        from modules.classifier.headless import has_text
+
+        wave_lips = {post_lip(p) for p in posts if has_text(p)}
+        judged = (
+            await fetch_wave_judged_lips(session, wave_lips, region_code) if wave_lips else None
+        )
+        wave_unjudged = judged is not None and not judged
+
         mode, need_alert = decide_mode(
-            publish_lips=publish_lips,
+            publish_lips=set() if wave_unjudged else publish_lips,
             region_code=region_code,
             theme=theme,
             redis_client=redis_client,
         )
+
+        # Префикс нарочно НЕ «classifier selection:»: этой строкой пользуются
+        # grep'ы и тесты, ищущие итоговую строку волны; вторая строка с тем же
+        # префиксом сбивала бы и их, и чтение лога глазами.
+        if wave_unjudged:
+            logger.info(
+                "classifier: политика деградации — у кандидатов волны нет ни одного"
+                " вердикта (%s/%s, кандидатов=%d), режим=%s",
+                region_code,
+                theme,
+                len(posts),
+                mode,
+            )
 
         if need_alert:
             try:
@@ -600,8 +686,6 @@ async def apply_wave_selection(
         # всё, то ли ей нечего было судить. Замер 2026-08-21: 56% пустых волн —
         # второе. Берём ИМЕННО `has_text` движка, а не свою копию условия:
         # разошедшиеся определения — самый незаметный способ мерить не то.
-        from modules.classifier.headless import has_text
-
         no_text = sum(1 for p in posts if post_lip(p) not in publish_lips and not has_text(p))
         logger.info(
             "classifier selection: регион=%s тема=%s кандидатов=%d отобрано=%d"
