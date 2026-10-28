@@ -652,13 +652,19 @@ def test_default_chain_priority_is_deepseek_then_glm():
     assert "longcat-2.5-preview-free" not in DEFAULT_MODEL_CHAIN
 
 
-def test_model_variants_default_max_for_deepseek_and_glm(monkeypatch):
-    """Решение владельца 25.10: у обеих голов цепочки — максимальный уровень."""
+def test_model_variants_default_high_for_deepseek_and_glm(monkeypatch):
+    """Решение владельца 29.10: у обеих голов цепочки — уровень ``high``.
+
+    До него (25.10–28.10 включительно) здесь стояло ``max``. Тест прибит к
+    дефолту файла намеренно: на проде переменной ``OPENCODE_MODEL_VARIANTS``
+    нет, и поведение движка задаётся этой картой — молчаливый возврат к ``max``
+    не должен проходить незамеченным.
+    """
     from config import opencode as oc
 
     monkeypatch.delenv("OPENCODE_MODEL_VARIANTS", raising=False)
-    assert oc.get_model_variant("deepseek-v4.1-flash-free") == "max"
-    assert oc.get_model_variant("glm-5.3-flash-free") == "max"
+    assert oc.get_model_variant("deepseek-v4.1-flash-free") == "high"
+    assert oc.get_model_variant("glm-5.3-flash-free") == "high"
     # Модели вне карты получают дефолт платформы, а не выдуманный уровень.
     assert oc.get_model_variant("mimo-v2.6-flash-free") == ""
 
@@ -1075,7 +1081,7 @@ def test_call_model_passes_reasoning_variant(monkeypatch, engine_on):
     assert transport.calls[0]["body"]["model"] == {
         "id": "deepseek-v4.1-flash-free",
         "providerID": "opencode",
-        "variant": "max",
+        "variant": "high",
     }
 
 
