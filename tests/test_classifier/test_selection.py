@@ -250,6 +250,198 @@ async def test_skip_wave_returns_empty_and_alerts(monkeypatch):
     assert alerts and alerts[0]["region_code"] == "mi"
 
 
+# ───────── триггер деградации: волна, а не регион (замер 27.10) ─────────
+#
+# Пока движок жив, разницы не видно: свежие посты судит `prepublish` той же
+# волны. Когда квота мертва, в окне остаются только вчерашние вердикты — регион
+# «размечен», кандидаты нет — и волна молча публиковала ноль, не доходя до
+# политики деградации. Замер 27.10: 8818 кандидатов → 98 постов.
+
+
+@pytest.mark.asyncio
+async def test_unjudged_wave_triggers_degradation_despite_region_verdicts(monkeypatch):
+    """Вчерашний вердикт по ЧУЖОМУ посту не делает кандидатов волны размеченными."""
+    monkeypatch.setenv("CLASSIFIER_SELECTION_ENABLED", "1")
+
+    async def fake_fetch(session, region_code):
+        # У района есть publish-вердикт — но по посту, которого в волне нет.
+        return {"999_9": "новости"}
+
+    async def fake_judged(session, lips, region_code):
+        # Наших кандидатов движок не судил вовсе (квота мертва).
+        return set()
+
+    seen = {}
+
+    def fake_decide(**kw):
+        seen["publish_lips"] = kw["publish_lips"]
+        return selection.MODE_FALLBACK, False
+
+    monkeypatch.setattr(selection, "fetch_publish_map", fake_fetch)
+    monkeypatch.setattr(selection, "fetch_wave_judged_lips", fake_judged)
+    monkeypatch.setattr(selection, "decide_mode", fake_decide)
+    monkeypatch.setattr(selection, "maybe_alert", lambda **kw: "alert-sent")
+
+    posts = [_post(-100, 1), _post(-100, 2)]
+    out, mode, removed = await selection.apply_wave_selection(
+        None, posts, region_code="mi", theme="novost"
+    )
+
+    assert seen["publish_lips"] == set(), "в политику уходит пустой набор — «не судил»"
+    assert out == posts, "вторая волна публикуется алгоритмами"
+    assert mode == selection.MODE_FALLBACK
+    assert removed == 0
+
+
+@pytest.mark.asyncio
+async def test_judged_wave_keeps_label_selection(monkeypatch):
+    """Если движок судил кандидатов — работает обычный отбор по меткам."""
+    monkeypatch.setenv("CLASSIFIER_SELECTION_ENABLED", "1")
+
+    async def fake_fetch(session, region_code):
+        return {"100_1": "новости"}
+
+    async def fake_judged(session, lips, region_code):
+        # Вердикт есть хотя бы у одного кандидата — значит движок волну видел.
+        return {"100_2"}
+
+    seen = {}
+
+    def fake_decide(**kw):
+        seen["publish_lips"] = kw["publish_lips"]
+        return selection.MODE_VERDICTS, False
+
+    monkeypatch.setattr(selection, "fetch_publish_map", fake_fetch)
+    monkeypatch.setattr(selection, "fetch_wave_judged_lips", fake_judged)
+    monkeypatch.setattr(selection, "decide_mode", fake_decide)
+
+    posts = [_post(-100, 1), _post(-100, 2)]
+    out, mode, _removed = await selection.apply_wave_selection(
+        None, posts, region_code="mi", theme="novost"
+    )
+
+    assert seen["publish_lips"] == {"100_1"}, "регионные вердикты не подменяются"
+    assert [p["id"] for p in out] == [1]
+    assert mode == selection.MODE_VERDICTS
+
+
+@pytest.mark.asyncio
+async def test_unknown_judgement_is_not_treated_as_silence(monkeypatch):
+    """Сбой проверки (None) — не повод публиковать непроверенное алгоритмами."""
+    monkeypatch.setenv("CLASSIFIER_SELECTION_ENABLED", "1")
+
+    async def fake_fetch(session, region_code):
+        return {"100_1": "новости"}
+
+    async def broken_judged(session, lips, region_code):
+        return None  # «проверить не удалось»
+
+    seen = {}
+
+    def fake_decide(**kw):
+        seen["publish_lips"] = kw["publish_lips"]
+        return selection.MODE_VERDICTS, False
+
+    monkeypatch.setattr(selection, "fetch_publish_map", fake_fetch)
+    monkeypatch.setattr(selection, "fetch_wave_judged_lips", broken_judged)
+    monkeypatch.setattr(selection, "decide_mode", fake_decide)
+
+    posts = [_post(-100, 1), _post(-100, 2)]
+    out, mode, _removed = await selection.apply_wave_selection(
+        None, posts, region_code="mi", theme="novost"
+    )
+
+    assert seen["publish_lips"] == {"100_1"}
+    assert [p["id"] for p in out] == [1]
+    assert mode == selection.MODE_VERDICTS
+
+
+@pytest.mark.asyncio
+async def test_textless_wave_is_not_engine_silence(monkeypatch):
+    """Волна из безтекстовых постов — не деградация движка.
+
+    headless такие посты пропускает намеренно (`has_text`), вердикта у них не
+    будет никогда. Считать это «движок молчит» значило бы включать алгоритмы на
+    волне, где судить было нечего.
+    """
+    monkeypatch.setenv("CLASSIFIER_SELECTION_ENABLED", "1")
+    calls = []
+
+    async def fake_fetch(session, region_code):
+        return {"100_1": "новости"}
+
+    async def fake_judged(session, lips, region_code):
+        calls.append(lips)
+        return set()
+
+    seen = {}
+
+    def fake_decide(**kw):
+        seen["publish_lips"] = kw["publish_lips"]
+        return selection.MODE_VERDICTS, False
+
+    monkeypatch.setattr(selection, "fetch_publish_map", fake_fetch)
+    monkeypatch.setattr(selection, "fetch_wave_judged_lips", fake_judged)
+    monkeypatch.setattr(selection, "decide_mode", fake_decide)
+
+    posts = [{"owner_id": -100, "id": 1, "text": "  "}]
+    out, mode, _removed = await selection.apply_wave_selection(
+        None, posts, region_code="mi", theme="novost"
+    )
+
+    assert calls == [], "спрашивать про безтекстовые незачем"
+    assert seen["publish_lips"] == {"100_1"}, "ведём себя как раньше"
+    assert out == posts
+    assert mode == selection.MODE_VERDICTS
+
+
+@pytest.mark.asyncio
+async def test_fetch_wave_judged_lips_reads_any_verdict_but_only_this_region(db_session):
+    """«Судил» — это любой вердикт, включая delete; чужой район не в счёт."""
+    from database.models_extended import ContentClassification
+
+    db_session.add_all(
+        [
+            ContentClassification(
+                lip="1_1",
+                region_code="mi",
+                model="t",
+                verdict={"action": "delete", "theme": "мусор"},
+            ),
+            ContentClassification(
+                lip="1_2",
+                region_code="vp",  # тот же пост, но вердикт соседа
+                model="t",
+                verdict={"action": "publish", "theme": "новости"},
+            ),
+        ]
+    )
+    await db_session.commit()
+
+    got = await selection.fetch_wave_judged_lips(db_session, {"1_1", "1_2", "1_3"}, "mi")
+
+    assert got == {"1_1"}
+
+
+@pytest.mark.asyncio
+async def test_fetch_wave_judged_lips_is_unknown_on_failure(caplog):
+    """Сбой чтения — None («неизвестно»), а не пустое множество («не судил»).
+
+    Разница решает, поедет ли в ленту непроверенное: пустое множество включило
+    бы алгоритмы, а сбой БД этого права давать не должен.
+    """
+
+    class _Broken:
+        async def execute(self, *a, **kw):
+            raise RuntimeError("БД недоступна")
+
+    with caplog.at_level("WARNING"):
+        got = await selection.fetch_wave_judged_lips(_Broken(), {"1_1"}, "mi")
+
+    assert got is None
+    assert any("вердиктов волны" in r.getMessage() for r in caplog.records)
+
+
 @pytest.mark.asyncio
 async def test_fallback_mode_publishes_by_algorithms(monkeypatch):
     monkeypatch.setenv("CLASSIFIER_SELECTION_ENABLED", "1")
