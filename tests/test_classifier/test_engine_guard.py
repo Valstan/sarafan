@@ -209,3 +209,87 @@ def test_headless_passes_quota_flag_to_breaker(engine, clock, monkeypatch):
     assert result["ok"] is False
     assert engine_guard.allow() is False
     assert engine_guard.snapshot()["last_reason"] == "quota_exhausted"
+
+
+# --- 29.10: смена выхода ВПН снимает предохранитель, поставленный на старый адрес ---
+
+
+def test_rotation_lifts_quota_breaker(clock, monkeypatch):
+    """Живой счёт 27.10: 7 из 8 прогонов умерли ``breaker_open`` при 17 поворотах.
+
+    Предохранитель ставился на прежний адрес и про поворот не знал — остаток
+    прогона короткозамыкался уже после того, как выход был другой.
+    """
+    monkeypatch.setenv("ENGINE_BREAKER_QUOTA_COOLDOWN", "1800")
+    engine_guard.note_result(False, "quota_exhausted")
+    assert engine_guard.allow() is False
+
+    engine_guard.rotation_happened("http_429: Free usage limit reached")
+
+    assert engine_guard.allow() is True, "выход другой — держать прежнюю паузу незачем"
+    assert engine_guard.snapshot()["rotations"] == 1
+
+
+def test_rotation_does_not_fake_a_success(clock, monkeypatch):
+    """Снятие паузы — не выдача успеха за успех: новый адрес тоже проверяется."""
+    monkeypatch.setenv("ENGINE_BREAKER_QUOTA_COOLDOWN", "1800")
+    engine_guard.note_result(False, "quota_exhausted")
+    engine_guard.rotation_happened("http_429")
+
+    engine_guard.note_result(False, "quota_exhausted")
+
+    assert engine_guard.allow() is False, "второй 429 обязан открыть предохранитель снова"
+
+
+def test_rotation_without_open_breaker_changes_nothing(clock):
+    engine_guard.rotation_happened("gate")
+
+    snap = engine_guard.snapshot()
+    assert snap["rotations"] == 0
+    assert snap["open"] is False
+
+
+def test_rotate_egress_lifts_breaker_on_success(clock, monkeypatch, tmp_path):
+    """Проводка: успешный поворот выхода сам снимает предохранитель."""
+    from modules import opencode_engine as engine
+
+    class _Proc:
+        returncode = 0
+        stdout = "egress: KZ -> DE\n"
+        stderr = ""
+
+    monkeypatch.setenv("NEURAL_EGRESS_ROTATE_CMD", "rotate-egress --next")
+    monkeypatch.setenv("NEURAL_EGRESS_ROTATE_COOLDOWN", "600")
+    monkeypatch.setenv("ENGINE_BREAKER_QUOTA_COOLDOWN", "1800")
+    monkeypatch.setattr(engine.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(engine.subprocess, "run", lambda *a, **kw: _Proc())
+
+    engine_guard.note_result(False, "quota_exhausted")
+    assert engine_guard.allow() is False
+
+    assert engine._rotate_egress("http_429: Free usage limit reached") is True
+
+    assert engine_guard.allow() is True
+    assert engine_guard.snapshot()["rotations"] == 1
+
+
+def test_rotate_egress_keeps_breaker_on_failure(clock, monkeypatch, tmp_path):
+    """Неудачный поворот паузу не снимает: ждать честно, а не гадать."""
+    from modules import opencode_engine as engine
+
+    class _Proc:
+        returncode = 1
+        stdout = ""
+        stderr = "no free server"
+
+    monkeypatch.setenv("NEURAL_EGRESS_ROTATE_CMD", "rotate-egress --next")
+    monkeypatch.setenv("NEURAL_EGRESS_ROTATE_COOLDOWN", "600")
+    monkeypatch.setenv("ENGINE_BREAKER_QUOTA_COOLDOWN", "1800")
+    monkeypatch.setattr(engine.tempfile, "gettempdir", lambda: str(tmp_path))
+    monkeypatch.setattr(engine.subprocess, "run", lambda *a, **kw: _Proc())
+
+    engine_guard.note_result(False, "quota_exhausted")
+
+    assert engine._rotate_egress("http_429") is False
+    assert engine_guard.allow() is False
+    assert engine_guard.snapshot()["rotations"] == 0
