@@ -229,8 +229,14 @@ Exit 0 — web поднялся (health 200). Exit 1 — не поднялся �
 тесты) — тогда пайплайн не затронут. Рестартили worker/beat — прогонять без вопроса:
 
 ```bash
-ssh sarafan "cd ~/SETKA && ./venv/bin/python scripts/smoke_test.py --region mi --theme novost"
+ssh sarafan "set -a; . <(sudo -n cat /etc/setka/setka.env); set +a; cd ~/SETKA && ./venv/bin/python scripts/smoke_test.py --region mi --theme novost"
 ```
+
+⚠️ **Env-файл обязателен (проверено 28.10).** Голый `./venv/bin/python scripts/smoke_test.py`
+из ssh-шелла env приложения не видит: `REDIS_URL` берётся по дефолту, задача публикуется не в
+тот брокер, и скрипт честно висит в `PENDING` до таймаута, печатая предупреждение «не подхватил
+env приложения». Прогон с sourc'ом env-файла (он `600 root:root`, поэтому через `sudo -n cat`
+в подстановку процесса — значения при этом не печатаются) проходит за секунды.
 
 Exit 0 — пайплайн жив (в stderr: `posts_parsed=…, would_publish=…`). Exit 1 — провал
 (не спарсилось постов / `success=False` / воркер ответил и **не выполнил ни одной**
