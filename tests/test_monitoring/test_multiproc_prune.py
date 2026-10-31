@@ -112,7 +112,22 @@ def test_empty_directory_string_means_not_configured():
 def test_default_pid_helpers_behave():
     assert m._default_pid_alive(os.getpid()) is True
     assert m._default_pid_alive(2**30) is False
-    # /proc есть только на Linux: без него cmdline честно пуст, а не выдуман
+    # Командная строка своего процесса доступна: на POSIX — из /proc, на Windows —
+    # из psutil (в Windows /proc нет вовсе). Несуществующий PID — пустая строка.
     own_cmdline = m._default_pid_cmdline(os.getpid())
-    assert (own_cmdline != "") == os.path.isdir(f"/proc/{os.getpid()}")
+    assert own_cmdline != ""
     assert m._default_pid_cmdline(2**30) == ""
+
+
+def test_pid_alive_does_not_kill_the_calling_process():
+    """Регрессия 01.11: на Windows ``os.kill(pid, 0)`` УБИВАЕТ процесс.
+
+    Проверка живости через ``kill -0`` — POSIX-привычка; в Windows это вызов
+    TerminateProcess с кодом 0. Из-за этого прогон тестов на Windows молча
+    умирал на ``_default_pid_alive(os.getpid())`` — без traceback, посреди
+    прогона (полный прогон обрывался на ~59 %). Тест зовёт проверку на
+    собственном PID: если реализация убьёт процесс, тест не завершится.
+    """
+    assert m._default_pid_alive(os.getpid()) is True
+    # Живой процесс здесь — сам тест: вызов обязан вернуться, а не убить нас.
+    assert os.getpid() > 0
