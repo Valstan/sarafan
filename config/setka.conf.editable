@@ -1,9 +1,18 @@
 ##
 # SETKA Nginx config template (editable)
 #
-# - Replace `YOUR_DOMAIN` with your actual domain
-# - Replace paths if your SETKA install location differs
-# - If you use Certbot, certificate paths must match your domain
+# ⚠️ Это ШАБЛОН для нового бокса, а не файл техдомена SETKA.
+#
+# Твой бокс обслуживает техдомен конфигом `config/nginx_setka.conf` — он и
+# копируется на бокс (`sudo cp config/nginx_setka.conf /etc/nginx/conf.d/setka.conf`).
+# Этот файл — заготовка «подставить своё» для ДРУГОГО развёртывания: замени
+# `YOUR_DOMAIN` на свой домен и пути, если они отличаются.
+#
+# Почему это важно (01.11, D-096): до правки `scripts/apply_nginx_config.sh`
+# копировал на бокс именно ЭТОТ шаблон — с `listen 80`, плейсхолдером
+# `YOUR_DOMAIN` и без TLS. То есть скрипт из документации сносил бы с
+# техдомена HTTPS, а `location /` уводил бы в приложение всё подряд, включая
+# сканеры (см. #251 и D-096). Скрипт теперь берёт настоящий конфиг.
 #
 # Upstream: FastAPI (uvicorn) on 127.0.0.1:8000
 ##
@@ -47,6 +56,22 @@ server {
         alias /home/valstan/SETKA/web/static;
         expires 30d;
         add_header Cache-Control "public, immutable";
+    }
+
+    # Загружаемые файлы — исключение из immutable (D-096 №3, 01.11).
+    # Имя не несёт версию: загрузка пишет по исходному имени, поэтому тот же
+    # URL отдаёт новое содержимое. `immutable` здесь обещал бы «навсегда те же
+    # байты» — ложь, из-за которой браузер держал бы старую картинку до 30 дней.
+    # `expires -1` = `Cache-Control: no-cache` — как отдаёт второй слой,
+    # RevalidatingStaticFiles (web/static_files.py).
+    location /static/broadcast/ {
+        alias /home/valstan/SETKA/web/static/broadcast/;
+        expires -1;
+    }
+
+    location /static/ad_offers/ {
+        alias /home/valstan/SETKA/web/static/ad_offers/;
+        expires -1;
     }
 
     # WebSocket support (if you add WS endpoints later)
@@ -102,6 +127,6 @@ server {
     }
 
     # Logs
-    access_log /home/valstan/SETKA/logs/nginx_access.log;
+    access_log /home/valstan/SETKA/logs/nginx_access.log setka_host;
     error_log /home/valstan/SETKA/logs/nginx_error.log;
 }

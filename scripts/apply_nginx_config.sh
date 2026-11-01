@@ -1,9 +1,24 @@
 #!/bin/bash
 # Скрипт для применения изменений конфигурации nginx
-
-SOURCE_FILE="/home/valstan/SETKA/config/setka.conf.editable"
+#
+# Источник — `config/nginx_setka.conf`, а НЕ `config/setka.conf.editable`.
+#
+# Почему (01.11, D-096): прежним источником был шаблон `setka.conf.editable` —
+# с `listen 80`, плейсхолдером `YOUR_DOMAIN` и без TLS. Скрипт из документации
+# (docs/OPERATIONS.md, docs/START_HERE.md) копировал его на бокс, то есть
+# сносил с техдомена HTTPS и уводил `location /` в приложение всё подряд,
+# включая сканеры (см. #251 и D-096). Шаблон остался — но он для ЧУЖОГО
+# развёртывания, и ставить его на наш бокс нельзя.
+SOURCE_FILE="/home/valstan/SETKA/config/nginx_setka.conf"
 TARGET_FILE="/etc/nginx/conf.d/setka.conf"
 BACKUP_FILE="/etc/nginx/conf.d/setka.conf.backup.$(date +%Y%m%d_%H%M%S)"
+
+# Страховка от подстановки шаблона: плейсхолдер в файле = заведомо неверная
+# конфигурация (сертификат YOUR_DOMAIN, домен YOUR_DOMAIN).
+if grep -q 'YOUR_DOMAIN' "$SOURCE_FILE" 2>/dev/null; then
+    echo "Ошибка: в $SOURCE_FILE остался плейсхолдер YOUR_DOMAIN — это шаблон, а не конфиг бокса."
+    exit 1
+fi
 
 echo "Применение конфигурации nginx..."
 echo ""

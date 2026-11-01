@@ -149,7 +149,7 @@ pre-commit run --all-files
 
 - UI: `/`, `/regions`, `/posts`, `/communities`, `/notifications`, `/tokens`, `/publisher`, `/monitoring`, `/schedule`
 - Метрики: `/metrics`
-- Nginx: редактировать `config/sarafan.conf.editable`, применять `scripts/apply_nginx_config.sh`
+- Nginx: `config/nginx_setka.conf` (живой конфиг техдомена), применять `scripts/apply_nginx_config.sh`
 
 ## 9) Чек-лист завершения задачи
 
