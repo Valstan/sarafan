@@ -128,11 +128,21 @@ def test_kill_switch_503(client, monkeypatch):
     assert r.status_code == 503
 
 
+def test_postulates_requires_key(client):
+    # D-096/#015 Ф1 (01.11): текст правил — корпус проекта, а не публичная страница.
+    # До правки эндпоинт был единственным в роутере без require_ingest_key, и
+    # ~41 КБ постулатов отдавались интернету без ключа.
+    assert client.get("/api/classifier/postulates").status_code == 401
+    assert (
+        client.get("/api/classifier/postulates", headers={"X-API-Key": "nope"}).status_code == 401
+    )
+
+
 def test_postulates_served_effective(client):
     # /postulates отдаёт эффективные постулаты (база + утверждённые правила, ADR-0005).
     fake = AsyncMock(return_value="Классификационные постулаты\n\n## Выученные правила\n1. x")
     with patch.object(ing.rules, "render_effective_postulates", fake):
-        r = client.get("/api/classifier/postulates")
+        r = client.get("/api/classifier/postulates", headers={"X-API-Key": KEY})
     assert r.status_code == 200
     assert "Классификационные постулаты" in r.text
     assert "Выученные правила" in r.text
