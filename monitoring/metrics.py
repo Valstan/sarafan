@@ -370,7 +370,27 @@ _OWN_PROCESS_MARKERS = ("SETKA", "setka", "uvicorn", "celery")
 
 
 def _default_pid_alive(pid: int) -> bool:
-    """Жив ли процесс (``kill -0``; чужой UID без прав — считаем живым)."""
+    """Жив ли процесс; чужой UID без прав — считаем живым.
+
+    POSIX: ``kill -0`` — проверка без сигнала, ничего не происходит.
+    **Windows: ``os.kill(pid, 0)`` УБИВАЕТ процесс** — там это вызов
+    ``TerminateProcess`` с кодом 0, а не проверка живости. Проверено на этой
+    машине: после ``os.kill(os.getpid(), 0)`` процесс не доходит до следующей
+    строки (проба `probe_kill.py`, 01.11). Поэтому на Windows спрашиваем
+    ``psutil`` (зависимость проекта), на POSIX оставляем ``kill -0``.
+
+    Последствие было неочевидным: на Windows прогон тестов молча умирал на
+    ``test_default_pid_helpers_behave`` — тест звал ``_default_pid_alive(os.getpid())``,
+    то есть убивал сам pytest, и весь прогон падал без единого сообщения
+    (поймано 01.11: полный прогон обрывался на ~59 % без traceback).
+    """
+    if os.name == "nt":
+        try:
+            import psutil
+
+            return psutil.pid_exists(pid)
+        except Exception:
+            return False
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -383,7 +403,20 @@ def _default_pid_alive(pid: int) -> bool:
 
 
 def _default_pid_cmdline(pid: int) -> str:
-    """Командная строка процесса одной строкой; нет доступа — пусто."""
+    """Командная строка процесса одной строкой; нет доступа — пусто.
+
+    POSIX: ``/proc/<pid>/cmdline``. **Windows: ``/proc`` нет вовсе**, поэтому
+    там берём команду из ``psutil`` — иначе живой процесс читался бы как
+    чужой (пустая cmdline не содержит наших маркеров) и его файл multiproc
+    метрик был бы снесён как сирота.
+    """
+    if os.name == "nt":
+        try:
+            import psutil
+
+            return " ".join(psutil.Process(pid).cmdline())
+        except Exception:
+            return ""
     try:
         with open(f"/proc/{pid}/cmdline", "rb") as f:
             return f.read().replace(b"\0", b" ").decode("utf-8", "replace")
