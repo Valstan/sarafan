@@ -79,9 +79,17 @@ async def pending(
 
 
 @router.get("/postulates", response_class=PlainTextResponse)
-async def postulates():
+async def postulates(_auth: None = Depends(require_ingest_key)):
     """Эффективные постулаты для промпта: базовый git-файл + утверждённые выученные
-    правила (overlay, ADR-0005). Рутина вставляет результат в промпт классификации."""
+    правила (overlay, ADR-0005). Рутина вставляет результат в промпт классификации.
+
+    Ключ обязателен (D-096/#015 Ф1, 01.11): текст правил — это корпус проекта,
+    а не публичная страница. До правки эндпоинт был единственным в роутере без
+    ``require_ingest_key``, и ``GET /api/classifier/postulates`` отдавал ~41 КБ
+    правил интернету без ключа. Облачная рутина ключ шлёт на каждый запрос
+    (``scripts/classifier_routine.py`` — ``_request`` всегда ставит ``X-API-Key``),
+    поэтому закрытие её не ломает.
+    """
     _check_enabled()
     async with AsyncSessionLocal() as session:
         return await rules.render_effective_postulates(session)
