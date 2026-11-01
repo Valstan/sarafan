@@ -27,9 +27,39 @@ from scripts.digest_factcheck import (  # noqa: E402
 
 
 def test_numbers_normalized_thousand_separators():
-    assert extract_numbers("вложили 1 200 рублей") == {"1200"}
-    assert extract_numbers("1 200") == extract_numbers("1200")
+    """Разряды не склеиваются: «02 215» — это два числа, а не «02215».
+
+    В пересказе про шины так получалось «02215», которого в источнике нет ни
+    разу: там «GRANDTREK ICE 02.» и «215/65 R16» — два разных числа.
+    """
+    nums = extract_numbers("DUNLOP ICE 02 215/65")
+    assert "02" in nums and "215" in nums
+    assert "02215" not in nums
     assert extract_numbers("в 2026 году") == {"2026"}
+
+
+def test_thousands_and_plain_forms_confirm_each_other():
+    """«1200» в пересказе подтверждается «1 200» в источнике."""
+    source = "Вложили 1 200 рублей в проект."
+    summary = "В проект вложили 1200 рублей."
+    assert check_facts(summary, source).numbers == []
+
+
+def test_number_spelled_out_in_source_confirms_digits():
+    """«семи миллиардов» в источнике подтверждает «7 млрд» в пересказе."""
+    source = "В Татарстане предъявили 119 исков на сумму более семи миллиардов рублей"
+    summary = "119 экологических исков на свыше 7 млрд рублей."
+    out = check_facts(summary, source)
+    assert out.numbers == []
+    assert out.strict is False
+
+
+def test_hashtag_in_source_keeps_its_number():
+    """«#АксубаевскаяСОШ2» — номер школы, и он подтверждает «СОШ2»."""
+    source = "Победителями стали Гатина Милана и Чукашов Клим! #АксубаевскаяСОШ2 #осень2026"
+    summary = "В Аксубаевской СОШ2 назвали победителей конкурсного дня."
+    out = check_facts(summary, source)
+    assert out.numbers == []
 
 
 def test_names_ignore_stopwords_but_keep_proper_nouns():

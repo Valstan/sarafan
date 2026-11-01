@@ -81,12 +81,61 @@ _URL_RE = re.compile(r"(?:https?://|vk\.ru/|vk\.com/)\S+", re.IGNORECASE)
 _MENTION_RE = re.compile(r"(?:^|\s)@[A-Za-z0-9_.]+")
 _HASHTAG_RE = re.compile(r"(?:^|\s)#[^\s#]+")
 
+#: Число словами → цифрами. Пересказ имеет право написать «на сумму более семи
+#: миллиардов» там, где источник написал «7 млрд» (и наоборот) — это не
+#: выдумка. Без этой таблицы «7» против «семи» давало строгий вердикт там,
+#: где его быть не должно (поймано на проде 01.11).
+_WORD_NUMBERS = {
+    "один": "1",
+    "одна": "1",
+    "одно": "1",
+    "одного": "1",
+    "одной": "1",
+    "два": "2",
+    "две": "2",
+    "двух": "2",
+    "двоих": "2",
+    "три": "3",
+    "трёх": "3",
+    "трех": "3",
+    "четыре": "4",
+    "пять": "5",
+    "пяти": "5",
+    "шесть": "6",
+    "семь": "7",
+    "семь": "7",
+    "семи": "7",
+    "сём": "7",
+    "восемь": "8",
+    "восьми": "8",
+    "девять": "9",
+    "девяти": "9",
+    "десять": "10",
+    "десяти": "10",
+    "сто": "100",
+    "тысяча": "1000",
+    "тысяч": "1000",
+    "тысячи": "1000",
+    "миллион": "1000000",
+    "миллиона": "1000000",
+    "миллионов": "1000000",
+    "миллиард": "1000000000",
+    "миллиарда": "1000000000",
+    "миллиардов": "1000000000",
+}
+
 #: Пункт сборника устроен как «<пересказ>\n\nИсточник: <название>». Пересказ —
 #: текст ДО маркера, название — текст ПОСЛЕ него (до пустой строки).
 _ITEM_RE = re.compile(
     r"(?:^|\n\n)(?P<summary>.+?)\n\n" + re.escape(_SOURCE_MARKER) + r" (?P<source>[^\n]+)",
     re.DOTALL,
 )
+
+#: Число с разделителем тысяч: «1 200», «1 200». Первая группа — ровно три
+#: цифры, дальше группы по три. Правило отличает «1 200» (одно число) от
+#: «02 215» (два разных числа — так и было в пересказе про шины, где склейка
+#: давала несуществующее «02215»).
+_THOUSANDS_RE = re.compile(r"\d{1,3}(?:[   ]\d{3})+")
 
 
 def normalize_text(text: str) -> str:
@@ -98,18 +147,43 @@ def normalize_text(text: str) -> str:
     return text.lower()
 
 
-def strip_non_facts(text: str) -> str:
-    """Убрать ссылки, упоминания и хэштеги: там не факты, а технические хвосты."""
+def strip_non_facts(text: str, *, keep_hashtags: bool = False) -> str:
+    """Убрать ссылки, упоминания и (по умолчанию) хэштеги.
+
+    ``keep_hashtags`` нужен для ИСТОЧНИКА: хэштег «#АксубаевскаяСОШ2» несёт
+    настоящий факт (номер школы), и его нельзя выбрасывать — иначе пересказ
+    «СОШ2» оказывался бы неподтверждённым (поймано на проде 01.11).
+    """
     text = _URL_RE.sub(" ", text)
     text = _MENTION_RE.sub(" ", text)
-    text = _HASHTAG_RE.sub(" ", text)
+    if not keep_hashtags:
+        text = _HASHTAG_RE.sub(" ", text)
     return text
 
 
-def extract_numbers(text: str) -> set[str]:
-    """Все числа текста, нормализованные ('1 200' и '1200' → '1200')."""
-    flat = re.sub(r"[\s\u00a0\u202f]", "", strip_non_facts(text))
-    return set(_NUMBER_RE.findall(flat))
+def extract_numbers(text: str, *, keep_hashtags: bool = False) -> set[str]:
+    """Все числа текста — цифровые группы КАК ЕСТЬ.
+
+    Разряды склеивать нельзя: в пересказе про шины так получалось «02215»,
+    которого в источнике нет ни разу («DUNLOP GRANDTREK ICE 02.» и «215/65
+    R16» — это два разных числа, а не одно «02215»).
+    """
+    text = strip_non_facts(text, keep_hashtags=keep_hashtags)
+    return {m.group(0) for m in re.finditer(r"\d+", text)}
+
+
+def number_confirmation_set(text: str, *, keep_hashtags: bool = False) -> set[str]:
+    """Числа, которыми источник может подтвердить число из пересказа.
+
+    Кроме раздельных групп — ещё и слитная запись с разделителем тысяч:
+    «1 200» подтверждает «1200». Склейка применяется ТОЛЬКО как форма
+    подтверждения: в самом пересказе «02 215» остаётся двумя числами.
+    """
+    out = extract_numbers(text, keep_hashtags=keep_hashtags)
+    cleaned = strip_non_facts(text, keep_hashtags=keep_hashtags)
+    for match in _THOUSANDS_RE.finditer(cleaned):
+        out.add(re.sub(r"[\s\u00a0\u202f]", "", match.group(0)))
+    return out
 
 
 def extract_names(text: str) -> set[str]:
@@ -192,7 +266,12 @@ def check_facts(summary: str, source: str) -> Unsupported:
     """Разделить неподтверждённые факты на числа (строго) и имена (совет)."""
     norm_source = normalize_text(source)
     source_words = set(_WORD_RE.findall(norm_source))
-    source_nums = extract_numbers(source)
+    # Хэштеги источника НЕ выбрасываем: «#АксубаевскаяСОШ2» — это факт.
+    source_nums = number_confirmation_set(source, keep_hashtags=True)
+    # Число словами в источнике («более семи миллиардов») подтверждает «7».
+    for word, digits in _WORD_NUMBERS.items():
+        if word in source_words:
+            source_nums.add(digits)
 
     out = Unsupported()
     for fact in sorted(extract_facts(summary)):
@@ -293,16 +372,23 @@ def check_digest(
             )
         return checks
 
-    # Ослабленный режим: весь сборник против объединения источников.
+    # Ослабленный режим: пересказы сборника против объединения источников.
+    #
+    # Проверяем ТОЛЬКО пересказы, а не весь текст стены: в тексте стены ещё
+    # заголовок («Короткой строкой»), названия источников и хвост с тегами —
+    # и в них тоже есть числа (ссылка на канал, номер в теге), которые
+    # источникам не принадлежат. Проверка всего текста давала ложные
+    # «неподтверждённые числа» (поймано на проде 01.11: «1» в регионе mi).
     pool = "\n".join(sources.get(str(r.get("lip") or ""), "") for r in rows)
+    pool_summary = "\n\n".join(items)
     checks.append(
         ItemCheck(
             region=region,
             lip=",".join(str(r.get("lip") or "") for r in rows),
             wall_url=str(rows[0].get("published_url") or "") if rows else "",
-            summary=wall_text,
+            summary=pool_summary,
             source=pool,
-            unsupported=check_facts(wall_text, pool),
+            unsupported=check_facts(pool_summary, pool),
             strict_mode=False,
             error="пункты не сопоставлены по одному — проверен весь сборник",
         )
