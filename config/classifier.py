@@ -292,6 +292,73 @@ def get_rating_views_alpha() -> float:
     return value
 
 
+# ─────────────────── Порог рейтинга в режиме деградации (01.11) ───────────────────
+#
+# Решение владельца по п.3 звена 5: в режиме деградации (движок молчит, волна
+# идёт по алгоритмическому фолбэку) публикуем НЕ ВСЁ, что прошло обычные
+# фильтры, а только то, что рейтингом доказано. Порог — тот же рейтинг, что
+# ранжирует витрину и режет квота: ``(likes + 2*comments + 3*reposts) /
+# (views + 1) ** alpha``.
+#
+# Замер 01.11 (3 суток, 10 355 кандидатов, прошедших фильтры):
+#   рейтинг 0.01..0.5 — 40.2 %, 0.5..1 — 10.9 %, 1..2 — 7.2 %, 2..5 — 2.2 %,
+#   5+ — 0.2 %, без измеренных просмотров (рейтинг неизвестен) — 24.9 %.
+# Порог 1.0 оставляет около 10 % — верхушку. Понижение порога расширяет
+# деградационную публикацию, повышение — сжимает.
+FALLBACK_MIN_RATING_DEFAULT = 1.0
+FALLBACK_MIN_RATING_MIN = 0.0
+FALLBACK_MIN_RATING_MAX = 100.0
+
+
+def get_fallback_min_rating() -> float:
+    """Порог рейтинга для волны в режиме деградации.
+
+    env ``CLASSIFIER_FALLBACK_MIN_RATING``. Нечитаемое значение — дефолт, а не
+    исключение: опечатка в env не должна ронять волну публикации (как у
+    ``RATING_VIEWS_ALPHA``). Вне диапазона — тоже дефолт, с предупреждением.
+    """
+    raw = (os.getenv("CLASSIFIER_FALLBACK_MIN_RATING") or "").strip()
+    if not raw:
+        return FALLBACK_MIN_RATING_DEFAULT
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning(
+            "CLASSIFIER_FALLBACK_MIN_RATING=%r не читается — берём дефолт %s",
+            raw,
+            FALLBACK_MIN_RATING_DEFAULT,
+        )
+        return FALLBACK_MIN_RATING_DEFAULT
+    if not (FALLBACK_MIN_RATING_MIN <= value <= FALLBACK_MIN_RATING_MAX):
+        logger.warning(
+            "CLASSIFIER_FALLBACK_MIN_RATING=%r вне диапазона %s..%s — берём дефолт %s",
+            raw,
+            FALLBACK_MIN_RATING_MIN,
+            FALLBACK_MIN_RATING_MAX,
+            FALLBACK_MIN_RATING_DEFAULT,
+        )
+        return FALLBACK_MIN_RATING_DEFAULT
+    return value
+
+
+def get_fallback_min_posts() -> int:
+    """Сколько постов всё же выпустить, если порог опустошил волну.
+
+    env ``CLASSIFIER_FALLBACK_MIN_POSTS``. Правило непустой волны: молчащая
+    районная лента хуже небольшого перебора по доле (та же мысль, что в
+    ``apply_theme_quota`` с её ``min_posts``). 0 — разрешить пустую волну.
+    """
+    raw = (os.getenv("CLASSIFIER_FALLBACK_MIN_POSTS") or "").strip()
+    if not raw:
+        return 1
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("CLASSIFIER_FALLBACK_MIN_POSTS=%r не читается — берём 1", raw)
+        return 1
+    return max(0, value)
+
+
 # ─────────────────────────── Квоты тем (заказ владельца 2026-08-30) ───────────
 
 

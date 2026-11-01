@@ -84,6 +84,80 @@ def test_policy_repeats_and_does_not_stick_in_fallback():
     assert _decide(set(), r)[0] == selection.MODE_SKIP_WAVE
 
 
+# ───────── порог рейтинга в деградации (решение владельца 01.11, п.3) ─────────
+
+
+def _vk_post(lip, *, views=100, likes=0, comments=0, reposts=0):
+    """Пост ВК словарём с метриками — так их ждёт post_utils."""
+    return {
+        "id": lip.split("_")[1],
+        "owner_id": lip.split("_")[0],
+        "views": {"count": views},
+        "likes": {"count": likes},
+        "comments": {"count": comments},
+        "reposts": {"count": reposts},
+        "text": f"текст поста {lip}",
+    }
+
+
+def test_fallback_publishes_only_posts_above_the_rating_threshold():
+    """В деградации волна публикует не всё, а только то, что рейтингом доказано.
+
+    Решение владельца 01.11 (п.3 звена 5): «движок молчит» не значит
+    «публикуем всё подряд» — хвост потока в ленту не идёт.
+    """
+    hot = _vk_post("1_1", views=100, likes=50)  # рейтинг ~0.5
+    hot2 = _vk_post("1_2", views=100, likes=200)  # рейтинг ~2
+    cold = _vk_post("1_3", views=100, likes=1)  # рейтинг ~0.01
+    kept, dropped = selection._fallback_by_rating([hot, hot2, cold])
+    lips = {p["id"] for p in kept}
+    assert "2" in lips, "рейтинг 2 должен пройти порог"
+    assert "3" not in lips, "рейтинг 0.01 не должен проходить порог"
+
+
+def test_fallback_threshold_is_configurable(monkeypatch):
+    monkeypatch.setenv("CLASSIFIER_FALLBACK_MIN_RATING", "0.0")
+    kept, _ = selection._fallback_by_rating([_vk_post("1_1", views=100, likes=1)])
+    assert len(kept) == 1
+
+
+def test_fallback_post_without_measured_views_does_not_pass(monkeypatch):
+    """Пост без измеренных просмотров порог не проходит.
+
+    Так же, как в квоте: рейтинг неизвестен — значит, доказать ценность
+    нечем, и такой пост уходит в хвост, а не наверх.
+
+    Здесь правило непустой волны выключено (``min_posts=0``), чтобы проверить
+    именно порог, а не спасение волны.
+    """
+    monkeypatch.setenv("CLASSIFIER_FALLBACK_MIN_POSTS", "0")
+    without_views = _vk_post("1_1", views=None)
+    kept, dropped = selection._fallback_by_rating([without_views])
+    assert kept == [], "рейтинг неизвестен — порог пройти не может"
+    assert dropped == 1
+
+
+def test_fallback_rescues_the_wave_even_without_measured_views(monkeypatch):
+    """Правило непустой волны работает и для постов без измеренных просмотров."""
+    monkeypatch.delenv("CLASSIFIER_FALLBACK_MIN_POSTS", raising=False)
+    without_views = _vk_post("1_1", views=None)
+    kept, dropped = selection._fallback_by_rating([without_views])
+    assert len(kept) == 1, "волна не должна остаться пустой"
+    assert dropped == 0
+
+
+def test_fallback_keeps_a_non_empty_wave_when_the_threshold_empties_it():
+    """Правило непустой волны: лучший всё же выходит, лента не молчит.
+
+    Та же мысль, что в apply_theme_quota с её min_posts: молчащая
+    районная лента хуже небольшого перебора по доле.
+    """
+    posts = [_vk_post("1_1", views=100, likes=0), _vk_post("1_2", views=100, likes=0)]
+    kept, dropped = selection._fallback_by_rating(posts)
+    assert len(kept) == 1, "волна не должна остаться пустой"
+    assert dropped == 1
+
+
 def test_waves_are_counted_per_theme():
     """У novost и afisha разные календари; общий счётчик пропускал бы
     публикации там, где всё в порядке."""
@@ -288,9 +362,12 @@ async def test_unjudged_wave_triggers_degradation_despite_region_verdicts(monkey
     )
 
     assert seen["publish_lips"] == set(), "в политику уходит пустой набор — «не судил»"
-    assert out == posts, "вторая волна публикуется алгоритмами"
     assert mode == selection.MODE_FALLBACK
-    assert removed == 0
+    # Решение владельца 01.11 (п.3): в деградации публикуется не всё, а то,
+    # что рейтингом доказано. У этих постов просмотры не измерены → рейтинг
+    # неизвестен → порог не проходят; остаётся правило непустой волны.
+    assert len(out) == 1, "деградация больше не публикует всё подряд"
+    assert removed == len(posts) - len(out)
 
 
 @pytest.mark.asyncio
@@ -443,7 +520,7 @@ async def test_fetch_wave_judged_lips_is_unknown_on_failure(caplog):
 
 
 @pytest.mark.asyncio
-async def test_fallback_mode_publishes_by_algorithms(monkeypatch):
+async def test_fallback_mode_applies_rating_threshold(monkeypatch):
     monkeypatch.setenv("CLASSIFIER_SELECTION_ENABLED", "1")
 
     async def fake_fetch(session, region_code):
@@ -452,13 +529,17 @@ async def test_fallback_mode_publishes_by_algorithms(monkeypatch):
     monkeypatch.setattr(selection, "fetch_publish_map", fake_fetch)
     monkeypatch.setattr(selection, "decide_mode", lambda **kw: (selection.MODE_FALLBACK, True))
     monkeypatch.setattr(selection, "maybe_alert", lambda **kw: "alert-sent")
-    posts = [_post(-100, 1), _post(-100, 2)]
+    # Метрики разные: первый пост переживает порог рейтинга, второй — нет.
+    posts = [
+        {**_post(-100, 1), "views": {"count": 100}, "likes": {"count": 200}},
+        {**_post(-100, 2), "views": {"count": 100}, "likes": {"count": 1}},
+    ]
     out, mode, removed = await selection.apply_wave_selection(
         None, posts, region_code="mi", theme="novost"
     )
-    assert out == posts
     assert mode == selection.MODE_FALLBACK
-    assert removed == 0
+    assert [p["id"] for p in out] == [1], "прошёл только пост с высоким рейтингом"
+    assert removed == 1
 
 
 @pytest.mark.asyncio

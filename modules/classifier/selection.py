@@ -394,6 +394,46 @@ def maybe_alert(
 MODE_DISABLED = "disabled"  # гейт выключен — волна идёт как раньше
 
 
+def _fallback_by_rating(posts):
+    """Отбор по рейтингу для режима деградации (решение владельца 01.11, п.3).
+
+    В режиме деградации вердиктов нет: раньше волна публиковала ВСЁ, что прошло
+    обычные фильтры. Теперь публикуется только то, что рейтингом доказано, —
+    иначе «движок молчит, значит публикуем всё» выдаёт в ленту хвост потока.
+
+    Рейтинг — тот же, что ранжирует витрину и режет квота. Пост без
+    измеренных просмотров (``rating`` = ``None``) порог **не** проходит: так
+    же, как в квоте («пост без измеренных просмотров уходит в хвост, а не
+    наверх»). Реакции ``None`` считаются нулём.
+
+    Правило непустой волны: если порог опустошил волну, выпускаем лучших
+    ``min_posts`` — молчащая районная лента хуже небольшого перебора по доле
+    (та же мысль, что в ``apply_theme_quota``).
+    """
+    from config.classifier import (
+        get_fallback_min_posts,
+        get_fallback_min_rating,
+        get_rating_views_alpha,
+    )
+    from utils.post_utils import post_rating_of
+
+    min_rating = get_fallback_min_rating()
+    min_posts = get_fallback_min_posts()
+    alpha = get_rating_views_alpha()
+
+    rated = []
+    for post in posts:
+        score = post_rating_of(post, alpha=alpha)
+        rated.append((score is not None, score or 0.0, post))
+
+    kept = [post for known, score, post in rated if known and score >= min_rating]
+    if kept:
+        return kept, len(posts) - len(kept)
+
+    best = sorted(rated, key=lambda item: (item[0], item[1]), reverse=True)[:min_posts]
+    return [post for _, _, post in best], len(posts) - len(best)
+
+
 def selection_enabled() -> bool:
     """Отбирать ли в сводку по меткам (env, дефолт — выкл; зеркало prepublish)."""
     import os
@@ -660,7 +700,13 @@ async def apply_wave_selection(
         if mode == MODE_SKIP_WAVE:
             return [], mode, len(posts)
         if mode == MODE_FALLBACK:
-            return list(posts), mode, 0
+            kept, dropped = _fallback_by_rating(posts)
+            logger.info(
+                "classifier selection: деградация — порог рейтинга, оставлено %d из %d",
+                len(kept),
+                len(posts),
+            )
+            return kept, mode, dropped
 
         selected = [p for p in posts if post_lip(p) in publish_lips]
         removed = len(posts) - len(selected)
