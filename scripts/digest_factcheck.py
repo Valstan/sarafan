@@ -60,6 +60,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 # --- ядро проверки (чистые функции, без БД и без VK) ------------------------
 
 #: Частые зачины предложений и служебные слова: с большой буквы, но не факт.
+#:
+#: Список расширен 02.11 по живым данным с прода: 7 «неподтверждённых имён» из
+#: 40 сборников оказались обычными словами с большой буквы («Тёплые», «Мёртвые»,
+#: «Весёлый», «Днём») — модель так начинает предложение. Плюс падежные формы
+#: прилагательных («Фёдоровской» из «Фёдоров»): они не имя, а форма слова.
 _STOP = frozenset(
     """
 это он она оно они этот эта эти тот та те этое там тогда после при для как
@@ -67,6 +72,17 @@ _STOP = frozenset(
 над под между также еще ещё уже только очень сам сама само все всё вся всее
 нет да или же бы был была было были будет будут может можно нужно
 также несмотря однако потому поэтому кроме кромее вместо
+тёплый тёплая тёплое тёплые тёпло тёплого тёплой тёплом тёплая
+тёплый день тёплые дни тёплым
+холодный холодная холодное холодные холодно холодного холодный день
+мёртвый мёртвая мёртвое мёртвые мёртво мёртвого мёртвый
+весёлый весёлая весёлое весёлые весело весёлого весёлый день
+днём днём днем утром утром утро вечером вечером ночью ночью ночь
+вчера сегодня завтра позавчера послезавтра сейчас тогда сразу скоро рядом
+здесь тут там снова затем потом теперь также недавно давно рано поздно
+вместе кроме против около после перед вместо чтобы почему зачем как
+новый новая новое новые старый старая старое старые первый первая второе
+другой другая другие другой весь вся все всее целый важный нужный новый
 """.split()
 )
 
@@ -187,7 +203,16 @@ def number_confirmation_set(text: str, *, keep_hashtags: bool = False) -> set[st
 
 
 def extract_names(text: str) -> set[str]:
-    """Слова с заглавной буквы, кроме служебного стоп-словаря."""
+    """Слова с заглавной буквы, кроме служебного стоп-словаря.
+
+    Нормализация — **та же, что у источника** (``normalize_text``): ё→е и нижний
+    регистр. Без этого «Тёплые» из пересказа не находилось рядом с «теплые» в
+    источнике, и все 7 «неподтверждённых имён» в живом замере 02.11 (40 сборников,
+    200 пунктов) оказались ложными срабатываниями на один этот асимметричный
+    регистр: «Тёплые», «Мёртвые», «Весёлый», «Днём», «Фёдоровской», «Фёдорова».
+    Источник нормализуется в ``check_facts``, а имя — нет: правило применялось
+    только к одной стороне сравнения.
+    """
     out: set[str] = set()
     for match in _WORD_RE.finditer(strip_non_facts(text)):
         word = match.group(0)
@@ -195,9 +220,10 @@ def extract_names(text: str) -> set[str]:
             continue
         if not word[0].isupper():
             continue
-        if word.lower() in _STOP:
+        normalized = normalize_text(word)
+        if normalized in _STOP:
             continue
-        out.add(word.lower())
+        out.add(normalized)
     return out
 
 
@@ -214,10 +240,16 @@ def extract_facts(text: str) -> set[str]:
 _NAME_PREFIX_MIN = 5
 
 
-def _name_matches(name: str, source_words: set[str]) -> bool:
-    """Есть ли в источнике это имя с учётом падежа."""
+def _name_match_kind(name: str, source_words: set[str]) -> str:
+    """Как имя соотносится с источником: ``exact`` / ``form`` / ``""`` (не найдено).
+
+    ``exact`` — слово совпало буквально; ``form`` — совпала падежная форма
+    («Фёдорова» из «Фёдоров»): факт подтверждён, глаза не нужны. Разделение
+    нужно, чтобы в отчёте оставались только те слова, где модель, возможно,
+    выдумала имя, а не «всё подряд с большой буквы».
+    """
     if name in source_words:
-        return True
+        return "exact"
     for word in source_words:
         common = 0
         for a, b in zip(name, word):
@@ -225,8 +257,13 @@ def _name_matches(name: str, source_words: set[str]) -> bool:
                 break
             common += 1
         if common >= _NAME_PREFIX_MIN:
-            return True
-    return False
+            return "form"
+    return ""
+
+
+def _name_matches(name: str, source_words: set[str]) -> bool:
+    """Есть ли в источнике это имя с учётом падежа."""
+    return bool(_name_match_kind(name, source_words))
 
 
 @dataclass
@@ -247,6 +284,10 @@ class Unsupported:
 
     numbers: list[str] = field(default_factory=list)
     names: list[str] = field(default_factory=list)
+    #: Падежные формы имён, найденные в источнике («Фёдорова» из «Фёдоров»):
+    #: факт подтверждён, но слово в пересказе отличается — отдельной строкой в
+    #: отчёте, чтобы не мешать в глаза тем, что правда просит проверки.
+    name_forms: list[str] = field(default_factory=list)
 
     @property
     def strict(self) -> bool:
@@ -280,8 +321,11 @@ def check_facts(summary: str, source: str) -> Unsupported:
             if value not in source_nums:
                 out.numbers.append(value)
         else:
-            if not _name_matches(value, source_words):
+            match_kind = _name_match_kind(value, source_words)
+            if match_kind == "":
                 out.names.append(value)
+            elif match_kind == "form":
+                out.name_forms.append(value)
     return out
 
 
@@ -535,12 +579,14 @@ def main() -> int:
     total_items = len(checks)
     strict_bad = [c for c in checks if c.unsupported.strict]
     advisory_bad = [c for c in checks if c.unsupported.advisory]
+    form_bad = [c for c in checks if c.unsupported.name_forms]
     report = {
         "digests": len({c.wall_url for c in checks}),
         "items": total_items,
         "strict_items": sum(1 for c in checks if c.strict_mode),
         "items_with_wrong_numbers": len(strict_bad),
         "items_with_unconfirmed_names": len(advisory_bad),
+        "items_with_name_forms": len(form_bad),
         "items_without_source": sum(1 for c in checks if c.error.startswith("нет")),
         "number_examples": [
             {
@@ -561,6 +607,16 @@ def main() -> int:
                 "summary": c.summary[:300],
             }
             for c in advisory_bad[: args.show]
+        ],
+        "name_form_examples": [
+            {
+                "region": c.region,
+                "lip": c.lip,
+                "wall": c.wall_url,
+                "name_forms": c.unsupported.name_forms,
+                "summary": c.summary[:300],
+            }
+            for c in form_bad[: args.show]
         ],
     }
 
@@ -586,6 +642,13 @@ def main() -> int:
         print(f"пунктов без текста источника: {report['items_without_source']}")
     for ex in report["name_examples"]:
         print(f"  — {ex['region']}: {', '.join(ex['names'])}")
+    print()
+    print(
+        f"ФОРМА СЛОВА (факт подтверждён, слово отличается) — пунктов: "
+        f"{report['items_with_name_forms']}"
+    )
+    for ex in report["name_form_examples"]:
+        print(f"  — {ex['region']}: {', '.join(ex['name_forms'])}")
     return 0
 
 

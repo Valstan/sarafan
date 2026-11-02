@@ -269,3 +269,42 @@ def test_check_digest_flags_fabrication_against_its_own_source():
 def test_geography_is_not_silently_swapped(summary, source, expect_empty):
     missing = unsupported_facts(summary, source)
     assert (missing == []) is expect_empty, missing
+
+
+@pytest.mark.parametrize(
+    "summary,source",
+    [
+        ("Тёплые дорогие к зиме", "Теплые дорогие к зиме, готовьтесь"),
+        ("Мёртвые дубы у пацана", "Мертвые дубы у пацана спилили"),
+        ("Весёлый праздник прошёл", "Веселый праздник прошёл в селе"),
+        ("Днём в городе жарко", "Днем в городе жарко, все гуляют"),
+    ],
+)
+def test_yo_e_is_normalized_on_both_sides(summary, source):
+    """«Тёплые» из пересказа == «теплые» из источника.
+
+    Живой замер на проде 02.11 (40 сборников, 200 пунктов) дал 7 «неподтверждённых
+    имён» — и все семь оказались ложными: правило «ё→е» применялось только к
+    источнику, а имя из пересказа сравнивалось как есть. Сравнение должно быть
+    симметричным.
+    """
+    out = check_facts(summary, source)
+    assert out.names == [], out.names
+    assert out.numbers == []
+
+
+def test_case_form_of_a_name_is_reported_separately():
+    """Падежная форма («Фёдорова» из «Федоров») — факт подтверждён, глаза не нужны."""
+    out = check_facts("Фёдорова отчитался", "Федоров отчитался о работе")
+
+    assert out.names == []
+    assert out.name_forms == ["федорова"]
+
+
+def test_invented_name_is_still_caught():
+    """Правка регистра не превращает инструмент в формальность."""
+    out = check_facts("По словам Фёдора Кузьмина", "По словам жителей села")
+
+    # Имена нормализованы (ё→е), как и слова источника.
+    assert "федора" in out.names
+    assert "кузьмина" in out.names
