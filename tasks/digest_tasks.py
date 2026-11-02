@@ -224,8 +224,7 @@ async def _photo_attachments(publisher: Any, region: Any, draft: Any) -> List[st
             if not raw:
                 continue
             processed = await asyncio.to_thread(process_photo, raw, photo.watermark)
-            client, _is_community = publisher._client_for_group(region.vk_group_id)
-            att = await upload_wall_photo(client, region.vk_group_id, processed)
+            att = await upload_wall_photo(publisher, region.vk_group_id, processed)
             if att:
                 attachments.append(att)
         except Exception:  # noqa: BLE001 — фото не обязано быть
