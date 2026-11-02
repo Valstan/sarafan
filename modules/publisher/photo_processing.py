@@ -184,9 +184,7 @@ async def upload_wall_photo(
     gid = abs(int(group_id))
     try:
         client, _is_community = publisher._client_for_group(gid)
-        server = await publisher._invoke(
-            client, "photos.getWallUploadServer", {"group_id": gid}
-        )
+        server = await publisher._invoke(client, "photos.getWallUploadServer", {"group_id": gid})
         upload_url = (server or {}).get("upload_url")
         if not upload_url:
             logger.warning("photo: upload-сервер не вернул url")
