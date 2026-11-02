@@ -113,14 +113,17 @@ def test_noise_is_subtle():
     assert 120 < mean < 136
 
 
-class _FakeClient:
-    """Клиент ВК с одним фото: ``_make_request`` отвечает по-разному."""
+class _FakePublisher:
+    """Публикатор с одним фото: ``_invoke`` отвечает по-разному на методы."""
 
     def __init__(self, *, fail: bool = False):
         self.fail = fail
         self.calls = []
 
-    async def _make_request(self, method, params):
+    def _client_for_group(self, group_id: int):
+        return object(), True
+
+    async def _invoke(self, client, method, params):
         self.calls.append((method, params))
         if self.fail:
             raise RuntimeError("ВК недоступен")
@@ -133,23 +136,25 @@ class _FakeClient:
 
 @pytest.mark.asyncio
 async def test_upload_wall_photo_returns_attachment(monkeypatch):
-    client = _FakeClient()
+    publisher = _FakePublisher()
     monkeypatch.setattr("requests.post", _fake_post)
 
-    att = await upload_wall_photo(client, -42, b"jpeg-bytes")
+    att = await upload_wall_photo(publisher, -42, b"jpeg-bytes")
 
     assert att == "photo-42_777"
-    methods = [m for m, _ in client.calls]
+    methods = [m for m, _ in publisher.calls]
     assert methods == ["photos.getWallUploadServer", "photos.saveWallPhoto"]
+    # Загрузка идёт в ту же группу, в которую публикуем.
+    assert publisher.calls[0][1]["group_id"] == 42
 
 
 @pytest.mark.asyncio
 async def test_upload_wall_photo_survives_failure(monkeypatch):
     """Фото не обязано быть: ошибка ВК не должна ронять сборник."""
-    client = _FakeClient(fail=True)
+    publisher = _FakePublisher(fail=True)
     monkeypatch.setattr("requests.post", _fake_post)
 
-    assert await upload_wall_photo(client, -42, b"jpeg-bytes") is None
+    assert await upload_wall_photo(publisher, -42, b"jpeg-bytes") is None
 
 
 class _FakeResponse:

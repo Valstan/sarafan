@@ -161,7 +161,7 @@ def download_photo(url: str, *, timeout: int = _DOWNLOAD_TIMEOUT) -> Optional[by
 
 
 async def upload_wall_photo(
-    client: Any, group_id: int, image_bytes: bytes, *, filename: str = "digest.jpg"
+    publisher: Any, group_id: int, image_bytes: bytes, *, filename: str = "digest.jpg"
 ) -> Optional[str]:
     """Залить фото в группу и вернуть строку вложения ``photo<owner>_<id>``.
 
@@ -169,8 +169,13 @@ async def upload_wall_photo(
     **этому** сообществу. Токен — тот, которым идёт публикация (community-токен
     группы), иначе VK отклонит вложение.
 
-    ``client`` — duck-typed: любой с ``async _make_request(method, params)``
-    (как :class:`modules.vk_monitor.vk_client_async.VKClientAsync`).
+    Вызовы идут через ``publisher._invoke`` — это тот же шов, которым публикуется
+    сам пост: rate-limit токена, community-токен вместо publish-токена и единая
+    обработка отказа ВК. Свой клиент здесь означал бы второй путь в ВК мимо
+    ограничений — ровно то, чего в проекте избегают.
+
+    ``publisher`` — duck-typed: нужен ``_client_for_group(group_id)`` и
+    ``_invoke(client, method, params)``.
     """
     import asyncio
 
@@ -178,7 +183,10 @@ async def upload_wall_photo(
 
     gid = abs(int(group_id))
     try:
-        server = await client._make_request("photos.getWallUploadServer", {"group_id": gid})
+        client, _is_community = publisher._client_for_group(gid)
+        server = await publisher._invoke(
+            client, "photos.getWallUploadServer", {"group_id": gid}
+        )
         upload_url = (server or {}).get("upload_url")
         if not upload_url:
             logger.warning("photo: upload-сервер не вернул url")
@@ -197,7 +205,8 @@ async def upload_wall_photo(
             logger.warning("photo: upload вернул пусто: %s", str(up)[:150])
             return None
 
-        saved = await client._make_request(
+        saved = await publisher._invoke(
+            client,
             "photos.saveWallPhoto",
             {
                 "photo": up["photo"],
@@ -206,12 +215,25 @@ async def upload_wall_photo(
                 "group_id": gid,
             },
         )
-        items = (saved or {}).get("items") or []
-        if not items:
+        photo = _first_photo_item(saved)
+        if photo is None:
             logger.warning("photo: saveWallPhoto вернул пусто")
             return None
-        photo = items[0]
         return f"photo{photo['owner_id']}_{photo['id']}"
     except Exception as e:  # noqa: BLE001 — фото не обязано быть
         logger.warning("photo: загрузка не удалась: %s", e)
         return None
+
+
+def _first_photo_item(saved: Any) -> Optional[dict]:
+    """Достать фото из ответа ВК: у ``photos.saveWallPhoto`` это ``items[0]``."""
+    if isinstance(saved, list):
+        items = saved
+    elif isinstance(saved, dict):
+        items = saved.get("items") or []
+    else:
+        return None
+    for item in items:
+        if isinstance(item, dict) and item.get("id") is not None:
+            return item
+    return None

@@ -47,6 +47,7 @@ def test_photos_switch_is_read_from_env(monkeypatch):
 @pytest.mark.asyncio
 async def test_photo_attachments_builds_one_per_photo(monkeypatch):
     processed = []
+    seen_publishers = []
 
     def fake_download(url, **kw):
         return b"raw-jpeg"
@@ -55,13 +56,17 @@ async def test_photo_attachments_builds_one_per_photo(monkeypatch):
         processed.append(watermark)
         return b"processed-jpeg"
 
-    async def fake_upload(client, group_id, image_bytes, **kw):
+    async def fake_upload(publisher, group_id, image_bytes, **kw):
+        # Первым аргументом идёт ИМЕННО публикатор: загрузка идёт через его
+        # шов (`_invoke`), тем же токеном и тем же rate-limit, что и публикация.
+        seen_publishers.append(publisher)
         return f"photo-42_{len(processed)}"
 
     monkeypatch.setattr("modules.publisher.photo_processing.download_photo", fake_download)
     monkeypatch.setattr("modules.publisher.photo_processing.process_photo", fake_process)
     monkeypatch.setattr("modules.publisher.photo_processing.upload_wall_photo", fake_upload)
 
+    publisher = _FakePublisher([])
     draft = _FakeDraft(
         [
             DigestPhoto(url="https://cdn/1.jpg", watermark="Клуб села"),
@@ -69,10 +74,11 @@ async def test_photo_attachments_builds_one_per_photo(monkeypatch):
         ]
     )
 
-    attachments = await digest_tasks._photo_attachments(_FakePublisher([]), _FakeRegion(), draft)
+    attachments = await digest_tasks._photo_attachments(publisher, _FakeRegion(), draft)
 
     assert attachments == ["photo-42_1", "photo-42_2"]
     assert processed == ["Клуб села", "Дом культуры"]
+    assert seen_publishers == [publisher, publisher]
 
 
 @pytest.mark.asyncio
