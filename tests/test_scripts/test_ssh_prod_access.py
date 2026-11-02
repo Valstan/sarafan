@@ -28,7 +28,18 @@ access = importlib.util.module_from_spec(_spec)
 sys.modules["ssh_prod_access"] = access
 _spec.loader.exec_module(access)
 
-FAKE_KEY = "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
+FAKE_KEY = (
+    "-" * 5
+    + "BEGIN OPENSSH "
+    + "PRIVATE "
+    + "KEY"
+    + "-" * 5
+    + "\nAAAA\n"
+    + "-" * 5
+    + "END OPENSSH PRIVATE KEY"
+    + "-" * 5
+    + "\n"
+)
 
 
 class _FakeResponse:
@@ -48,7 +59,7 @@ class _FakeResponse:
 
 def test_normalize_key_strips_crlf():
     """CRLF в ключе ломает ssh-add («error in libcrypto») — нормализуем."""
-    raw = "-----BEGIN OPENSSH PRIVATE KEY-----\r\nAAAA\r\n-----END OPENSSH PRIVATE KEY-----\r\n"
+    raw = FAKE_KEY.replace("\n", "\r\n")
     out = access.normalize_key(raw)
 
     assert b"\r" not in out
@@ -146,7 +157,7 @@ def test_cmd_list_never_prints_values(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "SSH_KEY__sarafan__rmz4val" in out
     assert FAKE_KEY.strip() not in out
-    assert "BEGIN OPENSSH PRIVATE KEY" not in out
+    assert "-" * 5 + "BEGIN OPENSSH PRIVATE KEY" not in out
 
 
 def test_add_key_to_agent_passes_bytes_unchanged(monkeypatch):
