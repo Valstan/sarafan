@@ -3,8 +3,30 @@
 **Смена смысла вердикта.** До сих пор вердикт работал вычитанием:
 ``enforce.fetch_blocked_lips`` убирал ``delete``/``hold`` из кандидатов, а сам
 отбор вели алгоритмические фильтры. Метка ``publish`` не значила «взять» — она
-значила «не мешать». Здесь наоборот: в сводку идут ТОЛЬКО посты с ``publish``,
-а редакционные фильтры отключаются как второй, слепой редактор.
+значила «не мешать». Здесь наоборот: в сводку идут посты с ``publish``, а
+редакционные фильтры отключаются как второй, слепой редактор.
+
+**П.3 разбора 21.08 — решение владельца 2026-11-02: «нет вердикта» НЕ значит
+«не публиковать».** Гейт стал вычитающим по-настоящему: он блокирует ровно то,
+что ОСУДИЛ (``delete``/``hold``), а посты без вердикта идут по обычным фильтрам.
+Раньше отбор брал ТОЛЬКО ``publish``, и «нет вердикта» молча означало «не
+публиковать» — это и было то самое п.3, которое «так никто и не решал».
+
+Сколько стоило это молчание: 269 постов на 72 района (3.7/сутки) — лента голодала
+не потому, что движок отказывал, а потому, что его не спросили (P210).
+
+Три разных «нет вердикта», и разница между ними обязана остаться разной:
+
+- **движок молчит на весь регион** — политика деградации ниже (пропуск волны,
+  затем алгоритмы);
+- **вердикты прочитать не удалось** — это чтение, а не отказ движка: права на
+  fail-open у него нет, отбор остаётся прежним (публикуем только явные
+  ``publish``);
+- **движок судил, но конкретный пост не судил** (пост без текста, чанк не
+  дошёл) — публикуется по обычным фильтрам.
+
+Аварийный тормоз: ``CLASSIFIER_SELECTION_FAIL_OPEN=0`` возвращает прежнее
+поведение без выката кода.
 
 **Зачем меняем.** Измерено 2026-08-12: из 2313 постов, отброшенных алгоритмами,
 ИИ-фильтр считает публикуемыми 995 (43%) — фильтр ``advertisement`` резал
@@ -236,6 +258,82 @@ async def fetch_wave_judged_lips(session, lips: Set[str], region_code: str) -> O
         return None
 
 
+async def fetch_wave_actions(session, lips: Set[str], region_code: str) -> Optional[Dict[str, str]]:
+    """lip → эффективное действие вердикта по кандидатам ВОЛНЫ.
+
+    Решение владельца 2026-11-02 (п.3 разбора 21.08): пост без вердикта
+    публикуется по обычным фильтрам, поэтому гейт становится вычитающим — он
+    блокирует ровно то, что ОСУДИЛ, и не больше. Для этого отбору нужно знать
+    действия движка по конкретным кандидатам волны, а не по всему региону:
+    волна — десятки постов, регион — тысячи вердиктов.
+
+    Правка оператора главнее решения ИИ — та же семантика, что у карты publish
+    (``fetch_publish_map``): «action» из ``ClassificationCorrection``.
+
+    None — прочитать не удалось. Разница решает судьбу ленты: пустое множество
+    означало бы «движок никого не осудил» (тогда посты без вердикта идут), а
+    неизвестность — «не знаю, кого осудил» (тогда непроверенное не выпускаем,
+    это чтение, а не отказ движка).
+    """
+    if not lips:
+        return {}
+    if session is None:
+        return None
+
+    from datetime import datetime, timedelta
+
+    from sqlalchemy import select
+
+    try:
+        from config.classifier import get_source_days
+        from database.models_extended import ClassificationCorrection, ContentClassification
+
+        cutoff = datetime.utcnow() - timedelta(days=get_source_days())
+        rows = (
+            await session.execute(
+                select(
+                    ContentClassification.id,
+                    ContentClassification.lip,
+                    ContentClassification.verdict,
+                ).where(
+                    ContentClassification.lip.in_(list(lips)),
+                    ContentClassification.region_code == region_code,
+                    ContentClassification.created_at >= cutoff,
+                )
+            )
+        ).all()
+        if not rows:
+            return {}
+
+        corr_rows = (
+            await session.execute(
+                select(
+                    ClassificationCorrection.classification_id,
+                    ClassificationCorrection.verdict_type,
+                    ClassificationCorrection.operator_value,
+                ).where(
+                    ClassificationCorrection.classification_id.in_([r[0] for r in rows]),
+                    ClassificationCorrection.verdict_type == "action",
+                    ClassificationCorrection.outcome == "correct",
+                )
+            )
+        ).all()
+        operator_action = {cid: val for cid, vtype, val in corr_rows if vtype == "action"}
+
+        actions: Dict[str, str] = {}
+        for cid, lip, verdict in rows:
+            action = operator_action.get(cid)
+            if action is None:
+                action = ((verdict or {}).get("action") or "").strip().lower()
+            else:
+                action = str(action or "").strip().lower()
+            actions[str(lip)] = action
+        return actions
+    except Exception as e:  # noqa: BLE001 — усилитель, не точка отказа
+        logger.warning("classifier selection: действия вердиктов волны не удалось: %s", e)
+        return None
+
+
 def _skip_key(region_code: str, theme: str) -> str:
     return f"{KEY_PREFIX}:skipped:{region_code}:{theme}"
 
@@ -399,6 +497,27 @@ def selection_enabled() -> bool:
     import os
 
     return os.getenv("CLASSIFIER_SELECTION_ENABLED", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+
+def selection_fail_open() -> bool:
+    """Публиковать ли посты, по которым движок не вынес вердикта.
+
+    Решение владельца 2026-11-02 (п.3 разбора 21.08): «нет вердикта» НЕ значит
+    «не публиковать» — такой пост идёт по обычным фильтрам, а гейт блокирует
+    только осуждённое.
+
+    Дефолт — включено: это утверждённая политика, а не эксперимент. Флаг
+    оставлен аварийным тормозом: снять эффект можно переменной на боксе, без
+    выката кода — лента 72 районов не должна ждать релиз, чтобы её починить.
+    """
+    import os
+
+    return os.getenv("CLASSIFIER_SELECTION_FAIL_OPEN", "1").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -662,8 +781,41 @@ async def apply_wave_selection(
         if mode == MODE_FALLBACK:
             return list(posts), mode, 0
 
-        selected = [p for p in posts if post_lip(p) in publish_lips]
+        # Решение владельца 2026-11-02 (п.3 разбора 21.08): «нет вердикта» НЕ
+        # значит «не публиковать». Гейт вычитающий: он блокирует ровно то, что
+        # ОСУДИЛ, а посты без вердикта идут по обычным фильтрам. Раньше отбор
+        # брал ТОЛЬКО publish, и «нет вердикта» молча значило «не публиковать» —
+        # лента голодала там, где движок просто не успел (269 постов на 72
+        # района, P210).
+        wave_actions = None
+        if selection_fail_open():
+            wave_actions = await fetch_wave_actions(
+                session, {post_lip(p) for p in posts}, region_code
+            )
+
+        if wave_actions is None:
+            # Не знаем, кого осудил движок: непроверенное не выпускаем. Это
+            # чтение, а не отказ движка, и права на fail-open у него нет.
+            selected = [p for p in posts if post_lip(p) in publish_lips]
+        else:
+            blocked_lips = {
+                lip for lip, action in wave_actions.items() if action in ("delete", "hold")
+            }
+            selected = [p for p in posts if post_lip(p) not in blocked_lips]
         removed = len(posts) - len(selected)
+
+        # Счётчики причин отсева — по отбору по вердиктам, до квоты.
+        # ``безвердикта``: сколько убранных постов движок не судил вовсе. При
+        # живом чтении вердиктов таких нет — гейт убирает только осуждённое.
+        # Ненулевое число означает, что вердикты прочитать не удалось и волна
+        # урезана по прежнему правилу. ``безтекста``: сколько убранных постов
+        # движок судить не мог — текста нет (`has_text`).
+        removed_lips = {post_lip(p) for p in posts} - {post_lip(p) for p in selected}
+        judged_lips = set(publish_lips) | set(wave_actions or {})
+        no_verdict = sum(
+            1 for p in posts if post_lip(p) in removed_lips and post_lip(p) not in judged_lips
+        )
+        no_text = sum(1 for p in posts if post_lip(p) in removed_lips and not has_text(p))
 
         # Квота тем (заказ владельца 2026-08-30). Врезана здесь, а не выше или
         # ниже по волне, по трём причинам: сигнатура apply_wave_selection не
@@ -678,24 +830,16 @@ async def apply_wave_selection(
             theme_of=lambda p: publish_map.get(post_lip(p)),
         )
         removed += sum(quota_dropped.values())
-        # Сколько из убранных движок не судил вовсе. Пост без текста headless
-        # пропускает намеренно (`has_text`, headless.py:85), вердикта у него не
-        # появляется — а отбор берёт ТОЛЬКО publish, и «нет вердикта» молча
-        # значит «не публиковать». В вычитающем мире такой пост публиковался.
-        # Без этого числа `отобрано=0` неразличимо: то ли нейросеть отбраковала
-        # всё, то ли ей нечего было судить. Замер 2026-08-21: 56% пустых волн —
-        # второе. Берём ИМЕННО `has_text` движка, а не свою копию условия:
-        # разошедшиеся определения — самый незаметный способ мерить не то.
-        no_text = sum(1 for p in posts if post_lip(p) not in publish_lips and not has_text(p))
         logger.info(
             "classifier selection: регион=%s тема=%s кандидатов=%d отобрано=%d"
-            " убрано=%d безтекста=%d квота=%s",
+            " убрано=%d безтекста=%d безвердикта=%d квота=%s",
             region_code,
             theme,
             len(posts),
             len(selected),
             removed,
             no_text,
+            no_verdict,
             # Пишем в ту же строку, что и режим отбора, и именно СОСТОЯНИЕ квоты:
             # по одному словарю убранного не отличить «выключена» от «ничего не
             # срезала» и от «срезала, но правило непустой волны вернуло пост».
