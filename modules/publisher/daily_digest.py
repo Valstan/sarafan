@@ -31,6 +31,7 @@ PR #752). 87 % отобранного материала умирает не п�
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -49,6 +50,10 @@ DEFAULT_ITEMS = 5
 MAX_ITEMS = 7
 MAX_ITEM_CHARS = 260
 MAX_TOTAL_CHARS = 3400
+
+#: Сколько фото может идти в сборник (P214). Три — по замыслу владельца:
+#: картинки первых пунктов, чтобы рубрика не превратилась в галерею.
+MAX_DIGEST_PHOTOS = 3
 
 
 def _rating(row: Any) -> float:
@@ -113,6 +118,10 @@ class DigestItem:
     text: str
     source_name: str = ""
     lip: str = ""
+    #: Прямая ссылка на фото источника (если есть). Само фото к сборнику не
+    #: прикрепляется как есть — его обрабатывают (водяной знак, ресайз) и
+    #: заливают к нам (P214), поэтому в сборник идёт ссылка, а не id фото.
+    photo_url: str = ""
 
     def render(self) -> str:
         block = self.text.strip()
@@ -122,12 +131,24 @@ class DigestItem:
 
 
 @dataclass
+class DigestPhoto:
+    """Фото пункта сборника: откуда взять и что напечатать поверх."""
+
+    url: str
+    #: Название сообщества-источника — им помечается фото (P203/P214).
+    watermark: str = ""
+
+
+@dataclass
 class DigestDraft:
     """Готовый сборник: текст поста и lip'ы, которые он «израсходовал»."""
 
     text: str
     lips: List[str] = field(default_factory=list)
     items: List[DigestItem] = field(default_factory=list)
+    #: Фото первых пунктов (P214): обрабатываются и заливаются отдельно — в
+    #: самом посте они не видны.
+    photos: List[DigestPhoto] = field(default_factory=list)
 
 
 def day_start_utc(now: Optional[datetime] = None) -> datetime:
@@ -167,6 +188,34 @@ def _owner_id_from_lip(lip: str) -> int:
         return int(str(lip).split("_", 1)[0])
     except (TypeError, ValueError):
         return 0
+
+
+def _first_photo_url(media: Any) -> str:
+    """Первая фотография поста из медиа-профиля журнала сбора.
+
+    В ``collected_post_audit.media`` лежит список ``{type, url}`` — только прямые
+    ссылки, без id фото. Для сборника нужна именно ссылка: фото проходит
+    обработку (водяной знак, ресайз — P214) и заливается к нам заново, поэтому
+    чужой id фото в сборнике бесполезен.
+    """
+    if not media:
+        return ""
+    if isinstance(media, (str, bytes)):
+        try:
+            media = json.loads(media)
+        except (TypeError, ValueError):
+            return ""
+    if not isinstance(media, list):
+        return ""
+    for item in media:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("type") or "").lower() != "photo":
+            continue
+        url = str(item.get("url") or "").strip()
+        if url:
+            return url
+    return ""
 
 
 async def collect_candidates(
@@ -234,6 +283,7 @@ async def collect_candidates(
                 "collected_at": getattr(row, "collected_at", None),
                 "score": _rating(row),
                 "theme": getattr(row, "theme", None),
+                "photo_url": _first_photo_url(getattr(row, "media", None)),
             }
         )
 
@@ -421,6 +471,7 @@ async def build_digest_from_posts(
                 text=summary,
                 source_name=str(names.get(str(post["owner_id"])) or ""),
                 lip=post["lip"],
+                photo_url=str(post.get("photo_url") or ""),
             )
         )
 
@@ -448,7 +499,16 @@ async def build_digest_from_posts(
         )
         return None
 
-    return DigestDraft(text=text, lips=[item.lip for item in items], items=items)
+    return DigestDraft(
+        text=text,
+        lips=[item.lip for item in items],
+        items=items,
+        photos=[
+            DigestPhoto(url=item.photo_url, watermark=item.source_name)
+            for item in items
+            if item.photo_url
+        ][:MAX_DIGEST_PHOTOS],
+    )
 
 
 async def build_digest(

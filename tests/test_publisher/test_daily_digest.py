@@ -46,6 +46,7 @@ def _add(
     views: int = 0,
     likes: int = 0,
     decision: str = "kept",
+    media=None,
 ):
     session.add(
         CollectedPostAudit(
@@ -59,6 +60,7 @@ def _add(
             likes=likes,
             comments=0,
             reposts=0,
+            media=media,
         )
     )
 
@@ -358,3 +360,73 @@ async def test_remember_published_updates_global_cursor(db_session):
     )
     assert row is not None
     assert row.lip == ["100_1", "100_2", "100_3"], "повтор не дублируется, порядок сохранён"
+
+
+# ───────── фото в сборнике (P214) ─────────
+
+
+@pytest.mark.asyncio
+async def test_draft_carries_photos_with_source_watermark(db_session, monkeypatch):
+    """Фото пункта едет в сборник вместе с названием сообщества-источника.
+
+    На картинку печатается имя источника (P203: «водяной знак названия
+    инфо-группы»), поэтому в черновике рядом с ссылкой лежит и подпись.
+    """
+    for index in range(4):
+        _add(
+            db_session,
+            f"100_{index}",
+            text=f"Событие номер {index}. " + TEXT,
+            hours_ago=index + 1,
+            media=[{"type": "photo", "url": f"https://cdn.vk.example/{index}.jpg"}],
+        )
+    await db_session.commit()
+    monkeypatch.setattr(
+        rewriter,
+        "_chat_call",
+        lambda **kw: _ok_answer(
+            *[
+                f"Пересказ новости номер {i} в двух предложениях, без лишних деталей."
+                for i in range(4)
+            ]
+        ),
+    )
+
+    draft = await daily_digest.build_digest(
+        db_session,
+        "mi",
+        names={"100": "Верхнедеревенский клуб"},
+        theme_tags=["коротко"],
+        local_hashtag="#Малмыж",
+        region_name="Малмыж",
+        since=datetime.utcnow() - timedelta(hours=24),
+    )
+
+    assert draft is not None
+    assert draft.photos, "фото источника не доехали до черновика"
+    assert len(draft.photos) <= daily_digest.MAX_DIGEST_PHOTOS
+    assert all(p.watermark == "Верхнедеревенский клуб" for p in draft.photos)
+    assert all(p.url.startswith("https://cdn.vk.example/") for p in draft.photos)
+
+
+@pytest.mark.asyncio
+async def test_draft_without_media_has_no_photos(db_session, monkeypatch):
+    """Пост без фото — просто пункт без картинки, а не ошибка сборки."""
+    for index in range(3):
+        _add(db_session, f"100_{index}", text=f"Событие номер {index}. " + TEXT)
+    await db_session.commit()
+    monkeypatch.setattr(
+        rewriter,
+        "_chat_call",
+        lambda **kw: _ok_answer(*[f"Пересказ новости номер {i}." for i in range(3)]),
+    )
+
+    draft = await daily_digest.build_digest(
+        db_session,
+        "mi",
+        since=datetime.utcnow() - timedelta(hours=24),
+        region_name="Малмыж",
+    )
+
+    assert draft is not None
+    assert draft.photos == []

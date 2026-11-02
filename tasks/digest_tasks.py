@@ -13,6 +13,7 @@ Kill-switch — ``DAILY_DIGEST_ENABLED=0``: рубрика выключаетс�
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -40,6 +41,16 @@ def publish_daily_digest(
 
 def _enabled() -> bool:
     raw = (os.getenv("DAILY_DIGEST_ENABLED", "1") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _photos_enabled() -> bool:
+    """Фото в сборнике (P214). Kill-switch — ``DAILY_DIGEST_PHOTOS=0``.
+
+    По умолчанию включено: это утверждённое решение владельца. Отключается
+    одной переменной, без выката — на случай, если картинки поедут.
+    """
+    raw = (os.getenv("DAILY_DIGEST_PHOTOS", "1") or "1").strip().lower()
     return raw not in ("0", "false", "no", "off")
 
 
@@ -189,6 +200,44 @@ async def _source_names(session: Any, posts: List[Dict[str, Any]]) -> Dict[str, 
     return names
 
 
+async def _photo_attachments(publisher: Any, region: Any, draft: Any) -> List[str]:
+    """Фото пунктов сборника → строки вложений ``photo<owner>_<id>``.
+
+    Путь: скачать фото источника → обработать (водяной знак сообщества, шум,
+    ресайз без кропа — спецификация владельца из P203) → залить в **нашу**
+    группу и приложить уже свой id. Чужое фото приложить нельзя: VK не отдаст
+    id чужого сообщества, а «как есть» — это и есть репост без обработки.
+
+    Всё это — надстройка: любая ошибка (фото не скачалось, не загрузилось,
+    ВК отказал) оставляет сборник **без** картинки, но не роняет рубрику.
+    """
+    photos = list(getattr(draft, "photos", None) or [])
+    if not photos or not _photos_enabled():
+        return []
+
+    from modules.publisher.photo_processing import download_photo, process_photo, upload_wall_photo
+
+    attachments: List[str] = []
+    for photo in photos:
+        try:
+            raw = await asyncio.to_thread(download_photo, photo.url)
+            if not raw:
+                continue
+            processed = await asyncio.to_thread(process_photo, raw, photo.watermark)
+            client, _is_community = publisher._client_for_group(region.vk_group_id)
+            att = await upload_wall_photo(client, region.vk_group_id, processed)
+            if att:
+                attachments.append(att)
+        except Exception:  # noqa: BLE001 — фото не обязано быть
+            logger.warning(
+                "daily digest: регион=%s фото не прикреплено (%s)",
+                region.code,
+                getattr(photo, "url", "")[:80],
+                exc_info=True,
+            )
+    return attachments
+
+
 async def _publish(session: Any, region: Any, draft: Any) -> Dict[str, Any]:
     from modules.publication_journal import record_publication
     from modules.publisher.vk_publisher_extended import VKPublisher
@@ -196,10 +245,11 @@ async def _publish(session: Any, region: Any, draft: Any) -> Dict[str, Any]:
     publisher = await VKPublisher.create_with_policy(
         session, target_group_id=region.vk_group_id, test_polygon_mode=False
     )
+    attachments = await _photo_attachments(publisher, region, draft)
     result = await publisher.publish_bulletin(
         group_id=region.vk_group_id,
         text=draft.text,
-        attachments=[],
+        attachments=attachments,
     )
     published = bool(isinstance(result, dict) and result.get("success"))
 
