@@ -154,6 +154,9 @@ async def _digest_for_region(session: Any, region: Any, *, dry_run: bool) -> Dic
         region_code=region.code,
         max_total_chars=max_total_chars,
         photo_candidates=photo_candidates,
+        # Водяной знак на фото — название НАШЕЙ группы («МАЛМЫЖ - ИНФО»), куда
+        # выходит сборник: это её марка, а не подпись чужого сообщества.
+        photo_watermark=str(getattr(region, "name", "") or ""),
     )
     if draft is None:
         return {"region": region.code, "skipped": "empty_digest"}
