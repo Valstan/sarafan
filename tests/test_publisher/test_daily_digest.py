@@ -538,13 +538,15 @@ async def test_photo_only_photos_come_first_and_item_photos_fill_the_rest(db_ses
             media=[{"type": "photo", "url": f"https://cdn/item-{index}.jpg"}],
         )
     # Рейтинг у фото-only постов разный — иначе порядок при равной оценке зависел
-    # от микросекунд сбора и тест был нестабилен (ловил CI).
-    for index, views in enumerate((500, 100)):
+    # от микросекунд сбора и тест был нестабилен (ловил CI). Разные ЛАЙКИ, а не
+    # просмотры: в формуле рейтинга просмотры стоят в знаменателе, а отклик — в
+    # числителе (``post_rating``: (likes + 2*comments + 3*reposts) / (views+1)^alpha).
+    for index, likes in enumerate((10, 1)):
         _add(
             db_session,
             f"200_{index}",
             text=None,
-            views=views,
+            likes=likes,
             media=[{"type": "photo", "url": f"https://cdn/only-{index}.jpg"}],
         )
     await db_session.commit()
