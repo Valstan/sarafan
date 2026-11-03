@@ -51,9 +51,14 @@ MAX_ITEMS = 7
 MAX_ITEM_CHARS = 260
 MAX_TOTAL_CHARS = 3400
 
-#: Сколько фото может идти в сборник (P214). Три — по замыслу владельца:
-#: картинки первых пунктов, чтобы рубрика не превратилась в галерею.
-MAX_DIGEST_PHOTOS = 3
+#: Потолок вложений на один пост ВК — десять. Это общий потолок сборника:
+#: столько фотографий может уйти в пост в сумме.
+MAX_DIGEST_PHOTOS = 10
+
+#: Сколько фото **пересказанных** пунктов может попасть в пост (шаг 1 медиа).
+#: Места остаются только если нет фото-only постов: те важнее — у них нет
+#: никакого другого представления, кроме самой картинки.
+MAX_DIGEST_ITEM_PHOTOS = 3
 
 
 def _rating(row: Any) -> float:
@@ -132,11 +137,13 @@ class DigestItem:
 
 @dataclass
 class DigestPhoto:
-    """Фото пункта сборника: откуда взять и что напечатать поверх."""
+    """Фото, которое едет в сборник: откуда взять, что напечатать, чей это lip."""
 
     url: str
     #: Название сообщества-источника — им помечается фото (P203/P214).
     watermark: str = ""
+    #: lip поста-источника: по нему фото «списывается» из дедупа.
+    lip: str = ""
 
 
 @dataclass
@@ -307,6 +314,83 @@ async def collect_candidates(
     return ordered[:limit]
 
 
+async def collect_photo_candidates(
+    session: Any,
+    region_code: str,
+    *,
+    since: Optional[datetime] = None,
+    limit: int = MAX_DIGEST_PHOTOS,
+    exclude_lips: Iterable[str] = (),
+) -> List[Dict[str, Any]]:
+    """Посты дня **без текста**, но с фотографией.
+
+    Текста у них нет — пересказывать нечего, а голая ссылка на источник
+    запрещена (ADR-0012, «нет текста — нет пункта»). Поэтому они не пункты
+    сборника, а фотографии: строки в тексте не появляется, и привязка
+    «пункт ↔ источник» в фактчеке не сдвигается. Решение владельца 03.11:
+    «только фото, без строк в тексте».
+
+    Это самый вымирающий материал: пост без текста не может выйти в ленту
+    (нечего публиковать), а до 02.11 не попадал и в сборник. Замер 03.11 по
+    журналу сбора за сутки: 247 таких постов на 72 района (3–14 на район).
+
+    Ранжирование — тем же ``post_rating``, что у пунктов: заказ владельца
+    22.09 — «самые популярные из оставшихся».
+    """
+    from sqlalchemy import exists, func, select
+
+    from database.models_extended import CollectedPostAudit, PublishedPost
+
+    since = since or day_start_utc()
+    limit = max(0, min(int(limit or 0), MAX_DIGEST_PHOTOS))
+    if limit <= 0:
+        return []
+
+    excluded = {str(lip) for lip in exclude_lips or () if str(lip or "").strip()}
+    already_published = exists().where(
+        PublishedPost.lip == CollectedPostAudit.lip,
+        PublishedPost.region_code == region_code,
+    )
+    stmt = (
+        select(CollectedPostAudit)
+        .where(
+            CollectedPostAudit.region_code == region_code,
+            CollectedPostAudit.decision == "kept",
+            CollectedPostAudit.collected_at >= since,
+            CollectedPostAudit.media.isnot(None),
+            (CollectedPostAudit.post_text.is_(None))
+            | (func.length(CollectedPostAudit.post_text) == 0),
+            ~already_published,
+        )
+        .order_by(CollectedPostAudit.collected_at.desc())
+        .limit(limit * 20)
+    )
+    rows = (await session.execute(stmt)).scalars().all()
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        lip = str(getattr(row, "lip", "") or "")
+        if not lip or lip in excluded:
+            continue
+        url = _first_photo_url(getattr(row, "media", None))
+        if not url:
+            continue
+        out.append(
+            {
+                "lip": lip,
+                "owner_id": _owner_id_from_lip(lip),
+                "photo_url": url,
+                "collected_at": getattr(row, "collected_at", None),
+                "score": _rating(row),
+            }
+        )
+
+    out.sort(
+        key=lambda p: (p.get("score") or 0, p.get("collected_at") or datetime.min), reverse=True
+    )
+    return out[:limit]
+
+
 def clean_item(raw: str) -> str:
     """Пересказ пункта → одна строка без разметки, не длиннее потолка."""
     text = (raw or "").strip()
@@ -446,6 +530,7 @@ async def build_digest_from_posts(
     region_name: str = "",
     region_code: str = "",
     max_total_chars: int = MAX_TOTAL_CHARS,
+    photo_candidates: Sequence[Dict[str, Any]] = (),
 ) -> Optional[DigestDraft]:
     """Сборник из уже отобранных постов. ``None`` — материала мало или не влез."""
     if len(posts) < MIN_ITEMS:
@@ -499,15 +584,31 @@ async def build_digest_from_posts(
         )
         return None
 
+    # Фотографии поста. Сначала — фото-only посты: у них нет никакого другого
+    # представления, кроме картинки (решение владельца 03.11). Потом, если
+    # остались места, — фото пересказанных пунктов (шаг 1 медиа). Общий потолок
+    # — десять вложений, столько ВК принимает на один пост.
+    photos = [
+        DigestPhoto(
+            url=str(p.get("photo_url") or ""),
+            watermark=str(names.get(str(p.get("owner_id")) or "") or ""),
+            lip=str(p.get("lip") or ""),
+        )
+        for p in (photo_candidates or [])
+        if p.get("photo_url")
+    ]
+    photos += [
+        DigestPhoto(url=item.photo_url, watermark=item.source_name, lip=item.lip)
+        for item in items
+        if item.photo_url
+    ][:MAX_DIGEST_ITEM_PHOTOS]
+    photos = photos[:MAX_DIGEST_PHOTOS]
+
     return DigestDraft(
         text=text,
         lips=[item.lip for item in items],
         items=items,
-        photos=[
-            DigestPhoto(url=item.photo_url, watermark=item.source_name)
-            for item in items
-            if item.photo_url
-        ][:MAX_DIGEST_PHOTOS],
+        photos=photos,
     )
 
 
@@ -528,6 +629,9 @@ async def build_digest(
     posts = await collect_candidates(
         session, region_code, since=since, limit=limit, exclude_lips=exclude_lips
     )
+    photo_candidates = await collect_photo_candidates(
+        session, region_code, since=since, exclude_lips=exclude_lips
+    )
     return await build_digest_from_posts(
         posts,
         names=names,
@@ -536,4 +640,5 @@ async def build_digest(
         region_name=region_name,
         region_code=region_code,
         max_total_chars=max_total_chars,
+        photo_candidates=photo_candidates,
     )

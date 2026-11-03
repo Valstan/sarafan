@@ -115,3 +115,37 @@ async def test_no_photos_in_draft_means_no_work(monkeypatch):
         await digest_tasks._photo_attachments(_FakePublisher([]), _FakeRegion(), _FakeDraft([]))
         == []
     )
+
+
+@pytest.mark.asyncio
+async def test_photo_attachments_capped_at_vk_limit(monkeypatch):
+    """Десять вложений — потолок ВК; лишние не идут.
+
+    Превышение отвергло бы весь пост вместе с текстом, поэтому лимит стоит
+    не только в черновике, но и здесь, перед самой отправкой.
+    """
+    monkeypatch.setattr(
+        "modules.publisher.photo_processing.download_photo", lambda url, **kw: b"raw"
+    )
+    monkeypatch.setattr(
+        "modules.publisher.photo_processing.process_photo", lambda raw, watermark: b"jpg"
+    )
+    monkeypatch.setattr(
+        "modules.publisher.photo_processing.upload_wall_photo",
+        lambda publisher, group_id, blob, **kw: _ok(),
+    )
+
+    draft = _FakeDraft(
+        [DigestPhoto(url=f"https://cdn/{i}.jpg", watermark="Клуб") for i in range(14)]
+    )
+
+    attachments = await digest_tasks._photo_attachments(_FakePublisher([]), _FakeRegion(), draft)
+
+    assert len(attachments) == digest_tasks.VK_MAX_ATTACHMENTS == 10
+
+
+def _ok():
+    async def _inner(*args, **kwargs):
+        return "photo-42_1"
+
+    return _inner()
