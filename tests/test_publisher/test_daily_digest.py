@@ -400,12 +400,14 @@ async def test_draft_carries_photos_with_source_watermark(db_session, monkeypatc
         local_hashtag="#Малмыж",
         region_name="Малмыж",
         since=datetime.utcnow() - timedelta(hours=24),
+        photo_watermark="МАЛМЫЖ - ИНФО",
     )
 
     assert draft is not None
     assert draft.photos, "фото источника не доехали до черновика"
     assert len(draft.photos) <= daily_digest.MAX_DIGEST_PHOTOS
-    assert all(p.watermark == "Верхнедеревенский клуб" for p in draft.photos)
+    # Водяной знак — марка нашей группы, а не имя сообщества-источника.
+    assert all(p.watermark == "МАЛМЫЖ - ИНФО" for p in draft.photos)
     assert all(p.url.startswith("https://cdn.vk.example/") for p in draft.photos)
 
 
@@ -513,14 +515,15 @@ async def test_photo_only_posts_do_not_add_lines_to_the_text(db_session, monkeyp
         region_name="Малмыж",
         region_code="mi",
         photo_candidates=photo_candidates,
+        photo_watermark="МАЛМЫЖ - ИНФО",
     )
 
     assert draft is not None
     assert "Фотосообщество" not in draft.text, "фото-only пост не должен давать строк в тексте"
     assert draft.lips == ["100_0", "100_1", "100_2", "100_3"]
-    # Само фото в черновике есть — с именем сообщества для водяного знака.
+    # Само фото в черновике есть — с водяным знаком НАШЕЙ группы.
     assert [p.url for p in draft.photos] == ["https://cdn/only.jpg"]
-    assert draft.photos[0].watermark == "Фотосообщество"
+    assert draft.photos[0].watermark == "МАЛМЫЖ - ИНФО"
 
 
 @pytest.mark.asyncio
@@ -643,3 +646,50 @@ async def test_photo_only_material_alone_does_not_make_a_digest(db_session):
         photo_candidates=photo_candidates,
     )
     assert draft is None
+
+
+@pytest.mark.asyncio
+async def test_watermark_is_our_group_name_for_every_photo(db_session, monkeypatch):
+    """Водяной знак — марка НАШЕЙ группы, а не имя чужого сообщества.
+
+    Решение владельца 03.11: «водяной знак надо ставить нашей ИНФО группы, где
+    публикуются сводки». Имя сообщества-источника в знаке не участвует: у
+    фотографии один хозяин — та группа, в которой читатель её увидит.
+    """
+    for index in range(3):
+        _add(
+            db_session,
+            f"100_{index}",
+            text=f"Событие номер {index}. " + TEXT,
+            hours_ago=index + 1,
+            media=[{"type": "photo", "url": f"https://cdn/item-{index}.jpg"}],
+        )
+    _add(
+        db_session,
+        "200_1",
+        text=None,
+        likes=5,
+        media=[{"type": "photo", "url": "https://cdn/only.jpg"}],
+    )
+    await db_session.commit()
+    monkeypatch.setattr(
+        rewriter,
+        "_chat_call",
+        lambda **kw: _ok_answer(*[f"Пересказ новости номер {i}." for i in range(3)]),
+    )
+
+    posts = await daily_digest.collect_candidates(db_session, "mi")
+    photo_candidates = await daily_digest.collect_photo_candidates(db_session, "mi")
+    draft = await daily_digest.build_digest_from_posts(
+        posts,
+        names={"200": "Чужое сообщество"},
+        region_name="МАЛМЫЖ - ИНФО",
+        region_code="mi",
+        photo_candidates=photo_candidates,
+        photo_watermark="МАЛМЫЖ - ИНФО",
+    )
+
+    assert draft is not None
+    assert draft.photos, "фото должны быть в черновике"
+    assert all(p.watermark == "МАЛМЫЖ - ИНФО" for p in draft.photos)
+    assert not any("Чужое сообщество" == p.watermark for p in draft.photos)

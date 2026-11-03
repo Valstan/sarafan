@@ -140,7 +140,10 @@ class DigestPhoto:
     """Фото, которое едет в сборник: откуда взять, что напечатать, чей это lip."""
 
     url: str
-    #: Название сообщества-источника — им помечается фото (P203/P214).
+    #: Водяной знак — название **нашей** группы («МАЛМЫЖ - ИНФО»), куда
+    #: выходит сборник. Решение владельца от 18.10 (P203): «водяной знак
+    #: названия инфо-группы». Имя сообщества-источника тут ни при чём: у
+    #: фотографии один хозяин — та группа, в которой читатель её увидит.
     watermark: str = ""
     #: lip поста-источника: по нему фото «списывается» из дедупа.
     lip: str = ""
@@ -531,6 +534,7 @@ async def build_digest_from_posts(
     region_code: str = "",
     max_total_chars: int = MAX_TOTAL_CHARS,
     photo_candidates: Sequence[Dict[str, Any]] = (),
+    photo_watermark: str = "",
 ) -> Optional[DigestDraft]:
     """Сборник из уже отобранных постов. ``None`` — материала мало или не влез."""
     if len(posts) < MIN_ITEMS:
@@ -588,17 +592,21 @@ async def build_digest_from_posts(
     # представления, кроме картинки (решение владельца 03.11). Потом, если
     # остались места, — фото пересказанных пунктов (шаг 1 медиа). Общий потолок
     # — десять вложений, столько ВК принимает на один пост.
+    #
+    # Водяной знак на всех фотографиях один и тот же — название НАШЕЙ группы
+    # («МАЛМЫЖ - ИНФО»), куда выходит сборник: это её фирменная марка, а не
+    # подпись чужого сообщества (решение владельца 03.11).
     photos = [
         DigestPhoto(
             url=str(p.get("photo_url") or ""),
-            watermark=str(names.get(str(p.get("owner_id")) or "") or ""),
+            watermark=photo_watermark,
             lip=str(p.get("lip") or ""),
         )
         for p in (photo_candidates or [])
         if p.get("photo_url")
     ]
     photos += [
-        DigestPhoto(url=item.photo_url, watermark=item.source_name, lip=item.lip)
+        DigestPhoto(url=item.photo_url, watermark=photo_watermark, lip=item.lip)
         for item in items
         if item.photo_url
     ][:MAX_DIGEST_ITEM_PHOTOS]
@@ -624,6 +632,7 @@ async def build_digest(
     limit: int = DEFAULT_ITEMS,
     exclude_lips: Iterable[str] = (),
     max_total_chars: int = MAX_TOTAL_CHARS,
+    photo_watermark: str = "",
 ) -> Optional[DigestDraft]:
     """Собрать сборник для района: отбор кандидатов и сборка текста."""
     posts = await collect_candidates(
@@ -641,4 +650,5 @@ async def build_digest(
         region_code=region_code,
         max_total_chars=max_total_chars,
         photo_candidates=photo_candidates,
+        photo_watermark=photo_watermark,
     )
