@@ -537,11 +537,14 @@ async def test_photo_only_photos_come_first_and_item_photos_fill_the_rest(db_ses
             hours_ago=index + 1,
             media=[{"type": "photo", "url": f"https://cdn/item-{index}.jpg"}],
         )
-    for index in range(2):
+    # Рейтинг у фото-only постов разный — иначе порядок при равной оценке зависел
+    # от микросекунд сбора и тест был нестабилен (ловил CI).
+    for index, views in enumerate((500, 100)):
         _add(
             db_session,
             f"200_{index}",
             text=None,
+            views=views,
             media=[{"type": "photo", "url": f"https://cdn/only-{index}.jpg"}],
         )
     await db_session.commit()
