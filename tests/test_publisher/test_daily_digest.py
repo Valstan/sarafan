@@ -430,3 +430,216 @@ async def test_draft_without_media_has_no_photos(db_session, monkeypatch):
 
     assert draft is not None
     assert draft.photos == []
+
+
+# ───────── фото-only посты (шаг 2 медиа, решение владельца 03.11) ─────────
+
+
+@pytest.mark.asyncio
+async def test_collect_photo_candidates_takes_textless_posts_with_photo(db_session):
+    """Без текста, но с фото — идут в выборку фотографий.
+
+    Пост с текстом сюда не попадает (у него есть пересказ), а пост без фото —
+    тоже (нечего показывать).
+    """
+    _add(
+        db_session,
+        "100_1",
+        text=None,
+        media=[{"type": "photo", "url": "https://cdn/only-photo.jpg"}],
+    )
+    _add(db_session, "100_2", text=TEXT)  # есть текст — это пункт, не фото
+    _add(db_session, "100_3", text=None)  # нет ни текста, ни фото
+    await db_session.commit()
+
+    photos = await daily_digest.collect_photo_candidates(db_session, "mi")
+
+    assert [p["lip"] for p in photos] == ["100_1"]
+    assert photos[0]["photo_url"] == "https://cdn/only-photo.jpg"
+
+
+@pytest.mark.asyncio
+async def test_collect_photo_candidates_respects_cursor_and_limit(db_session):
+    """Уже израсходованное (курсор дедупа) не берём, потолок — десять."""
+    for index in range(12):
+        _add(
+            db_session,
+            f"100_{index}",
+            text=None,
+            media=[{"type": "photo", "url": f"https://cdn/{index}.jpg"}],
+        )
+    await db_session.commit()
+
+    photos = await daily_digest.collect_photo_candidates(db_session, "mi", exclude_lips=["100_0"])
+
+    assert len(photos) == daily_digest.MAX_DIGEST_PHOTOS
+    assert "100_0" not in {p["lip"] for p in photos}
+
+
+@pytest.mark.asyncio
+async def test_photo_only_posts_do_not_add_lines_to_the_text(db_session, monkeypatch):
+    """Строк в тексте нет — значит, привязка «пункт ↔ источник» не поедет.
+
+    Фактчек сопоставляет пункты и источники по порядку, разбирая текст по
+    маркеру «Источник:». Если бы фото-only пост стал пунктом без пересказа,
+    сопоставление сдвинулось бы и пошли бы ложные вердикты.
+    """
+    for index in range(4):
+        _add(
+            db_session,
+            f"100_{index}",
+            text=f"Событие номер {index}. " + TEXT,
+            hours_ago=index + 1,
+        )
+    _add(
+        db_session,
+        "200_1",
+        text=None,
+        media=[{"type": "photo", "url": "https://cdn/only.jpg"}],
+    )
+    await db_session.commit()
+    monkeypatch.setattr(
+        rewriter,
+        "_chat_call",
+        lambda **kw: _ok_answer(*[f"Пересказ новости номер {i}." for i in range(4)]),
+    )
+
+    photo_candidates = await daily_digest.collect_photo_candidates(db_session, "mi")
+    draft = await daily_digest.build_digest_from_posts(
+        await daily_digest.collect_candidates(db_session, "mi"),
+        names={"200": "Фотосообщество"},
+        theme_tags=["коротко"],
+        local_hashtag="#Малмыж",
+        region_name="Малмыж",
+        region_code="mi",
+        photo_candidates=photo_candidates,
+    )
+
+    assert draft is not None
+    assert "Фотосообщество" not in draft.text, "фото-only пост не должен давать строк в тексте"
+    assert draft.lips == ["100_0", "100_1", "100_2", "100_3"]
+    # Само фото в черновике есть — с именем сообщества для водяного знака.
+    assert [p.url for p in draft.photos] == ["https://cdn/only.jpg"]
+    assert draft.photos[0].watermark == "Фотосообщество"
+
+
+@pytest.mark.asyncio
+async def test_photo_only_photos_come_first_and_item_photos_fill_the_rest(db_session, monkeypatch):
+    """Фото-only посты важнее: у них нет другого представления.
+
+    Фото пересказанных пунктов (шаг 1) добавляются только в оставшиеся места.
+    """
+    for index in range(3):
+        _add(
+            db_session,
+            f"100_{index}",
+            text=f"Событие номер {index}. " + TEXT,
+            hours_ago=index + 1,
+            media=[{"type": "photo", "url": f"https://cdn/item-{index}.jpg"}],
+        )
+    # Рейтинг у фото-only постов разный — иначе порядок при равной оценке зависел
+    # от микросекунд сбора и тест был нестабилен (ловил CI). Разные ЛАЙКИ, а не
+    # просмотры: в формуле рейтинга просмотры стоят в знаменателе, а отклик — в
+    # числителе (``post_rating``: (likes + 2*comments + 3*reposts) / (views+1)^alpha).
+    for index, likes in enumerate((10, 1)):
+        _add(
+            db_session,
+            f"200_{index}",
+            text=None,
+            likes=likes,
+            media=[{"type": "photo", "url": f"https://cdn/only-{index}.jpg"}],
+        )
+    await db_session.commit()
+    monkeypatch.setattr(
+        rewriter,
+        "_chat_call",
+        lambda **kw: _ok_answer(*[f"Пересказ новости номер {i}." for i in range(3)]),
+    )
+
+    posts = await daily_digest.collect_candidates(db_session, "mi")
+    photo_candidates = await daily_digest.collect_photo_candidates(db_session, "mi")
+    draft = await daily_digest.build_digest_from_posts(
+        posts,
+        names={"200": "Фотосообщество"},
+        region_name="Малмыж",
+        region_code="mi",
+        photo_candidates=photo_candidates,
+    )
+
+    assert draft is not None
+    urls = [p.url for p in draft.photos]
+    assert urls[:2] == ["https://cdn/only-0.jpg", "https://cdn/only-1.jpg"]
+    # Дальше — фото пересказанных пунктов, но не больше MAX_DIGEST_ITEM_PHOTOS.
+    assert urls[2:] == [
+        "https://cdn/item-0.jpg",
+        "https://cdn/item-1.jpg",
+        "https://cdn/item-2.jpg",
+    ]
+    assert len(urls) <= daily_digest.MAX_DIGEST_PHOTOS
+
+
+@pytest.mark.asyncio
+async def test_photos_capped_at_vk_limit(db_session, monkeypatch):
+    """Десять вложений — потолок ВК; больше не прикрепляем."""
+    for index in range(3):
+        _add(
+            db_session,
+            f"100_{index}",
+            text=f"Событие номер {index}. " + TEXT,
+            hours_ago=index + 1,
+        )
+    for index in range(15):
+        _add(
+            db_session,
+            f"300_{index}",
+            text=None,
+            media=[{"type": "photo", "url": f"https://cdn/p-{index}.jpg"}],
+        )
+    await db_session.commit()
+    monkeypatch.setattr(
+        rewriter,
+        "_chat_call",
+        lambda **kw: _ok_answer(*[f"Пересказ новости номер {i}." for i in range(3)]),
+    )
+
+    posts = await daily_digest.collect_candidates(db_session, "mi")
+    photo_candidates = await daily_digest.collect_photo_candidates(db_session, "mi")
+    draft = await daily_digest.build_digest_from_posts(
+        posts,
+        region_name="Малмыж",
+        region_code="mi",
+        photo_candidates=photo_candidates,
+    )
+
+    assert draft is not None
+    assert len(draft.photos) == daily_digest.MAX_DIGEST_PHOTOS == 10
+
+
+@pytest.mark.asyncio
+async def test_photo_only_material_alone_does_not_make_a_digest(db_session):
+    """Сборник — это пересказы; фотографии их дополняют, а не заменяют.
+
+    Правило владельца от 20.10 («меньше трёх пунктов — поста нет») остаётся в
+    силе: рубрика из трёх картинок без единого слова — не рубрика.
+    """
+    for index in range(4):
+        _add(
+            db_session,
+            f"300_{index}",
+            text=None,
+            media=[{"type": "photo", "url": f"https://cdn/p-{index}.jpg"}],
+        )
+    await db_session.commit()
+
+    posts = await daily_digest.collect_candidates(db_session, "mi")
+    photo_candidates = await daily_digest.collect_photo_candidates(db_session, "mi")
+
+    assert posts == []
+    assert photo_candidates, "фото-only посты должны быть найдены"
+    draft = await daily_digest.build_digest_from_posts(
+        posts,
+        region_name="Малмыж",
+        region_code="mi",
+        photo_candidates=photo_candidates,
+    )
+    assert draft is None

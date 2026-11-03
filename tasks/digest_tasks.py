@@ -26,6 +26,10 @@ logger = logging.getLogger(__name__)
 DIGEST_THEME = "korotko"
 DIGEST_KIND = "digest"
 
+#: Потолок вложений на один пост ВК. Превышение отвергает весь пост вместе с
+#: текстом — поэтому лимит дублируется в трёх местах (черновик, отбор, здесь).
+VK_MAX_ATTACHMENTS = 10
+
 
 @app.task(name="tasks.digest_tasks.publish_daily_digest")
 def publish_daily_digest(
@@ -121,11 +125,17 @@ async def _digest_for_region(session: Any, region: Any, *, dry_run: bool) -> Dic
     cursor_lips, _ = build_region_dedup_sets(work_tables)
 
     posts = await daily_digest.collect_candidates(session, region.code, exclude_lips=cursor_lips)
+    # Посты без текста, но с фото: в сборнике они живут картинкой (решение
+    # владельца 03.11). Строк в тексте не добавляют — иначе поехала бы
+    # привязка «пункт ↔ источник» в фактчеке.
+    photo_candidates = await daily_digest.collect_photo_candidates(
+        session, region.code, exclude_lips=cursor_lips
+    )
     if len(posts) < daily_digest.MIN_ITEMS:
         logger.info("daily digest: регион=%s кандидатов=%d — пропуск", region.code, len(posts))
         return {"region": region.code, "skipped": f"candidates={len(posts)}"}
 
-    names = await _source_names(session, posts)
+    names = await _source_names(session, list(posts) + list(photo_candidates))
     theme_tags, local_hashtag = resolve_bulletin_hashtags(region_config, DIGEST_THEME, region)
     try:
         configured_max = int(getattr(region_config, "text_post_maxsize_simbols", 0) or 0)
@@ -143,6 +153,7 @@ async def _digest_for_region(session: Any, region: Any, *, dry_run: bool) -> Dic
         region_name=getattr(region, "name", "") or "",
         region_code=region.code,
         max_total_chars=max_total_chars,
+        photo_candidates=photo_candidates,
     )
     if draft is None:
         return {"region": region.code, "skipped": "empty_digest"}
@@ -201,12 +212,17 @@ async def _source_names(session: Any, posts: List[Dict[str, Any]]) -> Dict[str, 
 
 
 async def _photo_attachments(publisher: Any, region: Any, draft: Any) -> List[str]:
-    """Фото пунктов сборника → строки вложений ``photo<owner>_<id>``.
+    """Фотографии сборника → строки вложений ``photo<owner>_<id>``.
 
     Путь: скачать фото источника → обработать (водяной знак сообщества, шум,
     ресайз без кропа — спецификация владельца из P203) → залить в **нашу**
     группу и приложить уже свой id. Чужое фото приложить нельзя: VK не отдаст
     id чужого сообщества, а «как есть» — это и есть репост без обработки.
+
+    В сборнике фото двух происхождений: посты без текста (у них нет никакого
+    другого представления, кроме картинки) и, если остались места, фото
+    пересказанных пунктов. Строк в тексте ни те, ни другие не добавляют —
+    привязка «пункт ↔ источник» в фактчеке от этого не сдвигается.
 
     Всё это — надстройка: любая ошибка (фото не скачалось, не загрузилось,
     ВК отказал) оставляет сборник **без** картинки, но не роняет рубрику.
@@ -216,6 +232,10 @@ async def _photo_attachments(publisher: Any, region: Any, draft: Any) -> List[st
         return []
 
     from modules.publisher.photo_processing import download_photo, process_photo, upload_wall_photo
+
+    # Потолок ВК — 10 вложений на пост. Черновик уже ограничен, но лимит
+    # продублирован здесь: превышение отвергло бы весь пост вместе с текстом.
+    photos = photos[:VK_MAX_ATTACHMENTS]
 
     attachments: List[str] = []
     for photo in photos:
@@ -261,7 +281,12 @@ async def _publish(session: Any, region: Any, draft: Any) -> Dict[str, Any]:
             publish_result=result,
         )
         try:
-            await _remember_published(session, region.code, draft.lips)
+            # Курсор дедупа — по пунктам И по фото-only постам: они тоже
+            # израсходованы сборником. В ЖУРНАЛ публикаций их не пишем:
+            # журнал — это сопоставление «пункт ↔ источник» для фактчека, и
+            # лишние строки сдвинули бы сопоставление.
+            photo_lips = [p.lip for p in (getattr(draft, "photos", None) or []) if p.lip]
+            await _remember_published(session, region.code, list(draft.lips) + photo_lips)
         except Exception:  # noqa: BLE001 — публикация уже состоялась, курсор чинится потом
             logger.warning(
                 "daily digest: регион=%s курсор дедупа не обновлён",
