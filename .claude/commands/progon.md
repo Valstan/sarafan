@@ -25,9 +25,17 @@ argument-hint: (без аргументов — полный марафон по
 
 - `CLASSIFIER_INGEST_KEY` задан в env (проверить длиной, не значением).
   Не задан — остановиться и сказать владельцу, дальше не идти.
-- Каталог прогона: следующий свободный `pilot_run<N>` в approved temp
-  (`C:\Users\valstan\AppData\Local\Temp\opencode\`). **В репо — ничего**,
-  кроме журнала (Шаг 5).
+  **Где он живёт:** только на прод-боксе, `/etc/setka/classifier-routine-key.txt`
+  (root-only). Локально ключа нет ни в env, ни в `.env` — и не надо: забор и
+  приёмку (`fetch`, `submit`) делает **бокс**, значение ключа не покидает его
+  и не попадает в журнал сессии. На боксе скрипт уже есть
+  (`~/SETKA/scripts/classifier_routine.py`, чистый stdlib).
+- Каталог прогона: следующий свободный `pilot_run<N>` **внутри репозитория** —
+  `classifier_run/pilot_run<N>/` (`classifier_run/` в `.gitignore`, в коммит
+  ничего не попадает). **НЕ `%TEMP%`**: между сессиями его вычищают, и 640
+  постов превращаются в ноль — инвариант от мозга (письмо 01.11.2026).
+  Внутри — по каталогу на пачку (`batch1/…batch4/`), в каждом лежат
+  `pending.json` + `postulates.md` + `verdicts.json` рядом.
 
 ## Шаг 1. Забор
 
@@ -39,11 +47,24 @@ argument-hint: (без аргументов — полный марафон по
 покрывают суточный флоу (~3200). Вопросов оператору — не больше 10
 на весь марафон (усталость дороже).
 
-**Точечный (перечислены районы):**
+**Точечный (перечислены районы):** забор делает **бокс** (ключ только там),
+артефакты забираются вниз.
+
+```bash
+# на боксе: ключ в env из файла, значение не печатается
+cd ~/SETKA
+export CLASSIFIER_INGEST_KEY="$(sudo -n grep -m1 '^CLASSIFIER_INGEST_KEY=' /etc/setka/classifier-routine-key.txt | cut -d= -f2- | tr -d '[:space:]')"
+python3 scripts/classifier_routine.py fetch --region mi --region ur --limit 30 --out /tmp/progon_run/<пачка>
+```
 
 ```powershell
-.\venv\Scripts\python.exe scripts/classifier_routine.py fetch --region mi --region ur --limit 30 --out C:\Users\valstan\AppData\Local\Temp\opencode\pilot_run<N> --no-media
+# локально: забрать пачку в каталог прогона
+scp -r sarafan:/tmp/progon_run/<пачка> classifier_run\pilot_run<N>
 ```
+
+В `pending.json` после копирования лежат **абсолютные пути БОКСА**
+(`/tmp/progon_run/...`) в поле `media_files` — их надо переписать на локальные
+(`<run>\<пачка>\media\...`), иначе модель не откроет вложения.
 
 **Правило объёма точечного:** больше 3 регионов — лимит 15 на район
 (потолок ~120 постов за прогон). Три региона и меньше — лимит 30.
