@@ -60,7 +60,11 @@ DEFAULT_DISTILL_DIR = "distill_run"
 DEFAULT_LIMIT = 200  # синхронно с CLASSIFIER_PENDING_MAX на проде (2026-07-16)
 DEFAULT_CORRECTIONS_LIMIT = 100
 DEFAULT_CORRECTIONS_DAYS = 30
-TIMEOUT_S = 30
+# Приёмка вердиктов: POST /api/classifier/verdicts на ~170 вердиктах отвечает
+# дольше 30 с (2026-11-04, марафон: клиент рвал соединение, а сервер уже записал —
+# повтор безопасен, сервер дедуплицирует по lip). Клиентский таймаут ниже ответа
+# сервера означает «упало» там, где всё записалось.
+TIMEOUT_S = 300
 MEDIA_TIMEOUT_S = 60  # картинки/PDF качаются дольше JSON
 MEDIA_MAX_PER_POST = 3  # потолок вложений на пост (токены)
 MEDIA_FETCH_TYPES = ("photo", "doc")  # видео/аудио модель не «смотрит»
