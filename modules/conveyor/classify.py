@@ -188,6 +188,45 @@ def parse_verdict(
 _call_api = call_api
 
 
+def _is_balance_error(response: Dict[str, Any]) -> bool:
+    """Ответ DeepSeek «Insufficient Balance» — на счёте нет денег."""
+    blob = json.dumps(
+        response.get("error") if response.get("error") is not None else response, ensure_ascii=False
+    )
+    low = blob.lower()
+    return "insufficient balance" in low or "insufficient_balance" in low
+
+
+def _call_opencode(body: Dict[str, Any]):
+    """Живой free-движок в форме ответа прямого DeepSeek.
+
+    Контракт ``opencode_engine.chat`` зеркалит deepseek_client, поэтому подмена
+    не трогает разбор ответа ниже: тот же JSON, тот же разбор, те же причины.
+    """
+    from modules.opencode_engine import chat as _opencode_chat
+
+    system = ""
+    user = ""
+    for message in body.get("messages") or []:
+        role = str((message or {}).get("role") or "")
+        if role == "system":
+            system = str((message or {}).get("content") or "")
+        elif role == "user":
+            user = str((message or {}).get("content") or "")
+    result = _opencode_chat(user=user, system=system, label="conveyor")
+    if not result.get("ok"):
+        return 0, {
+            "error": {
+                "message": str(result.get("reason") or "opencode_failed"),
+                "detail": result.get("detail"),
+            }
+        }
+    return 200, {
+        "choices": [{"message": {"content": str(result.get("content") or "")}}],
+        "usage": result.get("usage") if isinstance(result.get("usage"), dict) else {},
+    }
+
+
 def classify(
     post: Dict[str, Any],
     *,
@@ -228,6 +267,19 @@ def classify(
         timeout=get_timeout(),
         label="conveyor",
     )
+    if status == 402 or _is_balance_error(response):
+        # Прямой DeepSeek без денег на счёте («Insufficient Balance», 402) — идём на
+        # живой free-движок: он отдаёт тот же контракт chat(). Без этого конвейер
+        # молчит (замер 05.11: 150 постов без вердикта, сайты голодные с 17.10).
+        fb_status, fb_response = _call_opencode(body)
+        if 200 <= fb_status < 300:
+            status, response = fb_status, fb_response
+        else:
+            logger.warning(
+                "конвейер: DeepSeek без баланса, free-движок не ответил (%s) для %s",
+                fb_status,
+                post.get("lip"),
+            )
     if status == 0:
         return {"ok": False, "reason": "network", "detail": response.get("error")}
     if not (200 <= status < 300):
