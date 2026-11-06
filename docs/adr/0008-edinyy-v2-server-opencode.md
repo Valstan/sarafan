@@ -2,11 +2,15 @@
 id: ADR-0008
 title: Единый v2-сервер OpenCode — фильтрация постов и кодинг владельца на одном serve
 date: 2026-10-18
-status: accepted
+status: superseded by ADR-0014 (контур выведен 06.11)
 tags: [classifier, opencode, engine, infra]
 ---
 
 # Единый v2-сервер OpenCode — фильтрация постов и кодинг владельца на одном serve
+
+> **Контур выведен из эксплуатации 06.11:** движок — DeepSeek API напрямую,
+> `opencode-web` с бокса снят ([ADR-0014](0014-dvizhok-deepseek-pryamoy-selfhost-kontur-vyveden.md)).
+> Запись остаётся адресом истории: как поднимали и почему сняли.
 
 ## Контекст
 

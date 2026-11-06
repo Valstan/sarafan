@@ -20,7 +20,7 @@ Celery-воркера (bootstrap вызывается в обоих: ``main.py``
 
 Env vars:
   DEEPSEEK_API_KEY            # секрет (из комнаты КАРМАНа)
-  DEEPSEEK_MODEL=deepseek-chat
+  DEEPSEEK_MODEL=deepseek-flash
   DEEPSEEK_BASE_URL=https://api.deepseek.com
   DEEPSEEK_TIMEOUT=60         # секунды на один вызов
   DEEPSEEK_MAX_TOKENS=1200    # потолок ответа
@@ -31,9 +31,28 @@ from __future__ import annotations
 import os
 
 DEFAULT_BASE_URL = "https://api.deepseek.com"
-# deepseek-chat — обычная модель; deepseek-reasoner дороже и медленнее, а для
-# «рубрика + заголовок + лёгкая редактура» рассуждающая модель не нужна.
-DEFAULT_MODEL = "deepseek-chat"
+# deepseek-flash — это DeepSeek-V4.1-Flash (замер каталога `/models` 07.11.2026:
+# `id=deepseek-flash`, `name=DeepSeek-V4.1-Flash`, контекст 1 048 576, вход
+# text+image, уровень рассуждений low/high/max).
+#
+# **Почему имя явное, а не алиас `deepseek-chat`.** В каталоге провайдера ровно
+# две модели: `deepseek-flash` (V4.1-Flash) и `deepseek-v4-pro` (V4-Pro). Алиас
+# `deepseek-chat` сегодня отвечает флешем (замер 07.11: запрошено
+# `deepseek-chat` → отвечено `model=deepseek-flash`), но это решение провайдера,
+# а не наше: сменить маршрутизацию алиаса можно молча, и движок уедет на
+# другую — иную по цене — модель, не спросив никого. Именем `deepseek-flash`
+# мы говорим «зови именно эту» и снимаем класс отказа «провайдер тихо
+# переставил нас на дорогую модель».
+#
+# Про `deepseek-v4-pro`: владелец 07.11 — «он дороже и слабее, чем новый
+# DeepSeek Flash 4.1», движок на ней не работает и не должен. Имя `deepseek-chat`
+# тоже НЕ годится: это алиас, а не модель.
+#
+# Рассуждение: `deepseek-chat` — обычная модель; `deepseek-reasoner` дороже и
+# медленнее, а для «рубрика + заголовок + лёгкая редактура» рассуждающая модель
+# не нужна. (Замер 07.11: и `deepseek-chat`, и `deepseek-reasoner` отвечают
+# флешем; `deepseek-v4-pro` отвечает сам собой.)
+DEFAULT_MODEL = "deepseek-flash"
 
 
 def get_api_key() -> str:

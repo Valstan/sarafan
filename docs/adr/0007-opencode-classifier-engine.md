@@ -2,7 +2,7 @@
 id: ADR-0007
 title: Движок классификатора через харнесс OpenCode на том же VPS
 date: 2026-10-14
-status: superseded (server part) by ADR-0008
+status: superseded by ADR-0014 (движок — DeepSeek напрямую, 06.11)
 tags: [classifier, opencode, engine, pilot]
 ---
 

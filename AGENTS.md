@@ -18,7 +18,7 @@
 - **Продукт:** САРАФАН — сеть районных VK-сообществ Кировской области: сбор постов, HITL-классификация, автосводки, продажа рекламы.
 - **Стадия:** боевой прод, ежедневные публикации; ~4500 тестов, 76 районов в разной степени активации.
 - **Стек:** Python 3.12 (локально 3.11 тоже ок), FastAPI + Jinja2, PostgreSQL, Celery + Redis, systemd на VPS.
-- **Прод:** SSH-алиас `sarafan`, корень деплоя `~/SETKA`, сервисы `setka`, `setka-celery-worker`, `setka-celery-beat`, `setka-vk-bot`; нейро-движок `opencode-web` (свой пользователь `opencode`, sudo у него нет).
+- **Прод:** SSH-алиас `sarafan`, корень деплоя `~/SETKA`, сервисы `setka`, `setka-celery-worker`, `setka-celery-beat`, `setka-vk-bot`; нейро-движок — **DeepSeek API напрямую** (ключ в комнате КАРМАНа, [ADR-0014](docs/adr/0014-dvizhok-deepseek-pryamoy-selfhost-kontur-vyveden.md)); self-hosted контур OpenCode + ВПН выведен 06.11, код оставлен в репо — откат это `CLASSIFIER_ENGINE=opencode` плюс подъём юнитов.
 - **Экосистема:** САРАФАН держит ЕСА (единый вход `вход.вмалмыже.рф`), каталог сервисов `/services`, VK-шлюз и Радар для соседних проектов @valstan.
 - **Стратегический hub:** [`../brain_matrica/`](../brain_matrica/), карточка проекта — [`projects/setka.md`](../brain_matrica/projects/setka.md) (**read-only** с нашей стороны).
 - **Незавершённая работа:** [`docs/SESSION_HANDOFF.md`](docs/SESSION_HANDOFF.md) — читать первым в каждой сессии.

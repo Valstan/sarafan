@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import logging
+
 import pytest
 
 from modules import deepseek_client as dc
@@ -44,9 +46,56 @@ def test_happy_path_returns_content_model_and_usage(monkeypatch):
     assert out == {
         "ok": True,
         "content": "привет",
-        "model": "deepseek-chat",
+        "model": "deepseek-flash",
         "usage": {"total_tokens": 42},
     }
+
+
+def test_default_model_is_pinned_to_flash(monkeypatch):
+    """Движок зовёт флеш ИМЕНЕМ, а не алиасом.
+
+    Алиас `deepseek-chat` — это маршрутизация провайдера: сменить её можно
+    молча, и движок уедет на другую (другую по цене) модель, не спросив
+    никого. Имя модели в запросе должно быть тем, на чём мы точно стоим.
+    """
+    from config.deepseek import get_model
+
+    monkeypatch.delenv("DEEPSEEK_MODEL", raising=False)
+    assert get_model() == "deepseek-flash"
+
+
+def test_served_model_is_reported_and_mismatch_is_logged(monkeypatch, caplog):
+    """Ответ другой модели: наружу — её имя, в лог — предупреждение.
+
+    Вердикт при этом не отменяется (fail-open): подмена модели не должна
+    ронять классификацию, но она обязана быть видна.
+    """
+    caplog.set_level(logging.WARNING, logger="modules.deepseek_client")
+    payload = _completion("привет")
+    payload["model"] = "deepseek-v4-pro"
+    monkeypatch.setattr(dc, "call_api", _api(200, payload))
+
+    out = dc.chat(user="вопрос")
+
+    assert out["ok"] is True
+    assert out["model"] == "deepseek-v4-pro"
+    assert "deepseek-v4-pro" in caplog.text
+    assert "deepseek-flash" in caplog.text
+
+
+def test_served_model_wins_over_requested_when_provider_names_it(monkeypatch):
+    """В БД ложится фактическое имя модели, а не запрошенное.
+
+    Иначе в колонке `model` лежало бы «deepseek-flash» для ответа, который
+    отдал кто-то другой, — и вопрос «чем размечено» не имел бы ответа.
+    """
+    payload = _completion("привет")
+    payload["model"] = "deepseek-flash"
+    monkeypatch.setattr(dc, "call_api", _api(200, payload))
+
+    out = dc.chat(user="вопрос")
+
+    assert out["model"] == "deepseek-flash"
 
 
 def test_missing_key_is_refusal_not_crash(monkeypatch):

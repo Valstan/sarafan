@@ -284,6 +284,24 @@ def chat(
     if choices and isinstance(choices[0], dict):
         content = str((choices[0].get("message") or {}).get("content") or "").strip()
     usage = response.get("usage") if isinstance(response.get("usage"), dict) else None
+
+    # **Кто на самом деле ответил.** Провайдер отдаёт в теле своё имя модели, и
+    # оно может не совпадать с запрошенным: алиас `deepseek-chat` — это
+    # маршрутизация, и сменить её можно молча (замер 07.11: провайдер увел
+    # alias на `deepseek-flash`, а каталог рядом держит ещё и `deepseek-v4-pro`).
+    # Молча такая подмена выглядит как «мы работаем на той модели, на которой
+    # думали», пока счёт не покажет другую цену. Поэтому имя из ответа идёт
+    # наружу (в БД ложится правда о том, чем размечено) и расхождение с
+    # запрошенным попадает в лог отдельной строкой.
+    served = str(response.get("model") or "").strip()
+    if served and served != body["model"]:
+        logger.warning(
+            "deepseek: ответ пришёл от другой модели (запрошено %s, отвечено %s) — "
+            "провайдер переставил маршрут; вердикт оставляем, но факт в лог",
+            body["model"],
+            served,
+        )
+
     if finish_reason(response) == "length":
         # Вызов оплачен — usage отдаём, чтобы расход не выпал из учёта.
         return {
@@ -295,4 +313,4 @@ def chat(
     if not content:
         return {"ok": False, "reason": "empty_response"}
 
-    return {"ok": True, "content": content, "model": body["model"], "usage": usage}
+    return {"ok": True, "content": content, "model": served or body["model"], "usage": usage}

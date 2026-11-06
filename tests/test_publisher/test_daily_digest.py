@@ -36,6 +36,17 @@ async def db_session():
     await engine.dispose()
 
 
+def _window():
+    """Окно отбора для фото-кандидатов: сутки назад от «сейчас».
+
+    Тест не должен зависеть от стенных часов: `collect_photo_candidates` без
+    `since` режет по московским суткам (начало суток — 21:00 UTC), а пост
+    «два часа назад» между 00:00 и 02:00 МСК оказывается за границей этого
+    окна — и отбор пустеет. Окно задаём явно.
+    """
+    return datetime.utcnow() - timedelta(hours=24)
+
+
 def _add(
     session,
     lip: str,
@@ -47,6 +58,7 @@ def _add(
     likes: int = 0,
     decision: str = "kept",
     media=None,
+    collected_at=None,
 ):
     session.add(
         CollectedPostAudit(
@@ -55,7 +67,11 @@ def _add(
             theme="novost",
             post_text=text,
             decision=decision,
-            collected_at=datetime.utcnow() - timedelta(hours=hours_ago),
+            collected_at=(
+                collected_at
+                if collected_at is not None
+                else datetime.utcnow() - timedelta(hours=hours_ago)
+            ),
             views=views,
             likes=likes,
             comments=0,
@@ -454,7 +470,7 @@ async def test_collect_photo_candidates_takes_textless_posts_with_photo(db_sessi
     _add(db_session, "100_3", text=None)  # нет ни текста, ни фото
     await db_session.commit()
 
-    photos = await daily_digest.collect_photo_candidates(db_session, "mi")
+    photos = await daily_digest.collect_photo_candidates(db_session, "mi", since=_window())
 
     assert [p["lip"] for p in photos] == ["100_1"]
     assert photos[0]["photo_url"] == "https://cdn/only-photo.jpg"
@@ -472,7 +488,9 @@ async def test_collect_photo_candidates_respects_cursor_and_limit(db_session):
         )
     await db_session.commit()
 
-    photos = await daily_digest.collect_photo_candidates(db_session, "mi", exclude_lips=["100_0"])
+    photos = await daily_digest.collect_photo_candidates(
+        db_session, "mi", since=_window(), exclude_lips=["100_0"]
+    )
 
     assert len(photos) == daily_digest.MAX_DIGEST_PHOTOS
     assert "100_0" not in {p["lip"] for p in photos}
@@ -506,9 +524,11 @@ async def test_photo_only_posts_do_not_add_lines_to_the_text(db_session, monkeyp
         lambda **kw: _ok_answer(*[f"Пересказ новости номер {i}." for i in range(4)]),
     )
 
-    photo_candidates = await daily_digest.collect_photo_candidates(db_session, "mi")
+    photo_candidates = await daily_digest.collect_photo_candidates(
+        db_session, "mi", since=_window()
+    )
     draft = await daily_digest.build_digest_from_posts(
-        await daily_digest.collect_candidates(db_session, "mi"),
+        await daily_digest.collect_candidates(db_session, "mi", since=_window()),
         names={"200": "Фотосообщество"},
         theme_tags=["коротко"],
         local_hashtag="#Малмыж",
@@ -559,8 +579,10 @@ async def test_photo_only_photos_come_first_and_item_photos_fill_the_rest(db_ses
         lambda **kw: _ok_answer(*[f"Пересказ новости номер {i}." for i in range(3)]),
     )
 
-    posts = await daily_digest.collect_candidates(db_session, "mi")
-    photo_candidates = await daily_digest.collect_photo_candidates(db_session, "mi")
+    posts = await daily_digest.collect_candidates(db_session, "mi", since=_window())
+    photo_candidates = await daily_digest.collect_photo_candidates(
+        db_session, "mi", since=_window()
+    )
     draft = await daily_digest.build_digest_from_posts(
         posts,
         names={"200": "Фотосообщество"},
@@ -605,8 +627,10 @@ async def test_photos_capped_at_vk_limit(db_session, monkeypatch):
         lambda **kw: _ok_answer(*[f"Пересказ новости номер {i}." for i in range(3)]),
     )
 
-    posts = await daily_digest.collect_candidates(db_session, "mi")
-    photo_candidates = await daily_digest.collect_photo_candidates(db_session, "mi")
+    posts = await daily_digest.collect_candidates(db_session, "mi", since=_window())
+    photo_candidates = await daily_digest.collect_photo_candidates(
+        db_session, "mi", since=_window()
+    )
     draft = await daily_digest.build_digest_from_posts(
         posts,
         region_name="Малмыж",
@@ -634,8 +658,10 @@ async def test_photo_only_material_alone_does_not_make_a_digest(db_session):
         )
     await db_session.commit()
 
-    posts = await daily_digest.collect_candidates(db_session, "mi")
-    photo_candidates = await daily_digest.collect_photo_candidates(db_session, "mi")
+    posts = await daily_digest.collect_candidates(db_session, "mi", since=_window())
+    photo_candidates = await daily_digest.collect_photo_candidates(
+        db_session, "mi", since=_window()
+    )
 
     assert posts == []
     assert photo_candidates, "фото-only посты должны быть найдены"
@@ -678,8 +704,10 @@ async def test_watermark_is_our_group_name_for_every_photo(db_session, monkeypat
         lambda **kw: _ok_answer(*[f"Пересказ новости номер {i}." for i in range(3)]),
     )
 
-    posts = await daily_digest.collect_candidates(db_session, "mi")
-    photo_candidates = await daily_digest.collect_photo_candidates(db_session, "mi")
+    posts = await daily_digest.collect_candidates(db_session, "mi", since=_window())
+    photo_candidates = await daily_digest.collect_photo_candidates(
+        db_session, "mi", since=_window()
+    )
     draft = await daily_digest.build_digest_from_posts(
         posts,
         names={"200": "Чужое сообщество"},
@@ -693,3 +721,35 @@ async def test_watermark_is_our_group_name_for_every_photo(db_session, monkeypat
     assert draft.photos, "фото должны быть в черновике"
     assert all(p.watermark == "МАЛМЫЖ - ИНФО" for p in draft.photos)
     assert not any("Чужое сообщество" == p.watermark for p in draft.photos)
+
+
+@pytest.mark.asyncio
+async def test_photo_candidates_default_window_is_moscow_day(db_session):
+    """Без `since` отбор берёт московские сутки — и только их.
+
+    Граница окна считается от полуночи по Москве (в naive UTC это 21:00
+    предыдущих суток), поэтому проверка не должна зависеть от того, который
+    сейчас час: обе точки задаются от `day_start_utc()`.
+    """
+    start = daily_digest.day_start_utc()
+    _add(
+        db_session,
+        "100_1",
+        text=None,
+        media=[{"type": "photo", "url": "https://cdn/today.jpg"}],
+        collected_at=start + timedelta(minutes=30),
+    )
+    _add(
+        db_session,
+        "100_2",
+        text=None,
+        media=[{"type": "photo", "url": "https://cdn/yesterday.jpg"}],
+        collected_at=start - timedelta(minutes=30),
+    )
+    await db_session.commit()
+
+    photos = await daily_digest.collect_photo_candidates(db_session, "mi")
+
+    assert [p["lip"] for p in photos] == [
+        "100_1"
+    ], "в окно московских суток попал пост вчерашнего дня"
