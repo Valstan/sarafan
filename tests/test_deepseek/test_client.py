@@ -277,3 +277,53 @@ def test_explicit_api_key_wins_over_env(monkeypatch):
     monkeypatch.setattr(dc, "call_api", fake)
     dc.chat(user="u", api_key="explicit-key")
     assert fake.api_key == "explicit-key"
+
+
+def test_thinking_is_disabled_by_default(monkeypatch):
+    """Раздумья выключены по умолчанию: бюджет ответа должен остаться вердикту.
+
+    Замер 07.11 на настоящем промпте: с включёнными раздумьями модель съедает
+    весь потолок ответа (reasoning 3568–4800 при max_tokens 4800,
+    `finish_reason=length`), вердикта не остаётся, а чанк делится пополам —
+    200 постов дали 82 и 74 вердикта при 2,0 млн токенов вместо 200/200 и
+    ~850 тыс.
+    """
+    monkeypatch.delenv("DEEPSEEK_THINKING", raising=False)
+    monkeypatch.setattr(dc, "call_api", _api(200, _completion("привет")))
+
+    dc.chat(user="вопрос")
+
+    assert dc.call_api.body["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in dc.call_api.body
+
+
+def test_thinking_can_be_switched_on_by_env(monkeypatch):
+    """Включать раздумья можно осознанно (env), но по умолчанию — нет."""
+    monkeypatch.setenv("DEEPSEEK_THINKING", "on")
+    monkeypatch.setattr(dc, "call_api", _api(200, _completion("привет")))
+
+    dc.chat(user="вопрос")
+
+    assert "thinking" not in dc.call_api.body
+
+
+def test_budget_eaten_by_reasoning_is_logged_loudly(caplog):
+    """Весь бюджет ушёл в рассуждение — это отказ, и он должен быть виден.
+
+    Без этого видно только «много отказов», но не их причину; именно так
+    07.11 два прогона подряд тихо дали 82 и 74 вердикта вместо 200.
+    """
+    caplog.set_level(logging.WARNING, logger="modules.deepseek_client")
+    payload = _completion(
+        "",
+        usage={
+            "completion_tokens": 480,
+            "completion_tokens_details": {"reasoning_tokens": 480},
+            "prompt_tokens": 100,
+        },
+    )
+    payload["choices"][0]["finish_reason"] = "length"
+    dc.log_cache_usage("headless", payload)
+
+    assert "рассуждение" in caplog.text
+    assert "480" in caplog.text
