@@ -26,11 +26,14 @@ Swagger: `http://127.0.0.1:8000/docs`
 - `setka-celery-beat`
 - `setka-vk-bot` — демон ВК-бота САРАФАНа (Bots Long Poll, `scripts/vk_bot_daemon.py`;
   юнит ставится `scripts/install_vk_bot_service.sh`)
-- `opencode-web` — нейро-движок классификатора (OpenCode v2 на loopback,
-  ADR-0009); его память сторожит `opencode-rss-guard.timer` — исходники и
-  объяснение в [`infra/neural/`](../infra/neural/README.md)
-- `neural-vpn` и `neural-egress-redirect` — ВПН-плечо движка; стоят
-  `disabled`, пока нет подписки NextGenVPN (P205)
+
+Нейро-движок — **DeepSeek API напрямую** (ключ в комнате КАРМАНа, ADR-0014).
+Self-hosted контур OpenCode v2 + ВПН-плечо (`opencode-web`, `neural-vpn`,
+`neural-egress-redirect`, `privoxy`, сторожи `opencode-rss-guard` и
+`neural-egress-guard`) **выведен из эксплуатации 06.11**: юниты сняты,
+бинари и данные удалены, код и инструкция воспроизведения остались в репозитории
+([`infra/neural/`](../infra/neural/README.md)) — откат это одна env-переменка
+`CLASSIFIER_ENGINE` плюс подъём юнитов.
 
 Перезапуск:
 
@@ -39,7 +42,7 @@ sudo systemctl restart setka setka-celery-worker setka-celery-beat setka-vk-bot
 ```
 
 Проверить разом: `systemctl is-active setka setka-celery-worker setka-celery-beat
-setka-vk-bot opencode-web` и `curl -s http://127.0.0.1:8000/api/health/full`.
+setka-vk-bot` и `curl -s http://127.0.0.1:8000/api/health/full`.
 
 Логи: `~/SETKA/logs/` (есть logrotate); демон бота пишет в `logs/vk-bot.log`.
 
@@ -95,13 +98,13 @@ cd ~/SETKA
 | Пользователь | Что под ним работает | sudo |
 |---|---|---|
 | `valstan` | воркер Celery, релизная процедура, агент-разработчик | `NOPASSWD: ALL` |
-| `opencode` | нейро-движок `opencode-web` | нет вообще; юнит держит `NoNewPrivileges=yes` |
+| `opencode` | нейро-движок `opencode-web` (контур выведен 06.11, ADR-0014; правило остаётся на случай возврата) | нет вообще; юнит держит `NoNewPrivileges=yes` |
 
 Канон правила разработчика — [`infra/sudoers/valstan-dev`](../infra/sudoers/valstan-dev),
 инструкция и границы — [`infra/sudoers/README.md`](../infra/sudoers/README.md).
 
 **Почему не белый список.** До 21.10 здесь лежал перечень разрешённых команд для
-`valstan`. Он ограничивал разработчика, а не прод-нейросеть: движок работает под
+`valstan`. Он ограничивал разработчика, а не прод-нейросеть: движок работал под
 отдельным пользователем `opencode`, у которого sudo нет ни в одной строке, а
 юнит и так запечатан `NoNewPrivileges=yes`. Песочница движка существует без
 белого списка; цена же платилась настоящая — каждая новая привилегированная
@@ -112,6 +115,10 @@ cd ~/SETKA
 он падает, если для `valstan` снова заведут перечень команд, если права получит
 `opencode`, если из юнита движка пропадёт `NoNewPrivileges=yes` или сменится
 `User`, и если это описание исчезнет из документа.
+
+⚠️ Правило пережило сам контур: 06.11 движок с бокса снят, но песочница
+остаётся в канеоне — если контур вернётся, он обязан снова работать под
+отдельным пользователем без sudo.
 
 ⚠️ **Полный sudo — не разрешение.** Гейт на destructive-операциях с прод-данными
 (`ALTER`, `DROP`, `DELETE`, `UPDATE`, `systemctl stop`, ротация токенов) остаётся

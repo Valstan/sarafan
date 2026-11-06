@@ -44,6 +44,11 @@ systemctl show opencode-web -p User -p NoNewPrivileges
                                             # User=opencode, NoNewPrivileges=yes
 ```
 
+⚠️ Две последние строки — проверка **песочницы движка**. 06.11 контур снят с бокса
+(ADR-0014), поэтому на проде сейчас `opencode` как пользователя нет, а юнита
+`opencode-web` — тоже: обе команды вернут «нет такого». Правило остаётся в силе
+для случая возврата контура (см. [`infra/neural/README.md`](../neural/README.md)).
+
 ## Что остаётся human-gate'ом
 
 Полный sudo у `valstan` — про **механику** доступа, а не про разрешение. Гейт на

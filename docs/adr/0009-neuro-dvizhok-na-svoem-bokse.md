@@ -2,11 +2,16 @@
 id: ADR-0009
 title: Нейро-движок снова на своём боксе — свой serve и своё ВПН-плечо
 date: 2026-10-20
-status: accepted
+status: superseded by ADR-0014 (контур выведен 06.11)
 tags: [classifier, opencode, engine, infra, vpn]
 ---
 
 # Нейро-движок снова на своём боксе — свой serve и своё ВПН-плечо
+
+> **Контур выведен из эксплуатации 06.11:** движок — DeepSeek API напрямую,
+> self-hosted OpenCode + ВПН-плечо сняты с бокса
+> ([ADR-0014](0014-dvizhok-deepseek-pryamoy-selfhost-kontur-vyveden.md)).
+> Запись остаётся адресом истории: как поднимали и почему сняли.
 
 ## Контекст
 
