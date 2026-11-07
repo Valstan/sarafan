@@ -30,7 +30,14 @@ import urllib.error
 import urllib.request
 from typing import Any, Dict, List, Optional, Tuple
 
-from config.deepseek import get_api_key, get_base_url, get_max_tokens, get_model, get_timeout
+from config.deepseek import (
+    get_api_key,
+    get_base_url,
+    get_max_tokens,
+    get_model,
+    get_timeout,
+    thinking_disabled,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +131,7 @@ def log_cache_usage(label: str, response: Dict[str, Any]) -> None:
 
     details = usage.get("completion_tokens_details")
     reasoning = details.get("reasoning_tokens") if isinstance(details, dict) else None
+    completion = usage.get("completion_tokens")
 
     logger.info(
         "deepseek-usage label=%s model=%s prompt=%s hit=%s miss=%s hit_pct=%s completion=%s "
@@ -134,10 +142,26 @@ def log_cache_usage(label: str, response: Dict[str, Any]) -> None:
         hit if hit is not None else "-",
         miss if miss is not None else "-",
         share,
-        usage.get("completion_tokens") if usage.get("completion_tokens") is not None else "-",
+        completion if completion is not None else "-",
         reasoning if reasoning is not None else "-",
         finish_reason(response) or "-",
     )
+
+    # **Бюджет съеден рассуждением** — не тихая деталь, а отказ: ответ обрезан
+    # по max_tokens, вердикта не будет, чанк уйдёт в деление пополам, и прогон
+    # заплатит за рассуждение дважды. Замер 07.11: с включёнными раздумьями
+    # 200 постов дали 82 и 74 вердикта при 2,0 млн токенов — против 200/200 и
+    # ~850 тыс. без них. Ловим здесь, потому что иначе видно только «много
+    # отказов» без причины.
+    if reasoning and completion and reasoning >= completion:
+        logger.warning(
+            "deepseek: весь бюджет ответа ушёл в рассуждение (reasoning=%s, completion=%s, "
+            "finish=%s) — ответ обрезан, вердикта не будет; проверь DEEPSEEK_THINKING "
+            "и потолок max_tokens",
+            reasoning,
+            completion,
+            finish_reason(response) or "-",
+        )
 
 
 def call_api(
@@ -255,6 +279,12 @@ def chat(
     }
     if json_object:
         body["response_format"] = {"type": "json_object"}
+    if thinking_disabled():
+        # Явно гасим «раздумья»: с ними бюджет ответа съедается целиком, ответ
+        # обрезается, вердикта нет (замер 07.11 — 82 вердикта вместо 200 на
+        # батче, 2,0 млн токенов вместо 850 тыс.). Обоснование и замеры — в
+        # `config/deepseek.py`.
+        body["thinking"] = {"type": "disabled"}
 
     status, response = call_api(
         body,
