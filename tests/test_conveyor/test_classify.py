@@ -210,6 +210,21 @@ class TestClassify:
         assert fake.body["temperature"] == 0.2
         assert fake.body["messages"][0]["role"] == "system"
 
+    def test_thinking_is_disabled_in_request(self, monkeypatch):
+        """Конвейер собирает тело запроса сам — выключатель раздумий нужен и здесь.
+
+        Без него явное имя модели включает «раздумья», они съедают бюджет
+        ответа (1200 токенов на пост), JSON обрывается, и пост остаётся без
+        классификации: замер 07.11 — 277 обрезанных вызовов за сутки.
+        """
+        monkeypatch.delenv("DEEPSEEK_THINKING", raising=False)
+        fake = _api(200, _completion({"action": "accept", "title": "З", "text": "Т"}))
+        monkeypatch.setattr(classify, "_call_api", fake)
+
+        classify.classify(POST, sections=SECTIONS, api_key="k")
+
+        assert fake.body["thinking"] == {"type": "disabled"}
+
     def test_missing_key_is_refusal_not_crash(self, monkeypatch):
         monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
         out = classify.classify(POST, sections=SECTIONS)

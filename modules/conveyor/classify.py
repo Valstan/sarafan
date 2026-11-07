@@ -25,7 +25,14 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from config.deepseek import get_api_key, get_base_url, get_max_tokens, get_model, get_timeout
+from config.deepseek import (
+    get_api_key,
+    get_base_url,
+    get_max_tokens,
+    get_model,
+    get_timeout,
+    thinking_disabled,
+)
 from modules.deepseek_client import call_api, finish_reason
 
 logger = logging.getLogger(__name__)
@@ -202,6 +209,11 @@ def _call_opencode(body: Dict[str, Any]):
 
     Контракт ``opencode_engine.chat`` зеркалит deepseek_client, поэтому подмена
     не трогает разбор ответа ниже: тот же JSON, тот же разбор, те же причины.
+
+    ⚠️ Контур OpenCode+ВПН выведен из эксплуатации 06.11 (ADR-0014), поэтому
+    на текущем проде этот запасной путь не сработает: сервера на боксе нет.
+    Он остаётся как часть рецепта отката — если контур вернётся, подмена
+    заработает снова.
     """
     from modules.opencode_engine import chat as _opencode_chat
 
@@ -259,6 +271,12 @@ def classify(
         "max_tokens": get_max_tokens(),
         "response_format": {"type": "json_object"},
     }
+    if thinking_disabled():
+        # Тот же выключатель, что и в `deepseek_client.chat`: без него явное
+        # имя модели включает «раздумья», и они съедают бюджет ответа целиком —
+        # конвейер получает обрезанный JSON и теряет классификацию поста
+        # (замер 07.11: 277 обрезанных вызовов за сутки).
+        body["thinking"] = {"type": "disabled"}
 
     status, response = _call_api(
         body,
