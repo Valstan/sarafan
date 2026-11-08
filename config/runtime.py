@@ -149,6 +149,38 @@ if single_alert_token:
 VK_TOKENS: Dict[str, str] = {}
 VK_TOKENS.update(_collect_prefixed_tokens("VK_TOKEN_"))
 
+
+def refresh_token_globals() -> Dict[str, int]:
+    """Пересобрать глобальные словари токенов из окружения.
+
+    **Зачем.** ``TELEGRAM_TOKENS`` и ``VK_TOKENS`` собираются **при импорте**
+    модуля. А секреты из комнаты КАРМАНА доезжают через ``bootstrap_secrets()``,
+    который кладёт их в ``os.environ`` — и может выполниться **позже** импорта
+    (демон радара тянет комнату в своём ``main()``, а ``config.runtime``
+    импортируется позже; но и наоборот — процесс мог импортировать
+    ``config.runtime`` раньше, чем комната ответила).
+
+    Живой повод (31.10.2026): демон ``setka-radar-intake`` стартовал, когда
+    комната была недоступна («Connection refused»), остался без токена бота и
+    молча работал без него месяц — 349 пропущенных репостов. Ретрайт
+    bootstrap'а теперь есть; он перетягивает секреты в ``os.environ``, но
+    словари выше были собраны раньше — без этого обновления они остались бы
+    пустыми.
+
+    Локальное значение сильнее: уже известный токен **не затирается** (то же
+    свойство 3 спеки, что и в bootstrap — системный env главнее комнаты).
+    Возвращает, сколько имён добавилось (по каждому префиксу).
+    """
+    added: Dict[str, int] = {}
+    for prefix, target in (("TELEGRAM_TOKEN_", TELEGRAM_TOKENS), ("VK_TOKEN_", VK_TOKENS)):
+        fresh = _collect_prefixed_tokens(prefix)
+        new_names = [name for name in fresh if name not in target]
+        for name in new_names:
+            target[name] = fresh[name]
+        added[prefix] = len(new_names)
+    return added
+
+
 # Optional: richer structures as JSON, if provided
 VK_TOKENS_JSON = _load_json_env("VK_TOKENS_JSON", default=None)
 if isinstance(VK_TOKENS_JSON, dict):

@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from pathlib import Path
 
 import pytest
@@ -31,6 +32,68 @@ def test_daemon_pulls_vault_secrets():
     )
 
     assert "bootstrap_secrets()" in src
+
+
+@pytest.mark.asyncio
+async def test_vault_watchdog_repulls_secrets_when_token_missing(monkeypatch):
+    """Демон, стартовавший при недоступной комнате, обязан перетянуть токен сам.
+
+    Живой повод 31.10.2026: демон стартовал, когда комната была недоступна
+    («Connection refused»), остался без токена бота и молча работал без него
+    месяц — 349 пропущенных репостов. Сторож закрывает класс, а не единичный
+    случай.
+    """
+    import config.runtime as runtime
+    import modules.secrets_bootstrap as sb
+
+    calls = {"bootstrap": 0, "refresh": 0}
+    stop = asyncio.Event()
+
+    def fake_bootstrap():
+        calls["bootstrap"] += 1
+        os.environ["TELEGRAM_TOKEN_AFONYA"] = "123:abc"
+
+    def fake_refresh():
+        calls["refresh"] += 1
+        stop.set()
+        return {"TELEGRAM_TOKEN_": 1}
+
+    monkeypatch.setattr(daemon, "VAULT_RETRY_INTERVAL", 0.01)
+    monkeypatch.setattr(sb, "bootstrap_secrets", fake_bootstrap)
+    monkeypatch.setattr(runtime, "refresh_token_globals", fake_refresh)
+    monkeypatch.setattr(runtime, "TELEGRAM_TOKENS", {})
+    monkeypatch.setenv("RADAR_BOT_NAME", "AFONYA")
+
+    await asyncio.wait_for(daemon._vault_watchdog(stop), timeout=5)
+
+    assert calls["bootstrap"] == 1
+    assert calls["refresh"] == 1
+
+
+@pytest.mark.asyncio
+async def test_vault_watchdog_is_quiet_when_token_present(monkeypatch):
+    """Пока токен есть, сторож не ходит в сеть вовсе."""
+    import config.runtime as runtime
+    import modules.secrets_bootstrap as sb
+
+    calls = {"bootstrap": 0}
+    stop = asyncio.Event()
+
+    def fake_bootstrap():
+        calls["bootstrap"] += 1
+
+    monkeypatch.setattr(daemon, "VAULT_RETRY_INTERVAL", 0.01)
+    monkeypatch.setattr(sb, "bootstrap_secrets", fake_bootstrap)
+    monkeypatch.setattr(runtime, "TELEGRAM_TOKENS", {"AFONYA": "123:abc"})
+    monkeypatch.setenv("RADAR_BOT_NAME", "AFONYA")
+
+    async def stopper():
+        await asyncio.sleep(0.05)
+        stop.set()
+
+    await asyncio.wait_for(asyncio.gather(daemon._vault_watchdog(stop), stopper()), timeout=5)
+
+    assert calls["bootstrap"] == 0
 
 
 @pytest.mark.asyncio
