@@ -144,9 +144,19 @@ def _prepare(url: str, kw: dict) -> Tuple[str, dict]:
 
     Заголовки, заданные вызывающим, не теряются: relay-заголовки дописываются
     поверх них (у вызывающих своих ``X-TG-Token`` не бывает).
+
+    **Ключ ``headers`` добавляется только если есть что добавлять.** Без
+    relay'а (и без заголовков у вызывающего) вызов уходит ровно тем же
+    набором аргументов, что и раньше: пустой ``headers={}`` ломает заглушки
+    вызовов с фиксированной сигнатурой (``fake_post(url, json=None,
+    timeout=None)``) — на этом упал общий прогон тестов.
     """
-    headers = dict(kw.pop("headers", None) or {})
-    return rewrite_url(url, headers), {**kw, "headers": headers}
+    raw = kw.pop("headers", None)
+    headers = dict(raw) if raw else {}
+    target = rewrite_url(url, headers)
+    if raw or headers:
+        kw["headers"] = headers
+    return target, kw
 
 
 def post(

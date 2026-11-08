@@ -168,3 +168,41 @@ def test_caller_headers_are_not_lost(monkeypatch):
     )
     assert seen["headers"]["X-Custom"] == "keep"
     assert seen["headers"]["X-TG-Token"] == "T"
+
+
+def test_without_relay_call_keeps_its_argument_shape(monkeypatch):
+    """Без relay'а вызов уходит ровно как раньше — без лишнего headers=.
+
+    Регресс: пустой ``headers={}`` в kwargs ломает заглушки с фиксированной
+    сигнатурой (``fake_post(url, json=None, timeout=None)``) — на этом упал
+    общий прогон тестов (``tests/test_ad_cabinet/test_telemetry.py``).
+    """
+    monkeypatch.delenv("TELEGRAM_API_BASE", raising=False)
+    monkeypatch.delenv("TG_RELAY_SECRET", raising=False)
+    seen = {}
+
+    def fake_post(url, json=None, timeout=None):
+        seen["url"] = url
+        seen["json"] = json
+        return _resp()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    r = th.post("https://api.telegram.org/bot123:ABC/sendMessage", json={"a": 1}, sleep=None)
+    assert r.status_code == 200
+    assert seen["url"] == "https://api.telegram.org/bot123:ABC/sendMessage"
+    assert seen["json"] == {"a": 1}
+
+
+def test_relay_headers_are_added_when_base_is_set(monkeypatch):
+    monkeypatch.setenv("TELEGRAM_API_BASE", "https://relay.example.workers.dev/bot")
+    monkeypatch.setenv("TG_RELAY_SECRET", "s3cr3t")
+    seen = {}
+
+    def fake_post(url, **kw):
+        seen["headers"] = kw.get("headers")
+        return _resp()
+
+    monkeypatch.setattr(requests, "post", fake_post)
+    th.post("https://api.telegram.org/bot123:ABC/sendMessage", json={}, sleep=None)
+    assert seen["headers"]["X-TG-Token"] == "123:ABC"
+    assert seen["headers"]["X-Relay-Secret"] == "s3cr3t"
