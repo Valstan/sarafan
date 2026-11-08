@@ -1,5 +1,5 @@
 /**
- * TG egress-relay для контент-радара SETKA (Ф0.3).
+ * TG egress-relay для контент-радара SETKA (Ф0.3) и Bot API (G63/#041).
  *
  * Зачем: с прод-VPS (RU-хостинг) заблокирован весь Telegram, кроме
  * api.telegram.org — включая t.me/s/ (web-превью каналов) и медиа-CDN
@@ -12,12 +12,23 @@
  *                                  редирект = сигнал «канал без превью»)
  *   GET /media?u=<encoded URL>   → проксирует медиа ТОЛЬКО с телеграмных
  *                                  CDN-хостов (allowlist ниже)
+ *   GET|POST /bot/<method>       → проксирует Bot API (sendMessage, getUpdates,
+ *                                  …). Токен бота едет ЗАГОЛОВКОМ X-TG-Token,
+ *                                  не в пути: секрет в URL утекает в лог
+ *                                  (G239). Если в окружении воркера заданы
+ *                                  TG_TOKEN_* — принимается только токен из
+ *                                  этого списка (иначе 403).
  *   GET /health                  → 200 ok (без секрета)
  *
  * Деплой: scripts/deploy_tg_relay.sh (Cloudflare API, токен на VPS).
  */
 
 const MEDIA_HOST_RE = /^(?:[a-z0-9-]+\.)*(?:cdn-telegram\.org|telesco\.pe|telegram-cdn\.org|t\.me|telegram\.org)$/i;
+
+/** Токены ботов, которым воркер готов ходить (если настроены — строго). */
+function knownBotTokens(env) {
+    return [env.TG_TOKEN_AFONYA, env.TG_TOKEN_VALSTANBOT].filter(Boolean);
+}
 
 const UA =
     'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
@@ -48,11 +59,53 @@ export default {
         if (url.pathname === '/health') {
             return new Response('ok');
         }
-        if (request.method !== 'GET') {
-            return deny(405, 'method not allowed');
-        }
+        // Гейт секрета — для всех прочих маршрутов, включая Bot API.
         if (request.headers.get('x-relay-secret') !== env.RELAY_SECRET) {
             return deny(403, 'forbidden');
+        }
+
+        // /bot/<method> — прокси Bot API. Токен бота — заголовком (не в пути).
+        if (url.pathname.startsWith('/bot/')) {
+            if (request.method !== 'GET' && request.method !== 'POST') {
+                return deny(405, 'method not allowed');
+            }
+            const token = request.headers.get('x-tg-token');
+            if (!token) {
+                return deny(400, 'no token');
+            }
+            const known = knownBotTokens(env);
+            if (known.length && !known.includes(token)) {
+                return deny(403, 'unknown bot token');
+            }
+            const method = url.pathname.slice('/bot/'.length);
+            if (!/^[A-Za-z0-9_]{1,64}$/.test(method)) {
+                return deny(400, 'bad method');
+            }
+            const target = new URL(`https://api.telegram.org/bot${token}/${method}`);
+            target.search = url.search;
+            const init = { method: request.method, headers: {} };
+            const ctype = request.headers.get('content-type');
+            if (ctype) {
+                init.headers['content-type'] = ctype;
+            }
+            if (request.method !== 'GET') {
+                const body = await request.arrayBuffer();
+                if (body.byteLength) {
+                    init.body = body;
+                }
+            }
+            const resp = await fetch(target, init);
+            const text = await resp.text();
+            return new Response(text, {
+                status: resp.status,
+                headers: {
+                    'content-type': resp.headers.get('content-type') || 'application/json',
+                },
+            });
+        }
+
+        if (request.method !== 'GET') {
+            return deny(405, 'method not allowed');
         }
 
         // /s/<channel> — HTML web-превью канала.
