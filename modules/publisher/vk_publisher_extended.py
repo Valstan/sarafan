@@ -410,6 +410,19 @@ class VKPublisher:
                 "text_length": len(text),
                 "attachments_count": len(attachments) if attachments else 0,
                 "postponed": is_postponed,
+                # Кто именно опубликовал: community-токен САМОЙ группы ⇒ пост
+                # точно на стене; user-токен ⇒ пост мог уйти в очередь
+                # «Предложенные записи» (если аккаунт не админ). Журнал
+                # публикаций обязан считать только то, что читают подписчики
+                # (P215), поэтому метку отдаём наружу.
+                #
+                # Метка community-токена бывает двух видов: «community-token»
+                # (один клиент) и «community-token:<NAME>» (перебор кандидатов,
+                # _try_community_candidates) — обе означают публикацию от
+                # имени самой группы, обе ⇒ на стене. Поэтому сверка по
+                # префиксу, а не точное равенство.
+                "via": via,
+                "on_wall": (via or "").startswith("community-token"),
             }
 
         except Exception as e:
@@ -486,6 +499,11 @@ class VKPublisher:
                 "url": f"https://vk.com/wall{target_group_id}_{new_id}",
                 "postponed": is_postponed,
                 "via": via,
+                # Принятие предложенного поста админом — это публикация ОТ
+                # СООБЩЕСТВА (``from_group=1``) ⇒ пост на стене, даже если
+                # технически ушёл user-токеном. В журнал такая строка идёт
+                # (P215): читатели её видят.
+                "on_wall": True,
             }
         except Exception as e:
             logger.error("❌ Failed to publish suggested %s in %s: %s", post_id, target_group_id, e)

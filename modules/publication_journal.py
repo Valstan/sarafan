@@ -85,6 +85,21 @@ async def record_publication(
         if "success" in pub and not pub.get("success"):
             return
 
+        # P215: журнал отвечает на вопрос «что стоит в ленте», а «wall.post
+        # вернул post_id» — не ответ на него. Пост, ушедший user-токеном в
+        # группу, где аккаунт не админ, лежит в очереди «Предложенные записи»
+        # и подписчикам не виден — но id у него настоящий, и без проверки он
+        # попадал в журнал как опубликованный (503 строки по трём группам,
+        # инцидент 03.11). Издатель теперь отдаёт ``on_wall``: True — пост на
+        # стене, False — может быть в предложенных. False ⇒ не засчитываем.
+        # Метки нет (старый вызов) — ведём себя как раньше.
+        if pub.get("on_wall") is False:
+            logger.info(
+                "publication journal: публикация не на стене (via=%s) — в журнал не идёт",
+                pub.get("via") or "?",
+            )
+            return
+
         from database.connection import AsyncSessionLocal
         from database.models_extended import PublishedPost
 

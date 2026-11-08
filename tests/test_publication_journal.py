@@ -158,6 +158,56 @@ async def test_failed_publish_is_not_recorded(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_post_not_on_wall_is_not_recorded(monkeypatch):
+    # P215: post ушёл user-токеном в группу, где аккаунт не админ ⇒ пост лежит
+    # в очереди «Предложенные записи» и подписчикам не виден. Журнал отвечает
+    # на вопрос «что стоит в ленте» — такая строка туда не идёт.
+    called = []
+    monkeypatch.setattr(journal, "_resolve_verdict_themes", lambda *a, **k: called.append(1))
+
+    await journal.record_publication(
+        region_code="mi",
+        wave_theme="novost",
+        kind="regular",
+        posts_included=["100_1"],
+        publish_result={"success": True, "via": "publish-token:MAMA", "on_wall": False},
+    )
+    assert called == []
+
+
+@pytest.mark.asyncio
+async def test_post_on_wall_is_recorded(monkeypatch):
+    called = []
+    monkeypatch.setattr(journal, "_resolve_verdict_themes", lambda *a, **k: called.append(1))
+
+    await journal.record_publication(
+        region_code="mi",
+        wave_theme="novost",
+        kind="regular",
+        posts_included=["100_1"],
+        publish_result={"success": True, "via": "community-token", "on_wall": True},
+    )
+    assert called == [1]
+
+
+@pytest.mark.asyncio
+async def test_without_marker_behaviour_is_unchanged(monkeypatch):
+    # Старый вызов без метки on_wall — ведём себя как раньше (не ломаем
+    # чужих вызовов журнала).
+    called = []
+    monkeypatch.setattr(journal, "_resolve_verdict_themes", lambda *a, **k: called.append(1))
+
+    await journal.record_publication(
+        region_code="mi",
+        wave_theme="novost",
+        kind="regular",
+        posts_included=["100_1"],
+        publish_result={"success": True},
+    )
+    assert called == [1]
+
+
+@pytest.mark.asyncio
 async def test_empty_posts_list_is_a_noop(monkeypatch):
     called = []
     monkeypatch.setattr(journal, "_resolve_verdict_themes", lambda *a, **k: called.append(1))
