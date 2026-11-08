@@ -2,7 +2,7 @@
 
 > Запись `P219` реестра [PENDING_FOLLOWUPS](../PENDING_FOLLOWUPS.md). Индекс грепается, запись читается целиком, реестр целиком не читается никогда ([D-097](../../AGENTS.md)).
 
-`⏱ 2026-11-05 · snooze 0 · fresh · **РЕШЕНО 08.11 (решение владельца): Telegram через наш CF-relay (практика мозга #041/G63) — без ВПН и без новой подписки**`
+`⏱ 2026-11-05 · snooze 0 · fresh · **РЕШЕНО 08.11 (решение владельца): Telegram через наш CF-relay (практика мозга #041/G63) — без ВПН и без новой подписки; выкачено на прод 08.11**`
 
 ## Симптом
 
@@ -84,6 +84,45 @@ LISTEN 127.0.0.1:10808  users:(("xray",pid=150112))
 **Что НЕ делаем:** не поднимаем ВПН и xray обратно (мёртвый контур, мёртвая
 подписка); глобальный `ALL_PROXY` по-прежнему не ставим — он менял бы выходной IP
 публикаций в VK и ломал бы идентичность проекта.
+
+## Выкат на прод (08.11)
+
+PR #1032 (`19e8ad8`) влит, код на боксе (`git pull --ff-only`).
+
+| Шаг | Что сделано | Проверка |
+|---|---|---|
+| Воркер | `sudo bash scripts/deploy_tg_relay.sh` | `upload: OK`, `subdomain: OK`, привязки: `RELAY_SECRET` + `TG_TOKEN_AFONYA` + `TG_TOKEN_VALSTANBOT` (secret_text, из комнаты) |
+| Env | `TELEGRAM_API_BASE=https://tg-relay.zubazeirot.workers.dev/bot` в `/etc/setka/setka.env` | права 600 root:root, ключ на месте, ровно одна строка |
+| Сервисы | `systemctl restart setka setka-celery-worker setka-celery-beat setka-vk-bot` | 4/4 active, health 200 за 1 попытку |
+| Smoke | `scripts/smoke_test.py --region mi --theme novost` | `принесено из ВК=280, после отбора=5, would_publish=2, communities=14` |
+
+**Проверка самого relay (с бокса):**
+
+| Проба | Результат |
+|---|---|
+| наш токен VALSTANBOT | HTTP 200, `ok:true`, бот «Жемчужинка» |
+| наш токен AFONYA | HTTP 200, `ok:true`, бот «Малмыж-Инфо» |
+| чужой токен | HTTP 403 `unknown bot token` |
+| без `X-Relay-Secret` | HTTP 403 `forbidden` |
+
+**Проверка пути приложения (не изолированный curl, а наш код):**
+`modules.telegram_http.post("https://api.telegram.org/bot<TOKEN>/getMe")` →
+`HTTP 200 | ok: True | бот: Жемчужинка`. До выката этот же вызов падал
+`ConnectTimeout` к `api.telegram.org`.
+
+**Telegram-ошибки в логе воркера:** последняя — `19:00:43`, рестарт воркера —
+`19:01:40`, после рестарта — **0** ошибок (проверено по `logs/celery-worker.log`).
+
+**Побочный хвост деплоя (закрыт в том же заходе):** скрипт деплоя оставлял
+`/tmp/tg_relay_meta.json` — метаданные воркера с токенами ботов в открытом виде.
+Файл затрён (`shred -u`), а сам скрипт теперь затирает его сам (правка в
+`scripts/deploy_tg_relay.sh`).
+
+**Регресс, который поймал CI:** первая версия `_prepare()` добавляла ключ
+`headers` в kwargs **каждого** вызова, даже когда relay не настроен. Заглушки с
+фиксированной сигнатурой (`fake_post(url, json=None, timeout=None)`) такой
+аргумент не принимают — общий прогон падал (`tests/test_ad_cabinet/test_telemetry.py`).
+Теперь ключ `headers` появляется только если есть что в него положить.
 
 ## Связи
 

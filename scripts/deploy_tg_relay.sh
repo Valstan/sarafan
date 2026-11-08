@@ -62,6 +62,10 @@ curl -sf -X PUT "$API/accounts/$ACCOUNT/workers/scripts/$SCRIPT_NAME" \
     -F "worker.js=@$WORKER_FILE;type=application/javascript+module" \
     | python3 -c 'import sys,json;d=json.load(sys.stdin);print("upload:", "OK" if d["success"] else d["errors"])'
 
+# Метаданные содержат токены ботов в открытом виде — после загрузки их некуда
+# держать. Канон: копию секрета затираем сразу, как убедились в результате.
+shred -u /tmp/tg_relay_meta.json 2>/dev/null || rm -f /tmp/tg_relay_meta.json
+
 # Включить workers.dev-маршрут (https://tg-relay.<subdomain>.workers.dev).
 curl -sf -X POST "$API/accounts/$ACCOUNT/workers/scripts/$SCRIPT_NAME/subdomain" \
     -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
