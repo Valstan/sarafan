@@ -26,7 +26,7 @@ def test_post_starts_with_the_news_text_itself():
     assert "✍" not in r.text
     assert r.text.startswith("Текст новости")
     # Подпись источника — название без ссылки (решение владельца 20.10).
-    assert "Источник: Группа тест" in r.text
+    assert "Рассказали в Группа тест" in r.text
     assert "vk.com" not in r.text
     assert "#тест" in r.text
 
@@ -126,7 +126,7 @@ def test_headline_goes_above_the_text():
     r = b.build_bulletin([post], group_names={"100": "Верхнедеревенский клуб"})
 
     assert r.text.startswith("Субботник собрал сто человек\n\nТекст новости про субботник.")
-    assert "Источник: Верхнедеревенский клуб" in r.text
+    assert "Рассказали в Верхнедеревенский клуб" in r.text
 
 
 def test_no_headline_no_blank_line():
@@ -139,12 +139,12 @@ def test_no_headline_no_blank_line():
 
 
 def test_unknown_source_leaves_no_empty_attribution():
-    """Имени нет — подписи нет вообще, а не «Источник: » с пустотой."""
+    """Имени нет — подписи нет вообще, а не «Рассказали в » с пустотой."""
     post = _stub_post(1, "Текст новости.")
     b = BulletinBuilder(header="", hashtags=[], local_hashtag="")
     r = b.build_bulletin([post], group_names={})
 
-    assert "Источник" not in r.text
+    assert "Рассказали в" not in r.text
     assert not r.text.rstrip().endswith("\n")
 
 

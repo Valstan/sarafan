@@ -184,10 +184,42 @@ def test_numbers_in_plain_text_are_still_facts():
 
 
 def test_digest_items_split_on_source_marker():
+    """Новый маркер подписи (решение владельца 08.11): «Рассказали в»."""
+    wall = (
+        "Вечерняя сводка\n\n"
+        "Первый пункт.\n\nРассказали в Сообщество А\n\n"
+        "Второй пункт.\n\nРассказали в Сообщество Б"
+    )
+    items = split_digest_items(wall)
+    assert len(items) == 2
+    assert "Первый пункт" in items[0]
+    assert "Второй пункт" in items[1]
+
+
+def test_digest_items_still_split_on_old_source_marker():
+    """Старый маркер «Источник:» тоже разбирается: посты до 08.11 стоят в ленте.
+
+    Фактчек проверяет уже опубликованный текст, поэтому смена подписи не
+    должна оставлять старые посты неразбираемыми — иначе они молча выпадут
+    из проверки.
+    """
     wall = (
         "Вечерняя сводка\n\n"
         "Первый пункт.\n\nИсточник: Сообщество А\n\n"
         "Второй пункт.\n\nИсточник: Сообщество Б"
+    )
+    items = split_digest_items(wall)
+    assert len(items) == 2
+    assert "Первый пункт" in items[0]
+    assert "Второй пункт" in items[1]
+
+
+def test_digest_items_split_on_mixed_markers():
+    """Смешанная стена (старые и новые пункты рядом) разбирается целиком."""
+    wall = (
+        "Вечерняя сводка\n\n"
+        "Первый пункт.\n\nИсточник: Сообщество А\n\n"
+        "Второй пункт.\n\nРассказали в Сообщество Б"
     )
     items = split_digest_items(wall)
     assert len(items) == 2
