@@ -32,7 +32,7 @@
 ## 🔴 Блокеры
 
 
-- **P219** [🔴 Telegram с бокса не отвечает — прокси не прописан](pending/P219-telegram-na-bokse-ne-otvechaet-proksi-ne-propisan.md) · `⏱ 2026-11-05 · snooze 0 · fresh · решение за владельцем`
+- **P219** [🔴 Telegram с бокса не отвечает — прокси не прописан](pending/P219-telegram-na-bokse-ne-otvechaet-proksi-ne-propisan.md) · `⏱ 2026-11-05 · snooze 0 · fresh · **РЕШЕНО 08.11**: Telegram через наш CF-relay (маршрут Bot API в tg_relay + TELEGRAM_API_BASE), без ВПН и без новой подписки; код готов и проверен локально — остался выкат relay на прод (воркер + env + рестарт)`
 - **P195** [🔴 Muse (Zen free) geo-заблокирована с IP бокса](pending/P195-muse-geo-block-ip-boxa.md) · `⏱ 2026-10-14 · snooze 0 · parked · условие: донорский VPS под ssh -D или платный прокси; цепочка фолбэков снимает блокировку — прод не ждёт решения`
 
 - **P164** [🔴 Celery-воркер убивается OOM — было ~2 раза в сутки, после PR #707 стало раз в четыре дня; течь не найдена (найдено 2026-09-09)](pending/P164-celery-vorker-ubivaetsya-oom-primerno-raz-v.md) · `⏱ 2026-09-09 · snooze 0 · parked · OOM с 06.10 не было ·`
