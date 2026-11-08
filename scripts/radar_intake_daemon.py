@@ -60,6 +60,9 @@ ERROR_SLEEP = 5
 # личная лента не публикация в сеть, чаще незачем. Пол — минута, чтобы опечатка
 # в env не превратила демон в молотилку.
 SOURCES_INTERVAL = max(60, int(os.getenv("RADAR_POLL_INTERVAL_SECONDS", "600")))
+# Как часто сторож пробует перетянуть секреты из комнаты, если нужного токена
+# нет (см. _vault_watchdog). Пока токен есть, сетевых вызовов тут нет.
+VAULT_RETRY_INTERVAL = max(60, int(os.getenv("RADAR_VAULT_RETRY_SECONDS", "300")))
 
 Runner = Callable[[], Awaitable[Dict[str, Any]]]
 
@@ -137,6 +140,48 @@ async def _interval_loop(name: str, runner: Runner, stop: asyncio.Event, interva
         await _pause(stop, max(1.0, interval - elapsed))
 
 
+async def _vault_watchdog(stop: asyncio.Event) -> None:
+    """Перетянуть секреты из комнаты, если нужного токена нет.
+
+    **Живой повод (31.10.2026).** Демон стартовал в 15:39, когда комната
+    КАРМАНА была недоступна («Connection refused»), — ``bootstrap_secrets()``
+    отработал вхолостую, и демон остался **без токена бота**: приём каналов
+    выключен, репосты в канал AFONYA пропускаются. Процесс при этом жив и
+    выглядит здоровым, а демон молча работает неполноценно месяцами (349
+    пропусков к 08.11).
+
+    Ретрайт закрывает класс, а не единичный случай: если токена нет — раз в
+    ``VAULT_RETRY_INTERVAL`` снова тянем комнату. Секрет из комнаты попадает
+    в ``os.environ``, а ``config.runtime`` собирает свои словари при импорте —
+    поэтому после удачной попытки словари обновляются явно
+    (``refresh_token_globals``).
+
+    Пока токен есть, сетевых вызовов тут нет вовсе.
+    """
+    from config.runtime import TELEGRAM_TOKENS, get_radar_bot_name, refresh_token_globals
+    from modules.secrets_bootstrap import bootstrap_secrets
+
+    bot_name = (get_radar_bot_name() or "").upper()
+    while not stop.is_set():
+        await _pause(stop, VAULT_RETRY_INTERVAL)
+        if stop.is_set():
+            break
+        if bot_name and TELEGRAM_TOKENS.get(bot_name):
+            continue
+        try:
+            bootstrap_secrets()
+            added = refresh_token_globals()
+        except Exception:  # noqa: BLE001 - сторож не должен ронять демон
+            logger.exception("vault-watchdog: не удалось перетянуть секреты")
+            continue
+        logger.info(
+            "vault-watchdog: комната опрошена, добавлено имён: %s; токен бота %s: %s",
+            added,
+            bot_name or "?",
+            "есть" if TELEGRAM_TOKENS.get(bot_name) else "нет",
+        )
+
+
 async def main() -> None:
     # Секреты живут в комнате КАРМАНа, а не в env-файле: TELEGRAM_TOKEN_*, VK-токены
     # и ключи движка доезжают до процесса только через bootstrap — ровно так это
@@ -167,6 +212,7 @@ async def main() -> None:
         _loop("vk-intake", vk, stop),
         _loop("tg-intake", tg, stop),
         _interval_loop("sources-poll", sources_poll_once, stop, SOURCES_INTERVAL),
+        _vault_watchdog(stop),
     )
     logger.info("radar intake daemon: остановлен")
 

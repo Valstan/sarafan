@@ -304,3 +304,47 @@ class TestLoadJsonEnv:
             importlib.reload(config.runtime)
             with pytest.raises(RuntimeError, match="Invalid JSON"):
                 config.runtime._load_json_env("BAD_JSON", {})
+
+
+class TestRefreshTokenGlobals:
+    """Поздние секреты: они могут приехать ПОСЛЕ импорта модуля."""
+
+    def test_picks_up_telegram_token_added_later(self, monkeypatch):
+        """Секрет из комнаты, доехавший после импорта, должен попасть в словарь."""
+        import config.runtime as runtime
+
+        # Словари подменяем копиями: тест не должен оставлять токены в глобальном
+        # состоянии на остальную сессию.
+        monkeypatch.setattr(runtime, "TELEGRAM_TOKENS", dict(runtime.TELEGRAM_TOKENS))
+        monkeypatch.setattr(runtime, "VK_TOKENS", dict(runtime.VK_TOKENS))
+        monkeypatch.setenv("TELEGRAM_TOKEN_LATEBOT", "999:xyz")
+
+        added = runtime.refresh_token_globals()
+
+        assert runtime.TELEGRAM_TOKENS.get("LATEBOT") == "999:xyz"
+        assert added["TELEGRAM_TOKEN_"] >= 1
+
+    def test_picks_up_vk_token_added_later(self, monkeypatch):
+        import config.runtime as runtime
+
+        monkeypatch.setattr(runtime, "TELEGRAM_TOKENS", dict(runtime.TELEGRAM_TOKENS))
+        monkeypatch.setattr(runtime, "VK_TOKENS", dict(runtime.VK_TOKENS))
+        monkeypatch.setenv("VK_TOKEN_LATE", "vk1.late")
+
+        added = runtime.refresh_token_globals()
+
+        assert runtime.VK_TOKENS.get("LATE") == "vk1.late"
+        assert added["VK_TOKEN_"] >= 1
+
+    def test_keeps_local_value_stronger(self, monkeypatch):
+        """Приоритет локального значения (свойство 3 спеки) не нарушается."""
+        import config.runtime as runtime
+
+        monkeypatch.setattr(runtime, "TELEGRAM_TOKENS", dict(runtime.TELEGRAM_TOKENS))
+        monkeypatch.setattr(runtime, "VK_TOKENS", dict(runtime.VK_TOKENS))
+        monkeypatch.setenv("TELEGRAM_TOKEN_LATEBOT", "из-комнаты")
+
+        runtime.TELEGRAM_TOKENS["LATEBOT"] = "локальное"
+        runtime.refresh_token_globals()
+
+        assert runtime.TELEGRAM_TOKENS["LATEBOT"] == "локальное"
