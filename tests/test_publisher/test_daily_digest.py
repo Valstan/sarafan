@@ -254,7 +254,7 @@ def test_compose_digest_structure_and_tag_dedupe():
 
     lines = text.split("\n\n")
     assert lines[0] == "Короткой строкой"
-    assert "Первое событие.\n\nИсточник: Клуб села" in text
+    assert "Первое событие.\n\nРассказали в Клуб села" in text
     assert "Источник" not in text.split("Второе событие.")[1].split("#")[0]
     tags = lines[-1].split()
     assert tags[0] == "#коротко"
@@ -310,7 +310,7 @@ async def test_build_digest_attaches_source_names_and_lips(db_session, monkeypat
     )
 
     assert draft is not None
-    assert "Источник: Верхнедеревенский клуб" in draft.text
+    assert "Рассказали в Верхнедеревенский клуб" in draft.text
     assert len(draft.lips) == 4
     assert draft.text.endswith("#коротко #Малмыж")
 

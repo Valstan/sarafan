@@ -71,7 +71,7 @@ def test_build_headliner_text_and_attachments():
     )
     text, atts = build_headliner(post, group_name="Родник", local_hashtag="#опарино")
     assert text.startswith("Важная новость района.")
-    assert "Источник: Родник" in text
+    assert "Рассказали в Родник" in text
     assert "vk.com" not in text
     assert "#опарино" in text
     assert "Новости" not in text.split("\n")[0]  # без шапки-заголовка сводки
@@ -92,7 +92,7 @@ def test_build_headliner_puts_the_headline_first():
     assert lines[1] == ""
     assert "Субботник собрал больше ста человек." in text
     assert "#культура" in text and "#малмыжский_район" in text and "#Малмыж" in text
-    assert "Источник: Верхнедеревенский сельский клуб" in text
+    assert "Рассказали в Верхнедеревенский сельский клуб" in text
     assert text.rstrip().splitlines()[-1].startswith("#")
 
 

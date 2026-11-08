@@ -6,7 +6,7 @@ from utils.post_utils import extract_source_attribution
 def test_extract_source_attribution_is_name_only():
     post = {"owner_id": -123456, "id": 789}
     s = extract_source_attribution(post, "Новости района")
-    assert s == "Источник: Новости района"
+    assert s == "Рассказали в Новости района"
     assert "vk.com" not in s
 
 
@@ -14,14 +14,14 @@ def test_extract_source_attribution_keeps_pipe_as_plain_text():
     """Вертикальная черта больше не ломает разметку: это обычный текст."""
     post = {"owner_id": -1, "id": 2}
     s = extract_source_attribution(post, "A|B")
-    assert s == "Источник: A|B"
+    assert s == "Рассказали в A|B"
 
 
 def test_extract_source_attribution_without_name_is_empty():
     """Не знаем, чей пост, — подпись не ставим вовсе.
 
-    «Источник: Источник» — хуже, чем отсутствие подписи: он выглядит как
-    потерянные данные, а не как их отсутствие.
+    «Рассказали в Рассказали в» — хуже, чем отсутствие подписи: он
+    выглядит как потерянные данные, а не как их отсутствие.
     """
     post = {"owner_id": 100, "id": 5}
     assert extract_source_attribution(post, "") == ""

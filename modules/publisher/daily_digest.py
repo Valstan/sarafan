@@ -38,6 +38,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional, Sequence
 
+from utils.post_utils import SOURCE_LABEL
+
 logger = logging.getLogger(__name__)
 
 HEADER = "Короткой строкой"
@@ -131,7 +133,7 @@ class DigestItem:
     def render(self) -> str:
         block = self.text.strip()
         if self.source_name:
-            block = f"{block}\n\nИсточник: {self.source_name}"
+            block = f"{block}\n\n{SOURCE_LABEL} {self.source_name}"
         return block
 
 
