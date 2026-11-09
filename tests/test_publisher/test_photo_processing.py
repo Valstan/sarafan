@@ -6,11 +6,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 
 import pytest
 from PIL import Image
 
+import modules.publisher.photo_processing as photo_processing
 from modules.publisher.photo_processing import (
     MAX_H,
     MAX_W,
@@ -116,22 +118,41 @@ def test_noise_is_subtle():
 class _FakePublisher:
     """Публикатор с одним фото: ``_invoke`` отвечает по-разному на методы."""
 
-    def __init__(self, *, fail: bool = False):
+    def __init__(self, *, fail: bool = False, owner_client=None):
         self.fail = fail
         self.calls = []
+        self.clients = []
+        self.owner_client = owner_client if owner_client is not None else object()
 
-    def _client_for_group(self, group_id: int):
-        return object(), True
+    async def _photo_upload_client(self):
+        """Клиент аккаунта-владельца: заливает фото он, а не community-токен."""
+        return self.owner_client
 
     async def _invoke(self, client, method, params):
         self.calls.append((method, params))
+        self.clients.append(client)
         if self.fail:
             raise RuntimeError("ВК недоступен")
         if method == "photos.getWallUploadServer":
             return {"upload_url": "https://upload.vk.example/srv"}
         if method == "photos.saveWallPhoto":
-            return {"items": [{"owner_id": -42, "id": 777}]}
+            return {"items": [{"owner_id": 20002978, "id": 777}]}
         raise AssertionError(f"неожиданный метод: {method}")
+
+
+class _NoOwnerPublisher(_FakePublisher):
+    """Аккаунта-владельца нет — заливать нечем."""
+
+    async def _photo_upload_client(self):
+        return None
+
+
+@pytest.fixture(autouse=True)
+def _fast_upload(monkeypatch):
+    """Троттлинг загрузок и пауза после 405 в тестах — мгновенно."""
+    monkeypatch.setattr(photo_processing, "UPLOAD_MIN_INTERVAL_SECONDS", 0.0)
+    monkeypatch.setattr(photo_processing, "UPLOAD_405_COOLDOWN_SECONDS", 0.0)
+    monkeypatch.setattr(photo_processing, "_last_upload_at", 0.0)
 
 
 @pytest.mark.asyncio
@@ -141,7 +162,7 @@ async def test_upload_wall_photo_returns_attachment(monkeypatch):
 
     att = await upload_wall_photo(publisher, -42, b"jpeg-bytes")
 
-    assert att == "photo-42_777"
+    assert att == "photo20002978_777"
     methods = [m for m, _ in publisher.calls]
     assert methods == ["photos.getWallUploadServer", "photos.saveWallPhoto"]
     # Загрузка идёт в ту же группу, в которую публикуем.
@@ -149,8 +170,65 @@ async def test_upload_wall_photo_returns_attachment(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_upload_uses_owner_account_not_community_token(monkeypatch):
+    """Заливает АККАУНТ-ВЛАДЕЛЕЦ: community-токен залить в стену не может ([27])."""
+    owner_client = object()
+    publisher = _FakePublisher(owner_client=owner_client)
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    await upload_wall_photo(publisher, -42, b"jpeg-bytes")
+
+    assert publisher.clients and all(c is owner_client for c in publisher.clients)
+
+
+@pytest.mark.asyncio
+async def test_upload_without_owner_account_is_skipped(monkeypatch):
+    """Нет аккаунта-владельца — фото пропускаем, в ВК не ходим вовсе."""
+    publisher = _NoOwnerPublisher()
+    monkeypatch.setattr("requests.post", _fake_post)
+
+    assert await upload_wall_photo(publisher, -42, b"jpeg-bytes") is None
+    assert publisher.calls == []
+
+
+@pytest.mark.asyncio
+async def test_upload_retries_after_405(monkeypatch):
+    """Upload-сервер ВК отдаёт 405 при частых заливках — это не запрет.
+
+    Отказ проходит после паузы, поэтому фото уходит со второй попытки, а не
+    выпадает из сборника.
+    """
+    attempts = []
+
+    def _post_405_then_ok(url, files=None, timeout=None):
+        attempts.append(url)
+        if len(attempts) == 1:
+            return _FakeResponse(None, status_code=405)
+        return _FakeResponse({"photo": "server-photo", "server": 1, "hash": "h"})
+
+    publisher = _FakePublisher()
+    monkeypatch.setattr("requests.post", _post_405_then_ok)
+
+    slept = []
+    real_sleep = asyncio.sleep
+
+    async def _fake_sleep(delay, *args, **kwargs):
+        slept.append(delay)
+        return await real_sleep(0)
+
+    monkeypatch.setattr("asyncio.sleep", _fake_sleep)
+
+    att = await upload_wall_photo(publisher, -42, b"jpeg-bytes")
+
+    assert att == "photo20002978_777"
+    assert len(attempts) == 2
+    # Пауза после 405 выдержана — иначе ретрай бьётся в тот же лимит.
+    assert photo_processing.UPLOAD_405_COOLDOWN_SECONDS in slept
+
+
+@pytest.mark.asyncio
 async def test_upload_wall_photo_survives_failure(monkeypatch):
-    """Фото не обязано быть: ошибка ВК не должна ронять сборник."""
+    """Фото не обязато быть: ошибка ВК не должна ронять сборник."""
     publisher = _FakePublisher(fail=True)
     monkeypatch.setattr("requests.post", _fake_post)
 
@@ -158,10 +236,13 @@ async def test_upload_wall_photo_survives_failure(monkeypatch):
 
 
 class _FakeResponse:
-    def __init__(self, payload):
+    def __init__(self, payload, status_code: int = 200):
         self._payload = payload
+        self.status_code = status_code
 
     def json(self):
+        if self._payload is None:
+            raise ValueError("ответ не json")
         return self._payload
 
 

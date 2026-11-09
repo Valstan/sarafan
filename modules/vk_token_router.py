@@ -408,6 +408,53 @@ class TokenPolicy:
         self._active_cache = None
         self._community_cache = None
 
+    async def _user_tokens(self) -> Dict[str, str]:
+        """Все доступные **user**-токены: БД (единый источник) + env как дополнение.
+
+        Единый источник токенов — БД (``/tokens`` UI, решение владельца
+        2026-07-12): значения берём из активных БД-строк. env ``VK_TOKENS``
+        остаётся bootstrap/аварийным дополнением — добавляет только имена,
+        которых в БД нет вовсе (или у которых в БД пустой token). Имя,
+        выключенное в БД, env НЕ воскрешает.
+        """
+        from config.runtime import VK_TOKENS
+
+        active_db = await self._load_active()
+        tokens: Dict[str, str] = {name: row.token for name, row in active_db.items() if row.token}
+        for name, tok in (VK_TOKENS or {}).items():
+            upper = name.upper()
+            if not tok or upper in tokens:
+                continue
+            if await self._token_exists_but_disabled(upper):
+                continue
+            tokens[upper] = tok
+        return tokens
+
+    async def token_for_account(self, name: str) -> Optional["TokenCandidate"]:
+        """Токен **конкретного** user-аккаунта по имени — без каскада и без фильтров.
+
+        Каскад :meth:`pick` отвечает на вопрос «кто публикует», а здесь вопрос
+        другой: «кто именно должен выполнить операцию». Разные аккаунты
+        неравнозначны: заливку фото в стену сообщества делает аккаунт-владелец
+        группы (P214, замер 09.11) — администратор ту же загрузку делает, но
+        community-токен такое фото в записи потом не принимает.
+
+        Hard deny-list (``VK_NEVER_PUBLISH_TOKEN_NAMES``) действует и здесь:
+        аккаунту, которому запрещено публиковать, нельзя и заливать фото.
+        """
+        from config.runtime import get_never_publish_token_names
+
+        upper = (name or "").upper()
+        if not upper:
+            return None
+        if upper in get_never_publish_token_names():
+            return None
+        tokens = await self._user_tokens()
+        tok = tokens.get(upper)
+        if not tok:
+            return None
+        return _candidate(upper, tok, "user")
+
     # ------------------------------------------------------------------
     # Главный метод: pick
     # ------------------------------------------------------------------
@@ -433,7 +480,6 @@ class TokenPolicy:
             понятную ошибку («сейчас публиковать нечем»).
         """
         from config.runtime import (
-            VK_TOKENS,
             get_never_publish_token_names,
             get_publish_token_names,
             get_reserve_publish_token_names,
@@ -442,21 +488,7 @@ class TokenPolicy:
         never_publish = get_never_publish_token_names()
         active_db = await self._load_active()
 
-        # Единый источник токенов — БД (``/tokens`` UI, решение владельца
-        # 2026-07-12): значения берём из активных БД-строк. env ``VK_TOKENS``
-        # остаётся bootstrap/аварийным дополнением — добавляет только имена,
-        # которых в БД нет вовсе (или у которых в БД пустой token). Имя,
-        # выключенное в БД, env НЕ воскрешает.
-        user_tokens: Dict[str, str] = {
-            name: row.token for name, row in active_db.items() if row.token
-        }
-        for name, tok in (VK_TOKENS or {}).items():
-            upper = name.upper()
-            if not tok or upper in user_tokens:
-                continue
-            if await self._token_exists_but_disabled(upper):
-                continue
-            user_tokens[upper] = tok
+        user_tokens = await self._user_tokens()
 
         # UI-override (миграция 023): user-токены с ``role='publish'`` в БД
         # добавляются к env-whitelist'у АДДИТИВНО — роль только РАСШИРЯЕТ набор

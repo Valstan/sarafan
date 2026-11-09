@@ -1080,3 +1080,51 @@ def test_capability_filter_env_kill_switch(monkeypatch):
 
     monkeypatch.setenv("VK_CAPABILITY_FILTER", "0")
     assert router._capabilities_matrix_safe() is None
+
+
+# ---------------------------------------------------------------------------
+# token_for_account(): конкретный аккаунт, без каскада (P214)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_token_for_account_returns_named_account():
+    """Запросили конкретный аккаунт — получили именно его токен."""
+    rows_active = [
+        _vk_token_row("VALSTAN", "tok_v"),
+        _vk_token_row("MAMA", "tok_mama"),
+    ]
+    session = _make_session_with_rows(rows_by_query=[rows_active])
+    with (
+        patch("config.runtime.VK_TOKENS", {}),
+        patch("config.runtime.get_never_publish_token_names", return_value=set()),
+    ):
+        candidate = await TokenPolicy(session).token_for_account("mama")
+    assert candidate is not None
+    assert candidate.name == "MAMA"
+    assert candidate.token == "tok_mama"
+    assert candidate.source == "user"
+
+
+@pytest.mark.asyncio
+async def test_token_for_account_unknown_account_is_none():
+    """Аккаунта нет — токена нет: выдумывать нечего."""
+    session = _make_session_with_rows(rows_by_query=[[]])
+    with (
+        patch("config.runtime.VK_TOKENS", {}),
+        patch("config.runtime.get_never_publish_token_names", return_value=set()),
+    ):
+        assert await TokenPolicy(session).token_for_account("VALSTAN") is None
+        assert await TokenPolicy(session).token_for_account("") is None
+
+
+@pytest.mark.asyncio
+async def test_token_for_account_respects_hard_deny_list():
+    """Hard deny-list действует и здесь: запрещённому аккаунту нельзя и заливать."""
+    rows_active = [_vk_token_row("VITA", "tok_vita")]
+    session = _make_session_with_rows(rows_by_query=[rows_active])
+    with (
+        patch("config.runtime.VK_TOKENS", {}),
+        patch("config.runtime.get_never_publish_token_names", return_value={"VITA"}),
+    ):
+        assert await TokenPolicy(session).token_for_account("VITA") is None
