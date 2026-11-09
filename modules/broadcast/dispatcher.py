@@ -314,11 +314,13 @@ async def _default_publisher(session) -> Callable[[int, str, Optional[List[str]]
 async def _default_build_attachments(campaign, targets) -> Dict[int, str]:
     """Залить картинки кампании на стену КАЖДОЙ цели → ``{abs(group_id): 'photo..'}``.
 
-    Грузим **user-токеном** (владелец-админ): VK запрещает
+    Грузим **user-токеном владельца группы**: VK запрещает
     ``photos.getWallUploadServer`` под community-auth (error 27 — probe
     ``scripts/probe_wall_upload_token.py`` 2026-06-19: 16/16 user-ok, 0/16
-    community). Фото грузится в контекст КАЖДОЙ группы (owner = эта группа) — одну
-    строку на все цели переиспользовать нельзя (owner-mismatch → VK дропает фото).
+    community), а фото администратора community-токен в записи не принимает —
+    молча (``docs/ops/photo-upload-path.md``). Фото грузится в контекст КАЖДОЙ
+    группы (owner = эта группа) — одну строку на все цели переиспользовать нельзя
+    (owner-mismatch → VK дропает фото).
     Per-target изоляция: сбой заливки в одну цель не валит остальные (та уйдёт
     текстом — graceful degrade)."""
     from modules.broadcast.service import broadcast_image_paths
@@ -327,21 +329,24 @@ async def _default_build_attachments(campaign, targets) -> Dict[int, str]:
     if not paths:
         return {}
     try:
-        from modules.vk_token_router import load_vk_routing
+        from modules.vk_token_router import load_photo_upload_token
 
-        user_token, _community_tokens = await load_vk_routing()
+        # Заливает аккаунт-владелец группы: community-токен залить не может
+        # ([27]), а фото администратора community-токен в записи не принимает —
+        # молча (docs/ops/photo-upload-path.md).
+        photo_token = await load_photo_upload_token()
     except Exception as e:  # pragma: no cover - инфраструктурный сбой
-        logger.warning("broadcast: load_vk_routing failed: %s", e)
+        logger.warning("broadcast: load_photo_upload_token failed: %s", e)
         return {}
-    if not user_token:
-        logger.warning("broadcast: нет user-токена для заливки → посты уйдут текстом")
+    if not photo_token:
+        logger.warning("broadcast: нет токена владельца для заливки → посты уйдут текстом")
         return {}
 
     import vk_api
 
     from modules.publisher.vk_wall_photo_upload import upload_wall_images
 
-    api = vk_api.VkApi(token=user_token).get_api()
+    api = vk_api.VkApi(token=photo_token).get_api()
     images = [p.read_bytes() for p in paths]
     out: Dict[int, str] = {}
     for t in targets:

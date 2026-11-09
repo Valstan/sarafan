@@ -2641,7 +2641,7 @@ async def moderation_order_approve(order_ref: str, db: AsyncSession = Depends(ge
     ``past_date`` — их владелец одобряет по одной с новой датой.
     """
     from modules.ad_cabinet import client_orders
-    from modules.vk_token_router import load_vk_routing
+    from modules.vk_token_router import load_photo_upload_token
     from web.api.advertiser_cabinet import _msk_to_unix, _real_attachment_builder
 
     rows = (
@@ -2658,7 +2658,8 @@ async def moderation_order_approve(order_ref: str, db: AsyncSession = Depends(ge
     )
     if not rows:
         raise HTTPException(status_code=404, detail="В заказе нет постов на одобрении")
-    user_token, _community_tokens = await load_vk_routing()
+    # Фото клиента заливает аккаунт-владелец группы (docs/ops/photo-upload-path.md).
+    photo_token = await load_photo_upload_token(db)
     ok = failed = past = 0
     errors: List[str] = []
     for row in rows:
@@ -2667,7 +2668,7 @@ async def moderation_order_approve(order_ref: str, db: AsyncSession = Depends(ge
                 db,
                 row,
                 publisher_factory=_cabinet_publisher_factory(db),
-                attachment_builder=_real_attachment_builder(row.client_id, user_token),
+                attachment_builder=_real_attachment_builder(row.client_id, photo_token),
                 msk_to_unix=_msk_to_unix,
             )
         except client_orders.OrderError:
@@ -2765,7 +2766,7 @@ async def moderation_approve(
     выходил «через три минуты»).
     """
     from modules.ad_cabinet import client_orders
-    from modules.vk_token_router import load_vk_routing
+    from modules.vk_token_router import load_photo_upload_token
     from web.api.advertiser_cabinet import _msk_to_unix, _real_attachment_builder
 
     row = await db.get(AdScheduledPost, post_id)
@@ -2780,13 +2781,14 @@ async def moderation_approve(
         except ValueError:
             raise HTTPException(status_code=400, detail="Некорректная дата publish_at")
 
-    user_token, _community_tokens = await load_vk_routing()
+    # Фото клиента заливает аккаунт-владелец группы (docs/ops/photo-upload-path.md).
+    photo_token = await load_photo_upload_token(db)
     try:
         await client_orders.approve_post(
             db,
             row,
             publisher_factory=_cabinet_publisher_factory(db),
-            attachment_builder=_real_attachment_builder(row.client_id, user_token),
+            attachment_builder=_real_attachment_builder(row.client_id, photo_token),
             msk_to_unix=_msk_to_unix,
             new_publish_at=new_at,
         )

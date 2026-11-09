@@ -121,17 +121,18 @@ def make_real_submitter() -> dialog.Submitter:
 
     async def submit(session, client, draft: Dict[str, Any]) -> Dict[str, Any]:
         from modules.ad_cabinet import client_orders
-        from modules.vk_token_router import load_vk_routing
+        from modules.vk_token_router import load_photo_upload_token
         from web.api.ad_crm import _cabinet_publisher_factory
         from web.api.advertiser_cabinet import _msk_to_unix, _real_attachment_builder
 
-        user_token, _community_tokens = await load_vk_routing()
+        # Фото заливает аккаунт-владелец группы (docs/ops/photo-upload-path.md).
+        photo_token = await load_photo_upload_token(session)
         return await client_orders.submit_order(
             session,
             client=client,
             user_id=client.radar_user_id,
             publisher_factory=_cabinet_publisher_factory(session),
-            attachment_builder=_real_attachment_builder(client.id, user_token),
+            attachment_builder=_real_attachment_builder(client.id, photo_token),
             msk_to_unix=_msk_to_unix,
             **order_kwargs(draft),
         )
