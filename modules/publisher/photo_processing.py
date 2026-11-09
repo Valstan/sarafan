@@ -67,6 +67,24 @@ _WATERMARK_SHADOW_OFFSET = 2
 _DOWNLOAD_TIMEOUT = 20
 _UPLOAD_TIMEOUT = 30
 
+#: Минимальный интервал между загрузками фото, с (≈0.33/с).
+#:
+#: Замер 09.11 на живом upload-сервере ВК (``pu.vk.com``): после ~19–20
+#: загрузок подряд сервер отдаёт **HTTP 405** (nginx «405 Not Allowed») — это
+#: антиспум, а не запрет: отказ проходит после паузы ~70 с. Прод-режим
+#: (50 загрузок, пауза 0.6 с, ≈0.46/с) дал 48 успехов и 2 отказа, поэтому
+#: рабочий темп берём с запасом.
+UPLOAD_MIN_INTERVAL_SECONDS = 3.0
+
+#: Пауза после HTTP 405 от upload-сервера, с.
+UPLOAD_405_COOLDOWN_SECONDS = 70.0
+
+#: Сколько раз подряд пробуем залить после 405.
+UPLOAD_MAX_ATTEMPTS = 3
+
+#: Момент последней загрузки (монотонные секунды) — троттлинг общий на процесс.
+_last_upload_at: float = 0.0
+
 
 def _load_font(size: int) -> Any:
     """Шрифт водяного знака; при отсутствии файла — встроенный (мельче, но работает)."""
@@ -160,64 +178,128 @@ def download_photo(url: str, *, timeout: int = _DOWNLOAD_TIMEOUT) -> Optional[by
         return None
 
 
+async def _throttle_upload() -> None:
+    """Пауза между загрузками: upload-сервер ВК не любит частые заливки.
+
+    Слот резервируется **до** сна: иначе два соседних фото, проснувшись
+    одновременно, ушли бы в сервер одной пачкой и словили 405.
+    """
+    import asyncio
+    import time
+
+    global _last_upload_at
+    now = time.monotonic()
+    wait = UPLOAD_MIN_INTERVAL_SECONDS - (now - _last_upload_at)
+    if wait <= 0:
+        _last_upload_at = now
+        return
+    _last_upload_at = now + wait
+    await asyncio.sleep(wait)
+
+
+def _post_photo(upload_url: str, image_bytes: bytes, filename: str):
+    """Залить байты на upload-сервер ВК → ``(HTTP-код, payload)``.
+
+    Код ответа смотрим **отдельно** от json: 405 приходит не-json'ом (HTML от
+    nginx), и без кода ответа это выглядело бы как «сервер не ответил» —
+    ретрай бы не случился, а фото молча выпало бы из сборника.
+    """
+    import requests
+
+    resp = requests.post(
+        upload_url,
+        files={"photo": (filename, image_bytes, "image/jpeg")},
+        timeout=_UPLOAD_TIMEOUT,
+    )
+    try:
+        payload = resp.json()
+    except Exception:  # noqa: BLE001 — 405 отдаётся не-json'ом
+        payload = {}
+    return getattr(resp, "status_code", 200), payload
+
+
 async def upload_wall_photo(
     publisher: Any, group_id: int, image_bytes: bytes, *, filename: str = "digest.jpg"
 ) -> Optional[str]:
-    """Залить фото в группу и вернуть строку вложения ``photo<owner>_<id>``.
+    """Залить фото в стену группы и вернуть строку вложения ``photo<owner>_<id>``.
 
-    Именно wall-upload: фото, приложенное к посту сообщества, должно принадлежать
-    **этому** сообществу. Токен — тот, которым идёт публикация (community-токен
-    группы), иначе VK отклонит вложение.
+    **Заливает фото аккаунт-владелец группы** (user-токен), а не community-токен.
+    Разкладку «операция × токен» сняла живая проба 09.11 (P214):
+
+    * community-токен залить фото в стену **не может вообще** —
+      ``[27] method is unavailable with group auth``; именно эта ошибка дала
+      371 неудачную загрузку за вечер 08.11 и ни одной картинки в сборнике;
+    * user-токен администратора (МАМА) фото заливает, но community-токен такое
+      фото в записи **не принимает**: пост уходит, вложения нет — молча;
+    * user-токен владельца (создателя группы) — принимается, и фото становится
+      **собственностью сообщества** (``owner_id`` = ``-group_id``), а не
+      личным альбомом аккаунта.
+
+    Публикация поста при этом остаётся community-токеном: заливка и постинг —
+    разные операции с разными правами.
 
     Вызовы идут через ``publisher._invoke`` — это тот же шов, которым публикуется
-    сам пост: rate-limit токена, community-токен вместо publish-токена и единая
-    обработка отказа ВК. Свой клиент здесь означал бы второй путь в ВК мимо
-    ограничений — ровно то, чего в проекте избегают.
+    сам пост: rate-limit токена, единая обработка отказа ВК. Свой клиент здесь
+    означал бы второй путь в ВК мимо ограничений — ровно то, чего в проекте
+    избегают.
 
-    ``publisher`` — duck-typed: нужен ``_client_for_group(group_id)`` и
+    ``publisher`` — duck-typed: нужен ``_photo_upload_client()`` и
     ``_invoke(client, method, params)``.
     """
     import asyncio
 
-    import requests
-
     gid = abs(int(group_id))
     try:
-        client, _is_community = publisher._client_for_group(gid)
-        server = await publisher._invoke(client, "photos.getWallUploadServer", {"group_id": gid})
-        upload_url = (server or {}).get("upload_url")
-        if not upload_url:
-            logger.warning("photo: upload-сервер не вернул url")
+        client = await publisher._photo_upload_client()
+        if client is None:
+            logger.warning("photo: нет аккаунта-владельца — фото пропущено")
             return None
 
-        def _post() -> dict:
-            resp = requests.post(
-                upload_url,
-                files={"photo": (filename, image_bytes, "image/jpeg")},
-                timeout=_UPLOAD_TIMEOUT,
+        for attempt in range(1, UPLOAD_MAX_ATTEMPTS + 1):
+            await _throttle_upload()
+            server = await publisher._invoke(
+                client, "photos.getWallUploadServer", {"group_id": gid}
             )
-            return resp.json()
+            upload_url = (server or {}).get("upload_url")
+            if not upload_url:
+                logger.warning("photo: upload-сервер не вернул url")
+                return None
 
-        up = await asyncio.to_thread(_post)
-        if not (up or {}).get("photo") or not (up or {}).get("hash"):
-            logger.warning("photo: upload вернул пусто: %s", str(up)[:150])
-            return None
+            status, up = await asyncio.to_thread(_post_photo, upload_url, image_bytes, filename)
+            if status == 405:
+                logger.warning(
+                    "photo: upload-сервер отдал 405 (лимит загрузок), пауза %.0f с (попытка %d/%d)",
+                    UPLOAD_405_COOLDOWN_SECONDS,
+                    attempt,
+                    UPLOAD_MAX_ATTEMPTS,
+                )
+                await asyncio.sleep(UPLOAD_405_COOLDOWN_SECONDS)
+                continue
+            if not (up or {}).get("photo") or not (up or {}).get("hash"):
+                logger.warning("photo: upload вернул пусто: %s", str(up)[:150])
+                return None
 
-        saved = await publisher._invoke(
-            client,
-            "photos.saveWallPhoto",
-            {
-                "photo": up["photo"],
-                "server": up["server"],
-                "hash": up["hash"],
-                "group_id": gid,
-            },
+            saved = await publisher._invoke(
+                client,
+                "photos.saveWallPhoto",
+                {
+                    "photo": up["photo"],
+                    "server": up.get("server"),
+                    "hash": up["hash"],
+                    "group_id": gid,
+                },
+            )
+            photo = _first_photo_item(saved)
+            if photo is None:
+                logger.warning("photo: saveWallPhoto вернул пусто")
+                return None
+            return f"photo{photo['owner_id']}_{photo['id']}"
+
+        logger.warning(
+            "photo: upload-сервер 405 %d раз подряд — фото пропущено",
+            UPLOAD_MAX_ATTEMPTS,
         )
-        photo = _first_photo_item(saved)
-        if photo is None:
-            logger.warning("photo: saveWallPhoto вернул пусто")
-            return None
-        return f"photo{photo['owner_id']}_{photo['id']}"
+        return None
     except Exception as e:  # noqa: BLE001 — фото не обязано быть
         logger.warning("photo: загрузка не удалась: %s", e)
         return None

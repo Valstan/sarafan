@@ -287,6 +287,31 @@ def get_reserve_publish_token_names() -> list:
     return ["VALSTAN"]
 
 
+def get_photo_upload_token_names() -> list:
+    """Кто заливает фото в стену сообщества (P214, замер 09.11.2026).
+
+    Замерили все три возможных пути заливки:
+
+    * **community-токен** (``photos.getWallUploadServer`` → ``photos.saveWallPhoto``)
+      отдаёт ``[27] method is unavailable with group auth`` — залить фото в стену
+      сообщества community-ключом нельзя вообще;
+    * **user-токен администратора** (МАМА) заливает фото, но community-токен такое
+      фото в записи сообщества **не принимает**: пост уходит, а вложения нет —
+      молча, без ошибки;
+    * **user-токен владельца** (создателя группы) — принимается, и фото становится
+      собственностью сообщества (``owner_id`` становится ``-group_id``).
+
+    Значит, заливает тот аккаунт, которому принадлежит группа. По умолчанию это
+    «VALSTAN» — по канону основной аккаунт владельца, им созданы все наши
+    сообщества (см. P220). Env ``VK_PHOTO_UPLOAD_TOKEN_NAMES`` (CSV) — если
+    аккаунт-владелец другой.
+    """
+    names = _csv_token_names(_getenv("VK_PHOTO_UPLOAD_TOKEN_NAMES"))
+    if names:
+        return names
+    return ["VALSTAN"]
+
+
 def get_publish_token() -> Optional[str]:
     """Legacy helper — первый из whitelist'а, который есть в VK_TOKENS.
 

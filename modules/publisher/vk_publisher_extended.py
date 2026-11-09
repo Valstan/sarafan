@@ -210,6 +210,10 @@ class VKPublisher:
         self._community_clients: Dict[Any, Any] = {}
         # Кеш user-клиентов по имени токена (для fallback'а между кандидатами).
         self._user_clients: Dict[str, Any] = {}
+        # Кеш user-клиентов аккаунта-владельца — для заливки фото в стену (P214).
+        # Это ДРУГОЙ аккаунт, чем публикатор: скоуп photo-upload есть только у
+        # создателя группы, поэтому клиент свой и по имени, а не из каскада.
+        self._photo_upload_clients: Dict[str, Any] = {}
         if self._active_publish_name and self.vk_client is not None:
             self._user_clients[self._active_publish_name] = self.vk_client
         if self._community_tokens:
@@ -295,6 +299,76 @@ class VKPublisher:
             cli = VKClient(tok)
             self._community_clients[cid] = cli
         return cli, True
+
+    async def _photo_upload_client(self):
+        """User-клиент аккаунта-владельца группы — им заливается фото в стену.
+
+        Разкладку «операция × токен» сняла живая проба 09.11 (P214, замер на
+        полигоне и ещё семи группах):
+
+        * **community-токен** залить фото в стену не может вообще —
+          ``[27] method is unavailable with group auth`` (за вечер 08.11 эта
+          ошибка и дала 371 неудачную загрузку без единой картинки);
+        * **user-токен администратора** (МАМА) фото заливает, но community-токен
+          такое фото в записи сообщества **не принимает**: пост уходит, а
+          вложения нет — молча, без ошибки;
+        * **user-токен владельца** (создателя группы) — принимается, и фото
+          становится собственностью сообщества (``owner_id`` = ``-group_id``).
+
+        Значит, заливает тот аккаунт, которому принадлежит группа. По умолчанию
+        это «VALSTAN» — по канону основной аккаунт владельца, им созданы все
+        наши сообщества (``config.runtime.get_photo_upload_token_names``).
+
+        Публикация при этом остаётся community-токеном: заливка и постинг —
+        разные операции с разными правами (см. P215 — в журнал попадает
+        только то, что реально ушло на стену).
+
+        ``None`` — залить нечем; вызывающий оставляет сборник без картинки.
+        """
+        from config.runtime import get_photo_upload_token_names
+
+        names = get_photo_upload_token_names()
+        for name in names:
+            cached = self._photo_upload_clients.get(name)
+            if cached is not None:
+                return cached
+            token = await self._user_token_for_account(name)
+            if not token:
+                continue
+            from modules.vk_monitor.vk_client import VKClient
+
+            client = VKClient(token)
+            self._photo_upload_clients[name] = client
+            logger.info("VKPublisher: photo-upload client %s", name)
+            return client
+        logger.warning(
+            "VKPublisher: нет аккаунта-владельца для загрузки фото (%s)",
+            ", ".join(names) or "—",
+        )
+        return None
+
+    async def _user_token_for_account(self, name: str) -> Optional[str]:
+        """Токен user-аккаунта по имени: БД (единый источник) → env.
+
+        Политика — единая точка правды: выключенный в БД аккаунт env не
+        воскрешает (правило ``TokenPolicy``). Поэтому запасной путь через env
+        живёт только там, где политики нет вовсе — издатель создан мимо
+        фабрики ``create_with_policy``.
+        """
+        policy = getattr(self, "_policy", None)
+        if policy is not None:
+            try:
+                candidate = await policy.token_for_account(name)
+            except Exception:  # noqa: BLE001 — сеть/БД не должны ронять загрузку
+                logger.exception("policy.token_for_account(%s) не отработал", name)
+                return None
+            return candidate.token if candidate is not None else None
+        try:
+            from config.runtime import VK_TOKENS
+
+            return (VK_TOKENS or {}).get((name or "").upper())
+        except Exception:  # noqa: BLE001 — defensive
+            return None
 
     async def publish_bulletin(
         self,
