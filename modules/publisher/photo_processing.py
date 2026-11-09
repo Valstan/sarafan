@@ -25,7 +25,7 @@ from __future__ import annotations
 import io
 import logging
 import os
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 
@@ -79,11 +79,40 @@ UPLOAD_MIN_INTERVAL_SECONDS = 3.0
 #: Пауза после HTTP 405 от upload-сервера, с.
 UPLOAD_405_COOLDOWN_SECONDS = 70.0
 
+#: Статусы, которыми ВК отвечает на загрузку, когда он троттлит.
+#:
+#: Измерено 09.11 (живая проба, ``scripts/probe_photo_upload.py``): троттлинг
+#: приходит тремя разными лицами, и все три лечатся **паузой**, а не сменой
+#: картинки:
+#:
+#: * HTTP 405 — nginx «405 Not Allowed» (ответ не-json);
+#: * HTTP 5xx — страница «The page is temporarily unavailable» (тоже не-json);
+#: * HTTP 200 с пустым ``photo`` — файл залит, но фото не создано.
+#:
+#: До 09.11 переповторялся только 405, а два других отказа уводили фото
+#: молча: за вечер 09.11 в сборниках потеряно 72 фото из 100 попыток.
+UPLOAD_THROTTLE_STATUSES = frozenset({405, 429, 500, 502, 503, 504})
+
 #: Сколько раз подряд пробуем залить после 405.
 UPLOAD_MAX_ATTEMPTS = 3
 
 #: Момент последней загрузки (монотонные секунды) — троттлинг общий на процесс.
 _last_upload_at: float = 0.0
+
+#: Момент, до которого загрузки не идут: ВК только что отбил нас троттлингом.
+#:
+#: Пауза не персональная, а **общая**: если сервер закрыл окно, то следующая
+#: загрузка упрётся в то же окно и потратит ещё одну паузу впустую. Один
+#: отказ — одна пауза на процесс, а не по паузе на каждое фото.
+_throttle_until: float = 0.0
+
+
+def _note_throttle() -> None:
+    """Пометить: ВК отбил нас — окно закрыто на паузу."""
+    global _throttle_until
+    import time
+
+    _throttle_until = max(_throttle_until, time.monotonic() + UPLOAD_405_COOLDOWN_SECONDS)
 
 
 def _load_font(size: int) -> Any:
@@ -181,6 +210,12 @@ def download_photo(url: str, *, timeout: int = _DOWNLOAD_TIMEOUT) -> Optional[by
 async def _throttle_upload() -> None:
     """Пауза между загрузками: upload-сервер ВК не любит частые заливки.
 
+    Ждать приходится по двум причинам:
+
+    * **темп** — сервер не любит частые заливки;
+    * **окно троттлинга** — после отказа сервер закрывает окно примерно на
+      минуту, и окно это общее на процесс (см. ``_note_throttle``).
+
     Слот резервируется **до** сна: иначе два соседних фото, проснувшись
     одновременно, ушли бы в сервер одной пачкой и словили 405.
     """
@@ -189,7 +224,10 @@ async def _throttle_upload() -> None:
 
     global _last_upload_at
     now = time.monotonic()
-    wait = UPLOAD_MIN_INTERVAL_SECONDS - (now - _last_upload_at)
+    wait = max(
+        UPLOAD_MIN_INTERVAL_SECONDS - (now - _last_upload_at),
+        _throttle_until - now,
+    )
     if wait <= 0:
         _last_upload_at = now
         return
@@ -198,11 +236,12 @@ async def _throttle_upload() -> None:
 
 
 def _post_photo(upload_url: str, image_bytes: bytes, filename: str):
-    """Залить байты на upload-сервер ВК → ``(HTTP-код, payload)``.
+    """Залить байты на upload-сервер ВК → ``(HTTP-код, payload, тело)``.
 
     Код ответа смотрим **отдельно** от json: 405 приходит не-json'ом (HTML от
     nginx), и без кода ответа это выглядело бы как «сервер не ответил» —
-    ретрай бы не случился, а фото молча выпало бы из сборника.
+    ретрай бы не случился, а фото молча выпало бы из сборника. Тело отдаём
+    строкой, чтобы в журнале было видно, чем именно ответил ВК.
     """
     import requests
 
@@ -211,11 +250,41 @@ def _post_photo(upload_url: str, image_bytes: bytes, filename: str):
         files={"photo": (filename, image_bytes, "image/jpeg")},
         timeout=_UPLOAD_TIMEOUT,
     )
+    body = ""
     try:
         payload = resp.json()
-    except Exception:  # noqa: BLE001 — 405 отдаётся не-json'ом
+    except Exception:  # noqa: BLE001 — 405 и 5xx отдаются не-json'ом
         payload = {}
-    return getattr(resp, "status_code", 200), payload
+        body = (getattr(resp, "text", "") or "")[:300]
+    return getattr(resp, "status_code", 200), payload, body
+
+
+def _upload_rejection(status: int, payload: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Чем именно ВК отклонил загрузку; ``None`` — загрузка принята.
+
+    Троттлинг приходит **тремя разными лицами** (измерено 09.11, живая проба
+    ``scripts/probe_photo_upload.py``):
+
+    * HTTP 405 — nginx «405 Not Allowed» (ответ не-json);
+    * HTTP 5xx — страница «The page is temporarily unavailable» (тоже не-json);
+    * HTTP 200 с пустым ``photo`` — файл залит, но фото не создано.
+
+    Различать их для починки не нужно — лечится одно и то же, пауза. Но
+    различать их для чтения журнала нужно: по строке «upload вернул пусто» не
+    видно, был там 500, 405 или пустой ``photo``, а это три разные причины,
+    и до 09.11 переповторялся только 405 — два других отказа уводили фото
+    молча (за вечер 09.11 потеряно 72 фото из 100 попыток).
+    """
+    if status == 200:
+        data = payload or {}
+        if data.get("photo") and data.get("hash"):
+            return None
+        if data.get("photo"):
+            return "200 без hash (фото получено, но без подписи сервера)"
+        return "200 с пустым photo (файл залит, фото не создано)"
+    if status in UPLOAD_THROTTLE_STATUSES:
+        return f"HTTP {status} (троттлинг загрузок)"
+    return f"HTTP {status} (отказ ВК)"
 
 
 async def upload_wall_photo(
@@ -265,19 +334,32 @@ async def upload_wall_photo(
                 logger.warning("photo: upload-сервер не вернул url")
                 return None
 
-            status, up = await asyncio.to_thread(_post_photo, upload_url, image_bytes, filename)
-            if status == 405:
+            status, up, body = await asyncio.to_thread(
+                _post_photo, upload_url, image_bytes, filename
+            )
+            rejection = _upload_rejection(status, up)
+            if rejection:
+                if status != 200 and status not in UPLOAD_THROTTLE_STATUSES:
+                    # Отказ ВК, который паузой не лечится (например, 400).
+                    logger.warning(
+                        "photo: загрузка отклонена ВК: %s (тело: %s)",
+                        rejection,
+                        body[:120],
+                    )
+                    return None
+                # Троттлинг: окно закрыто на паузу, общую на процесс. Ждём и
+                # берём новый upload-сервер — на закрытом сервер смысла нет.
+                _note_throttle()
                 logger.warning(
-                    "photo: upload-сервер отдал 405 (лимит загрузок), пауза %.0f с (попытка %d/%d)",
+                    "photo: загрузка отбита троттлингом (%s), пауза %.0f с (попытка %d/%d)",
+                    rejection,
                     UPLOAD_405_COOLDOWN_SECONDS,
                     attempt,
                     UPLOAD_MAX_ATTEMPTS,
                 )
-                await asyncio.sleep(UPLOAD_405_COOLDOWN_SECONDS)
+                if attempt < UPLOAD_MAX_ATTEMPTS:
+                    await asyncio.sleep(UPLOAD_405_COOLDOWN_SECONDS)
                 continue
-            if not (up or {}).get("photo") or not (up or {}).get("hash"):
-                logger.warning("photo: upload вернул пусто: %s", str(up)[:150])
-                return None
 
             saved = await publisher._invoke(
                 client,
@@ -296,7 +378,7 @@ async def upload_wall_photo(
             return f"photo{photo['owner_id']}_{photo['id']}"
 
         logger.warning(
-            "photo: upload-сервер 405 %d раз подряд — фото пропущено",
+            "photo: загрузка не прошла за %d попытки — троттлинг ВК не отпустил",
             UPLOAD_MAX_ATTEMPTS,
         )
         return None

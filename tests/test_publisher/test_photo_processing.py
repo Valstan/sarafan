@@ -153,6 +153,9 @@ def _fast_upload(monkeypatch):
     monkeypatch.setattr(photo_processing, "UPLOAD_MIN_INTERVAL_SECONDS", 0.0)
     monkeypatch.setattr(photo_processing, "UPLOAD_405_COOLDOWN_SECONDS", 0.0)
     monkeypatch.setattr(photo_processing, "_last_upload_at", 0.0)
+    # Окно троттлинга — общий счётчик процесса: без сброса пауза из одного
+    # теста утекает в следующий.
+    monkeypatch.setattr(photo_processing, "_throttle_until", 0.0)
 
 
 @pytest.mark.asyncio
@@ -233,6 +236,111 @@ async def test_upload_wall_photo_survives_failure(monkeypatch):
     monkeypatch.setattr("requests.post", _fake_post)
 
     assert await upload_wall_photo(publisher, -42, b"jpeg-bytes") is None
+
+
+def _post_sequence(responses):
+    """Ответы ``requests.post`` по очереди; последний повторяется."""
+    calls = []
+
+    def _post(url, files=None, timeout=None):
+        calls.append(url)
+        idx = min(len(calls) - 1, len(responses) - 1)
+        return responses[idx]
+
+    return _post, calls
+
+
+@pytest.mark.asyncio
+async def test_upload_retries_after_empty_photo(monkeypatch):
+    """ВК троттлит: файл залит, но ``photo`` пустой — это отказ, а не успех.
+
+    Замер 09.11 (живая проба): именно этот отказ уводил фото молча — до
+    починки переповторялся только 405, а за вечер потерялось 72 фото из 100.
+    """
+    _post, calls = _post_sequence(
+        [
+            _FakeResponse({"server": 1, "photo": "", "hash": "h"}),
+            _FakeResponse({"server": 2, "photo": "server-photo", "hash": "h2"}),
+        ]
+    )
+    monkeypatch.setattr("requests.post", _post)
+
+    publisher = _FakePublisher()
+
+    att = await upload_wall_photo(publisher, -42, b"jpeg-bytes")
+
+    assert att == "photo20002978_777"
+    assert len(calls) == 2, "пустой photo должен переповторяться, а не ронять фото"
+
+
+@pytest.mark.asyncio
+async def test_upload_retries_after_5xx(monkeypatch):
+    """ВК отдал 500 не-json'ом — это троттлинг, пауза его лечит."""
+    _post, calls = _post_sequence(
+        [
+            _FakeResponse(None, status_code=500),
+            _FakeResponse({"server": 2, "photo": "server-photo", "hash": "h2"}),
+        ]
+    )
+    monkeypatch.setattr("requests.post", _post)
+
+    publisher = _FakePublisher()
+
+    att = await upload_wall_photo(publisher, -42, b"jpeg-bytes")
+
+    assert att == "photo20002978_777"
+    assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_non_throttle_error_without_retry(monkeypatch):
+    """Отказ, который паузой не лечится, ретраить бессмысленно."""
+    _post, calls = _post_sequence([_FakeResponse(None, status_code=400)])
+    monkeypatch.setattr("requests.post", _post)
+
+    publisher = _FakePublisher()
+
+    assert await upload_wall_photo(publisher, -42, b"jpeg-bytes") is None
+    assert len(calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_upload_gives_up_after_max_attempts(monkeypatch):
+    """Троттлинг не отпустил — фото пропущено, но сборник не упал."""
+    _post, calls = _post_sequence([_FakeResponse(None, status_code=405)])
+    monkeypatch.setattr("requests.post", _post)
+
+    publisher = _FakePublisher()
+
+    assert await upload_wall_photo(publisher, -42, b"jpeg-bytes") is None
+    assert len(calls) == photo_processing.UPLOAD_MAX_ATTEMPTS
+
+
+@pytest.mark.asyncio
+async def test_throttle_closes_window_for_next_upload(monkeypatch):
+    """Открытое окно троттлинга общее: следующая загрузка ждёт, а не ломится.
+
+    Без этого каждое фото платило бы свою паузу, а не одна пауза на процесс.
+    """
+    _post, _calls = _post_sequence([_FakeResponse(None, status_code=405)])
+    monkeypatch.setattr("requests.post", _post)
+    monkeypatch.setattr(photo_processing, "UPLOAD_405_COOLDOWN_SECONDS", 45.0)
+
+    slept = []
+    real_sleep = asyncio.sleep
+
+    async def _fake_sleep(delay, *args, **kwargs):
+        slept.append(delay)
+        return await real_sleep(0)
+
+    monkeypatch.setattr("asyncio.sleep", _fake_sleep)
+
+    await upload_wall_photo(_FakePublisher(), -42, b"jpeg-bytes")
+
+    assert 45.0 in slept, "окно троттлинга должно быть выдержано"
+    assert (
+        photo_processing._throttle_until > 0.0
+    ), "окно должно остаться закрытым для следующих загрузок"
 
 
 class _FakeResponse:
