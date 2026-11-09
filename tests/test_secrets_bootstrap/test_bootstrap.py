@@ -225,6 +225,17 @@ def test_prefixes_accepted():
     assert not sb._accepted("SECRETS_TOKEN")
 
 
+def test_prompts_section_token_accepted():
+    """Токен раздела промтов доезжает до процесса (D-190).
+
+    Он лежит в комнате `setka`; без allowlist'а bootstrap его не привезёт, и
+    раздел промтов останется недоступным (503).
+    """
+    assert sb._accepted("PROMPTS_TOKEN_SARAFAN")
+    # Соседние имена — посторонние: правило узкое, явное имя, не префикс.
+    assert not sb._accepted("PROMPTS_TOKEN_OTHER")
+
+
 def test_ignored_logged_by_names_only(monkeypatch, caplog):
     """Свойство 7: чужие ключи логируются ПО ИМЕНАМ, без значений."""
     env = {"SECRETS_TOKEN": "tok"}
