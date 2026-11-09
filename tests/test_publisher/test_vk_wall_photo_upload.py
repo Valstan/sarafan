@@ -42,7 +42,10 @@ def test_upload_wall_photo_normalizes_negative_group_id(monkeypatch):
 
     att = wpu.upload_wall_photo(api, b"x", group_id=-5)
 
-    assert att == "photo-5_1_ak"  # access_key appended
+    # access_key в строку вложения НЕ идёт: с ним фото осталось бы личным
+    # (owner_id = пользователь) и копилось бы в альбоме владельца. Без него фото
+    # переходит в собственность группы — docs/ops/photo-upload-path.md.
+    assert att == "photo-5_1"
     api.photos.getWallUploadServer.assert_called_once_with(group_id=5)
 
 

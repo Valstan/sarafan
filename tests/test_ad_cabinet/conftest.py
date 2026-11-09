@@ -26,6 +26,7 @@ from database.models import (
     AdScheduledPost,
     MessageTemplate,
     Region,
+    VKToken,
 )
 from database.models_extended import RadarUser
 
@@ -48,6 +49,9 @@ async def db_session():
         AdOutreachCampaign.__table__,
         AdOutreachRecipient.__table__,
         AdOutreachBlacklist.__table__,
+        # Выбор аккаунта-владельца для заливки фото ходит в vk_tokens —
+        # без таблицы тесты падают на «no such table».
+        VKToken.__table__,
     ]
     async with engine.begin() as conn:
         await conn.run_sync(lambda c: Base.metadata.create_all(c, tables=tables))

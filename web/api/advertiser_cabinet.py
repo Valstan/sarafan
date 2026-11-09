@@ -504,14 +504,19 @@ class AttachmentError(RuntimeError):
     """
 
 
-def _real_attachment_builder(client_id: int, user_token):
-    """Заливка клиентских фото на стену группы (owner-specific, на каждую свою)."""
+def _real_attachment_builder(client_id: int, photo_token):
+    """Заливка клиентских фото на стену группы (owner-specific, на каждую свою).
+
+    ``photo_token`` — токен аккаунта-владельца группы: заливать фото, которое
+    потом примет community-токен, может только он (см.
+    ``docs/ops/photo-upload-path.md``).
+    """
 
     def build(gid: int, image_names) -> List[str]:
         if not image_names:
             return []
-        if not user_token:
-            raise AttachmentError("нет user-токена для заливки фото на стену")
+        if not photo_token:
+            raise AttachmentError("нет токена владельца группы для заливки фото на стену")
         wanted = {Path(n).name for n in image_names}
         paths = [p for p in _client_photo_paths(client_id) if p.name in wanted]
         missing = wanted - {p.name for p in paths}
@@ -522,7 +527,7 @@ def _real_attachment_builder(client_id: int, user_token):
 
             from modules.publisher.vk_wall_photo_upload import upload_wall_images
 
-            api = vk_api.VkApi(token=user_token).get_api()
+            api = vk_api.VkApi(token=photo_token).get_api()
             images = [p.read_bytes() for p in paths[:MAX_PHOTOS_PER_POST]]
             out = upload_wall_images(api, images, group_id=gid)
         except AttachmentError:
@@ -582,9 +587,12 @@ async def create_order(
     if payload.whole_network:
         region_ids = await client_orders.all_target_region_ids(db)
 
-    from modules.vk_token_router import load_vk_routing
+    from modules.vk_token_router import load_photo_upload_token
 
-    user_token, _community_tokens = await load_vk_routing()
+    # Фото клиента заливает аккаунт-владелец группы: community-токен залить не
+    # может ([27]), а фото администратора community-токен в записи не принимает —
+    # молча (docs/ops/photo-upload-path.md).
+    photo_token = await load_photo_upload_token(db)
 
     try:
         result = await client_orders.submit_order(
@@ -597,7 +605,7 @@ async def create_order(
             publish_at=_parse_publish_at(payload.publish_at),
             publish_now=payload.publish_now,
             publisher_factory=_real_publisher_factory(db),
-            attachment_builder=_real_attachment_builder(client.id, user_token),
+            attachment_builder=_real_attachment_builder(client.id, photo_token),
             msk_to_unix=_msk_to_unix,
             pinned=payload.pinned,
         )

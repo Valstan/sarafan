@@ -48,6 +48,8 @@ def _fake_publisher(publish_result=None, **overrides):
 
 def _patch_publish(monkeypatch, pub):
     monkeypatch.setattr(token_router, "load_vk_routing", AsyncMock(return_value=("utok", {})))
+    # Заливку фото делает аккаунт-владелец группы, а не публикатор.
+    monkeypatch.setattr(token_router, "load_photo_upload_token", AsyncMock(return_value="phototok"))
     monkeypatch.setattr(api, "_build_wall_attachment", lambda *a, **k: [])
     monkeypatch.setattr(vpe.VKPublisher, "create_with_policy", AsyncMock(return_value=pub))
 

@@ -650,16 +650,16 @@ def _msk_to_unix(naive_msk: datetime) -> int:
 
 def _build_wall_attachment(
     group_id: int,
-    user_token,
+    photo_token,
     filenames: Optional[List[str]] = None,
 ) -> List[str]:
     """Залить выбранные офферные картинки на стену группы (best-effort).
 
     Возвращает список attachment-строк ``["photo<o>_<id>", …]`` (пустой, если
-    картинок нет или нет user-токена — тогда пост уйдёт текстом). Грузим
-    **user-токеном** админа: VK запрещает заливку на стену под community-auth
-    (error 27 — см. ``vk_wall_photo_upload``); ``group_id`` делает владельцем фото
-    саму группу.
+    картинок нет или нет токена — тогда пост уйдёт текстом). Заливает
+    **аккаунт-владелец** группы (``photo_token``): community-токен залить на
+    стену не может (error 27), а фото администратора community-токен в записи
+    не принимает — молча (см. ``docs/ops/photo-upload-path.md``).
     """
     paths = _offer_image_paths()
     if filenames is not None:
@@ -667,14 +667,14 @@ def _build_wall_attachment(
         paths = [p for p in paths if p.name in wanted]
     if not paths:
         return []
-    if not user_token:
+    if not photo_token:
         return []
     try:
         import vk_api
 
         from modules.publisher.vk_wall_photo_upload import upload_wall_images
 
-        api = vk_api.VkApi(token=user_token).get_api()
+        api = vk_api.VkApi(token=photo_token).get_api()
         images = [p.read_bytes() for p in paths[:10]]
         return upload_wall_images(api, images, group_id=group_id)
     except Exception as e:
@@ -694,7 +694,7 @@ async def create_scheduled(
     успех допустим: каждая строка несёт свой ``status`` (scheduled|failed).
     """
     from modules.publisher.vk_publisher_extended import VKPublisher
-    from modules.vk_token_router import load_vk_routing
+    from modules.vk_token_router import load_photo_upload_token
 
     if not payload.dates:
         raise HTTPException(status_code=400, detail="Нужна хотя бы одна дата публикации")
@@ -753,11 +753,14 @@ async def create_scheduled(
                 "client_id": existing[0].client_id,
             }
 
-    user_token, _community_tokens = await load_vk_routing()
+    # Заливку фото делает аккаунт-владелец группы: community-токен залить не
+    # может ([27]), а фото администратора community-токен в записи не принимает —
+    # молча (docs/ops/photo-upload-path.md).
+    photo_token = await load_photo_upload_token(db)
 
     # Картинки на стену — один раз, переиспользуем attachment'ы для всех дат (одна
     # целевая группа → owner совпадает, переиспользование корректно).
-    attachment_list = _build_wall_attachment(gid, user_token, payload.images)
+    attachment_list = _build_wall_attachment(gid, photo_token, payload.images)
     attachments_str = ",".join(attachment_list) if attachment_list else None
 
     try:
@@ -1020,17 +1023,17 @@ def _publish_failure_detail(res: dict) -> str:
     return f"Публикация не удалась. {body}" if body else "Публикация не удалась."
 
 
-def _upload_request_photos(group_id: int, user_token, photo_urls) -> List[str]:
+def _upload_request_photos(group_id: int, photo_token, photo_urls) -> List[str]:
     """Скачать фото заявки по CDN-URL и залить на стену группы → attachment-строки.
 
-    Best-effort: нет user-токена / фото / сети → пустой список (пост уйдёт текстом).
-    Грузим **user-токеном** админа: VK запрещает заливку на стену под community-auth
-    (error 27 — см. ``vk_wall_photo_upload``); ``group_id`` делает владельцем фото
-    саму группу."""
+    Best-effort: нет токена / фото / сети → пустой список (пост уйдёт текстом).
+    Заливает **аккаунт-владелец** группы (``photo_token``): community-токен
+    залить на стену не может (error 27), а фото администратора community-токен
+    в записи не принимает — молча (см. ``docs/ops/photo-upload-path.md``)."""
     urls = [u for u in (photo_urls or []) if isinstance(u, str) and u.startswith("http")]
     if not urls:
         return []
-    if not user_token:
+    if not photo_token:
         return []
     try:
         import httpx
@@ -1048,7 +1051,7 @@ def _upload_request_photos(group_id: int, user_token, photo_urls) -> List[str]:
                 continue
         if not images:
             return []
-        api = vk_api.VkApi(token=user_token).get_api()
+        api = vk_api.VkApi(token=photo_token).get_api()
         return upload_wall_images(api, images, group_id=group_id)
     except Exception as e:  # noqa: BLE001
         logger.warning("publish-now image upload failed: %s", e)
@@ -1069,7 +1072,7 @@ async def publish_request_now(
     реальной публикации). Идемпотентность: статус коммитим СРАЗУ после успешного
     поста (защита от повторной публикации — иначе дубль на стене)."""
     from modules.publisher.vk_publisher_extended import VKPublisher
-    from modules.vk_token_router import load_vk_routing
+    from modules.vk_token_router import load_photo_upload_token
 
     # FOR UPDATE — атомарная защита от двойного клика: конкурентный второй запрос
     # блокируется на строке до коммита первого, затем видит status='published' и
@@ -1090,8 +1093,9 @@ async def publish_request_now(
         raise HTTPException(status_code=400, detail="Пустая заявка: нет ни текста, ни фото")
 
     gid = int(ar.community_vk_id)
-    user_token, _community_tokens = await load_vk_routing()
-    attachments = _upload_request_photos(gid, user_token, photo_urls)
+    # Фото заливает аккаунт-владелец группы (см. docs/ops/photo-upload-path.md).
+    photo_token = await load_photo_upload_token(db)
+    attachments = _upload_request_photos(gid, photo_token, photo_urls)
 
     publisher = await VKPublisher.create_with_policy(db, target_group_id=gid)
     res = await publisher.publish_bulletin(group_id=gid, text=text, attachments=attachments)

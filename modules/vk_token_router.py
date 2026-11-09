@@ -310,6 +310,37 @@ async def load_community_routing() -> Dict[int, str]:
         return await load_community_tokens(session)
 
 
+async def load_photo_upload_token(session: Optional[AsyncSession] = None) -> Optional[str]:
+    """Токен аккаунта-владельца для заливки фото на стену сообщества.
+
+    Заливает **владелец группы** — тот, от кого выпущены наши community-ключи.
+    Разкладку сняла живая проба 09.11 (P214, ``docs/ops/photo-upload-path.md``):
+
+    * community-токен залить фото в стену не может вообще — ``[27] method is
+      unavailable with group auth``;
+    * фото, залитое администратором, community-токен в записи **не принимает**:
+      пост уходит без вложения, молча;
+    * фото аккаунта-владельца принимается и становится собственностью группы.
+
+    Значит, «user-токен админа» и «user-токен владельца» — не одно и то же:
+    публиковать может МАМА, а заливать фото — только владелец.
+    """
+    from config.runtime import get_photo_upload_token_names
+
+    if session is None:
+        from database.connection import AsyncSessionLocal
+
+        async with AsyncSessionLocal() as own_session:
+            return await load_photo_upload_token(own_session)
+
+    policy = TokenPolicy(session)
+    for name in get_photo_upload_token_names():
+        candidate = await policy.token_for_account(name)
+        if candidate is not None:
+            return candidate.token
+    return None
+
+
 def pick_token(
     community_tokens: Dict[int, str],
     group_id: int,
