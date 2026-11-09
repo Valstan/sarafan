@@ -51,7 +51,7 @@
 | Место | Кто заливает | Статус |
 |---|---|---|
 | `modules/publisher/photo_processing.py::upload_wall_photo` — вечерний сборник (P214) | **аккаунт-владелец** (`VK_PHOTO_UPLOAD_TOKEN_NAMES`, по умолчанию VALSTAN) | ✅ с 09.11 |
-| `modules/publisher/vk_wall_photo_upload.py` — рекламный кабинет, бродкаст | user-токен из `load_vk_routing()` — обычно **MAMA** | ⛔ фото теряется молча (замер 09.11, пост 649 на полигоне) |
+| `modules/publisher/vk_wall_photo_upload.py` — рекламный кабинет, бродкаст | user-токен из `load_vk_routing()` — обычно **MAMA** | ⛔ фото терялось молча (замер 09.11, пост 649 на полигоне) → **починено PR #1038**: заливает аккаунт-владелец, `access_key` из строки вложения убран |
 
 Аккаунт-владелец выбирается через
 `config.runtime.get_photo_upload_token_names()` и берётся **политикой токенов**
