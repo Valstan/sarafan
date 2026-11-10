@@ -21,4 +21,15 @@ set -a
 set +a
 
 cd "$DEPLOY_ROOT"
-exec ./venv/bin/python scripts/local_bridge.py "$@"
+
+status=0
+./venv/bin/python scripts/local_bridge.py "$@" || status=$?
+
+# Журнал прогонов пишется от root, а панель (сервис setka) читает его от
+# пользователя деплоя. Отдаём файл владельцу каталога: иначе читаемость
+# зависит от umask'а root.
+if [ -f "$DEPLOY_ROOT/logs/local_engine_runs.jsonl" ]; then
+  chown "$(stat -c '%u:%g' "$DEPLOY_ROOT")" "$DEPLOY_ROOT/logs/local_engine_runs.jsonl" || true
+fi
+
+exit $status
