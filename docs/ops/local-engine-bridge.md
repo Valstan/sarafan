@@ -13,7 +13,7 @@
 | [`scripts/local_bridge.py`](../../scripts/local_bridge.py) | бокс | CLI: `export` (батч + промпт) и `submit` (приём вердиктов) |
 | [`scripts/local_bridge.sh`](../../scripts/local_bridge.sh) | бокс | обёртка: грузит env приложения и зовёт CLI (env-файл root-only, поэтому `sudo`) |
 | [`scripts/local_engine_daemon.py`](../../scripts/local_engine_daemon.py) | **ПК владельца** | демон: тянет батч по SSH → считает локально → отдаёт вердикты; только стандартная библиотека |
-| [`web/api/local_engine.py`](../../web/api/local_engine.py) + [`web/templates/local_engine.html`](../../web/templates/local_engine.html) | бокс | панель `/local-engine`: движок, качество, обучение |
+| [`web/api/local_engine.py`](../../web/api/local_engine.py) + [`web/templates/local_engine.html`](../../web/templates/local_engine.html) + [`web/static/js/local_engine.js`](../../web/static/js/local_engine.js) | бокс | панель `/local-engine`: движок, качество, обучение |
 
 ## Схема Pull
 
