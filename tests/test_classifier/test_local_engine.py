@@ -257,3 +257,31 @@ def test_panel_template_uses_blocks_that_exist_in_base():
     assert unknown == [], "шаблон панели использует блоки, которых нет в base: %s" % unknown
     assert "extra_scripts" in panel.blocks
     assert "content" in panel.blocks
+
+
+def test_panel_template_links_static_js_instead_of_inline():
+    """JS панели лежит отдельным файлом, а не inline в шаблоне.
+
+    Inline-скрипт поймал SyntaxError на проде 10.11: страница открывалась, но
+    все блоки оставались «загрузка…» — запроса к API не было вовсе, и ошибка
+    выглядела как «панель просто пустая».
+    """
+    html = (TEMPLATES_DIR / "local_engine.html").read_text(encoding="utf-8")
+    assert "/static/js/local_engine.js" in html
+    assert "<script>" not in html
+
+
+def test_panel_js_parses():
+    """Синтаксис JS панели проверяется node'ом (если он есть)."""
+    import shutil
+    import subprocess
+
+    js = REPO_ROOT / "web" / "static" / "js" / "local_engine.js"
+    assert js.exists(), "JS панели должен лежать отдельным файлом"
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node не установлен — синтаксис JS не проверить")
+
+    proc = subprocess.run([node, "--check", str(js)], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr
