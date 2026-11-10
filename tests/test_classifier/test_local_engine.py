@@ -184,6 +184,53 @@ async def test_submit_requires_verdict_list():
     assert "verdicts" in result["error"]
 
 
+# ───────── SQL панели: усечение даты литералом, а не параметром ─────────
+
+
+def _pg_sql(query) -> str:
+    """SQL запроса под диалектом Postgres (с параметрами, как их видит сервер)."""
+    from sqlalchemy.dialects import postgresql
+
+    return str(query.compile(dialect=postgresql.dialect()))
+
+
+@pytest.mark.parametrize(
+    "builder,unit,column",
+    [
+        (
+            local_engine._daily_by_source_query,
+            "day",
+            "content_classifications.created_at",
+        ),
+        (
+            local_engine._weekly_quality_query,
+            "week",
+            "classification_corrections.created_at",
+        ),
+        (
+            local_engine._corrections_by_week_query,
+            "week",
+            "classification_corrections.created_at",
+        ),
+    ],
+)
+def test_truncation_unit_is_literal_not_bind(builder, unit, column):
+    """Единица усечения — литералом, а не параметром запроса.
+
+    С биндом Postgres не узнаёт выражение в GROUP BY («column must appear in
+    the GROUP BY clause»): номера параметров в SELECT и GROUP BY разные, и
+    группировка падает. Поймано на проде 10.11 — 500 на
+    ``/api/local-engine/stats``.
+    """
+    sql = _pg_sql(builder())
+    expr = "date_trunc('%s', %s)" % (unit, column)
+    assert expr in sql, sql
+    group_by = sql.split("GROUP BY", 1)[1]
+    assert expr in group_by, sql
+    assert "date_trunc(:" not in sql
+    assert "date_trunc($" not in sql
+
+
 def test_json_is_serialisable():
     """Отчёт о прогоне идёт в JSONL — значит, должен быть сериализуем."""
     json.dumps({"posts": 1, "recorded": 1, "regions": ["mi"]})
