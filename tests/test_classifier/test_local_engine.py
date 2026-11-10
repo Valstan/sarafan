@@ -272,6 +272,24 @@ def test_opencode_chat_rejects_empty_prompt():
     assert result["reason"] == "empty_prompt"
 
 
+def test_daemon_local_mode_runs_command_without_ssh():
+    """Режим «демон на боксе»: мост зовётся локально, SSH не нужен.
+
+    Так движок живёт и тикает на сервере, а ПК владельца не должен быть
+    включён, чтобы классификация шла.
+    """
+    import argparse as _argparse
+
+    daemon_module = _load_daemon()
+
+    args = _argparse.Namespace(local=True, ssh_host="sarafan")
+    out = daemon_module._exec(args, "echo локально")
+    assert "локально" in out
+
+    args = _argparse.Namespace(local=False, ssh_host="sarafan")
+    assert hasattr(daemon_module, "_ssh"), "SSH-путь должен остаться"
+
+
 # ───────── SQL панели: усечение даты литералом, а не параметром ─────────
 
 

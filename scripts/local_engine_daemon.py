@@ -88,6 +88,32 @@ def _ssh(host: str, remote_cmd: str, *, stdin_data: Optional[str] = None) -> str
     return proc.stdout
 
 
+def _exec(args: argparse.Namespace, cmd: str, *, stdin_data: Optional[str] = None) -> str:
+    """Выполнить команду моста: по SSH (демон на ПК) или локально (демон на боксе).
+
+    Локальный режим нужен, когда демон живёт на том же боксе, где и база:
+    тогда SSH не нужен, команда идёт прямо в обёртку моста (она сама берёт
+    env приложения через sudo). Разница только в способе запуска, поэтому обе
+    ветки ходят по одному и тому же контракту команд.
+    """
+    if not getattr(args, "local", False):
+        return _ssh(args.ssh_host, cmd, stdin_data=stdin_data)
+
+    proc = subprocess.run(
+        ["bash", "-lc", cmd],
+        input=stdin_data,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=300,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "локальная команда вернула %d: %s" % (proc.returncode, (proc.stderr or "")[-400:])
+        )
+    return proc.stdout
+
+
 def _extract_json(text: str) -> Optional[Dict[str, Any]]:
     """Достать JSON-объект из ответа модели (терпимо к ```json-обёрткам)."""
     raw = (text or "").strip()
@@ -197,7 +223,7 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
         export_cmd += " --exclude-lips-stdin"
         exclude_stdin = json.dumps(sorted(_SEEN_LIPS))
     try:
-        raw = _ssh(args.ssh_host, export_cmd, stdin_data=exclude_stdin)
+        raw = _exec(args, export_cmd, stdin_data=exclude_stdin)
     except Exception as e:  # noqa: BLE001 — демон не должен падать из-за SSH
         _log(log_path, {"ts": _now(), "ok": False, "stage": "export", "error": str(e)[:300]})
         print("[%s] не смог забрать батч: %s" % (_now(), e), flush=True)
@@ -323,8 +349,8 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
         # Так демон может работать, не занимая посты и не вытесняя облачные
         # вердикты, пока качество локальной модели не измерено.
         submit_cmd = "sudo -n %s submit%s" % (args.remote, " --shadow" if args.shadow else "")
-        out = _ssh(
-            args.ssh_host,
+        out = _exec(
+            args,
             submit_cmd,
             stdin_data=json.dumps({"verdicts": verdicts, "run": report}, ensure_ascii=False),
         )
@@ -361,6 +387,11 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Демон локального движка (Pull)")
     ap.add_argument("--ssh-host", default=DEFAULT_SSH_HOST, help="алиас SSH до бокса")
+    ap.add_argument(
+        "--local",
+        action="store_true",
+        help="демон живёт на боксе: мост зовётся локально, без SSH",
+    )
     ap.add_argument("--remote", default=DEFAULT_REMOTE, help="путь к обёртке моста на боксе")
     ap.add_argument("--model-url", default=DEFAULT_MODEL_URL, help="база OpenAI-совместимого API")
     ap.add_argument("--model-name", default="local", help="имя модели в запросе")
@@ -406,9 +437,9 @@ def main() -> int:
 
     log_path = Path(args.log)
     print(
-        "локальный движок: ssh=%s движок=%s модель=%s (%s) интервал=%d с%s"
+        "локальный движок: %s движок=%s модель=%s (%s) интервал=%d с%s"
         % (
-            args.ssh_host,
+            "бокс (локально)" if args.local else "ssh=%s" % args.ssh_host,
             args.engine,
             args.model_url,
             args.model_name,
