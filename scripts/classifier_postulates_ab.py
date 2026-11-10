@@ -41,14 +41,12 @@ from modules.secrets_bootstrap import bootstrap_secrets  # noqa: E402
 
 bootstrap_secrets()
 
-import database.models  # noqa: E402,F401
 from sqlalchemy import select  # noqa: E402
+
+import database.models  # noqa: E402,F401
 from config.classifier import get_headless_chunk_size  # noqa: E402
 from database.connection import AsyncSessionLocal  # noqa: E402
-from database.models_extended import (  # noqa: E402
-    ClassificationCorrection,
-    ContentClassification,
-)
+from database.models_extended import ClassificationCorrection, ContentClassification  # noqa: E402
 from modules.classifier import headless, rules  # noqa: E402
 
 _THEMES_MARKER = "\n\n## Разрешённые темы (theme)\n\n"

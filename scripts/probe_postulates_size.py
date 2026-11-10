@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import asyncio
 
+from sqlalchemy import select
+
 # Порядок импорта важен: реестр SQLAlchemy собирает все модели, а
 # ``models_extended`` тянет ``models`` — иначе класс не находится.
 import database.models  # noqa: F401
-from sqlalchemy import select
 from database.models_extended import ClassificationRule
 from modules.classifier.rules import render_effective_postulates
 
