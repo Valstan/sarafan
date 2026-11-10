@@ -51,6 +51,7 @@ from web.api import (  # noqa: E402
     gateway_stats,
     health,
     ingest_contract,
+    local_engine,
     notifications,
     parsing,
     parsing_stats,
@@ -211,6 +212,7 @@ app.include_router(parsing.router, tags=["Parsing"])
 app.include_router(parsing_stats.router, tags=["Parsing Stats"])  # Postopus migration
 app.include_router(pipeline.router, tags=["Pipeline Map"])
 app.include_router(filtration.router, prefix="/api/filtration", tags=["Filtration"])
+app.include_router(local_engine.router, prefix="/api/local-engine", tags=["Local Engine"])
 app.include_router(templates_api.router, prefix="/api/templates", tags=["Message Templates"])
 app.include_router(ad_cabinet.router, prefix="/api/ad-cabinet", tags=["Ad Cabinet"])
 app.include_router(ad_crm.router, prefix="/api/ad-crm", tags=["Ad CRM"])
@@ -753,6 +755,12 @@ async def publications_page(request: Request):
 async def filtration_page(request: Request):
     """Настройки фильтрации сводок и правил отбора постов"""
     return templates.TemplateResponse("filtration.html", {"request": request})
+
+
+@app.get("/local-engine")
+async def local_engine_page(request: Request):
+    """Панель локального движка: прогоны, качество, обучение"""
+    return templates.TemplateResponse("local_engine.html", {"request": request})
 
 
 @app.get("/favicon.ico")
