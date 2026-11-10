@@ -249,14 +249,52 @@ def group_by_region(posts: Sequence[Dict[str, Any]]) -> Dict[str, List[Dict[str,
 
 
 def chunk_posts(
-    posts: Sequence[Dict[str, Any]], size: int = DEFAULT_CHUNK_SIZE
+    posts: Sequence[Dict[str, Any]],
+    size: int = DEFAULT_CHUNK_SIZE,
+    *,
+    regions_per_chunk: int = 1,
 ) -> List[List[Dict[str, Any]]]:
-    """Нарезать батч на чанки, НЕ смешивая регионы (см. docstring модуля)."""
+    """Нарезать батч на чанки.
+
+    ``regions_per_chunk=1`` (по умолчанию) — **чанк = один регион**: склейка
+    (``merge_with``) — суждение «это одно событие», посты соседних районов
+    склеивать нельзя, а посты одного района нужно видеть вместе.
+
+    ``regions_per_chunk=N`` — в один вызов кладутся до N регионов (посты
+    каждого региона подряд, блоками). Это **в N раз меньше вызовов**: префикс
+    правил платится за вызов, а не за пост, а при 2–3 постах на регион чанк
+    размера 40 всё равно вырождался в «один вызов на регион» (замер 10.11:
+    58 постов → 35 вызовов).
+
+    Склейка при смешанных регионах закрыта **кодом**, а не только промптом:
+    ``parse_chunk_response`` отбрасывает ``merge_with`` за пределы региона.
+    """
     size = max(1, int(size))
-    chunks: List[List[Dict[str, Any]]] = []
-    for _region, group in sorted(group_by_region(posts).items()):
+    n_regions = max(1, int(regions_per_chunk))
+    groups = group_by_region(posts)
+
+    if n_regions == 1:
+        chunks: List[List[Dict[str, Any]]] = []
+        for _region, group in sorted(groups.items()):
+            for i in range(0, len(group), size):
+                chunks.append(group[i : i + size])
+        return chunks
+
+    # Смешанный режим: до N регионов на вызов, каждый регион — блоком.
+    chunks = []
+    current: List[Dict[str, Any]] = []
+    current_regions = 0
+    for _region, group in sorted(groups.items()):
         for i in range(0, len(group), size):
-            chunks.append(group[i : i + size])
+            part = group[i : i + size]
+            if current and (current_regions >= n_regions or len(current) + len(part) > size):
+                chunks.append(current)
+                current = []
+                current_regions = 0
+            current.extend(part)
+            current_regions += 1
+    if current:
+        chunks.append(current)
     return chunks
 
 
@@ -320,6 +358,17 @@ def parse_chunk_response(
         # Склейка допустима только внутри поданной пачки — иначе модель
         # ссылается на пост, которого не видела.
         v.merge_with = [m for m in v.merge_with if m in by_lip and m != v.lip]
+        # ...и только внутри СВОЕГО региона: склейка — суждение «одно и то же
+        # событие», а посты разных районов склеивать нельзя. Когда чанк
+        # смешивает регионы (режим regions_per_chunk>1), это правило держит
+        # КОД, а не только промпт: модель может ошибиться, а цена ошибки —
+        # чужой пост, объявленный дублем.
+        own_region = str(post.get("region_code") or "")
+        v.merge_with = [
+            m
+            for m in v.merge_with
+            if str(by_lip[m].get("region_code") or "") == own_region
+        ]
         v.text = _post_text(post)[:10000]
         v.url = str(post.get("url") or post.get("post_url") or "")[:300]
         v.region_code = str(post.get("region_code") or "")[:50]
@@ -390,6 +439,7 @@ def classify_posts(
     *,
     postulates: str,
     chunk_size: int = DEFAULT_CHUNK_SIZE,
+    regions_per_chunk: int = 1,
     model: Optional[str] = None,
     timeout: Optional[float] = None,
 ) -> Dict[str, Any]:
@@ -397,6 +447,10 @@ def classify_posts(
 
     Отказ одного чанка не отменяет остальные: посты независимы, а прогон стоит
     денег. Причины отказов копятся в ``failures`` и уходят в лог целиком.
+
+    ``regions_per_chunk`` — сколько регионов в одном вызове (1 = как было:
+    чанк = один регион). Больше — вызовов меньше, а префикс правил платится за
+    вызов, а не за пост.
 
     ``timeout`` — потолок одного чанка. Путь публикации передаёт короткий
     (``config.opencode.get_publish_timeout``): волна не должна стоять в слоте
@@ -409,7 +463,7 @@ def classify_posts(
     problems: List[str] = []
     failures: List[str] = []
     tokens = 0
-    chunks = chunk_posts(with_text, chunk_size)
+    chunks = chunk_posts(with_text, chunk_size, regions_per_chunk=regions_per_chunk)
 
     def _run(chunk: List[Dict[str, Any]], depth: int = 0) -> None:
         nonlocal tokens

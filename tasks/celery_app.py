@@ -743,6 +743,7 @@ def classify_pending_posts(limit: int = 0):
         from config.classifier import (
             classifier_disabled,
             get_headless_chunk_size,
+            get_headless_regions_per_chunk,
             get_pending_max,
             get_region_allowlist,
             get_source_days,
@@ -783,7 +784,10 @@ def classify_pending_posts(limit: int = 0):
                     return {"status": "ok", "posts": 0}
                 postulates = await rules.render_effective_postulates(session)
                 run = headless.classify_posts(
-                    posts, postulates=postulates, chunk_size=get_headless_chunk_size()
+                    posts,
+                    postulates=postulates,
+                    chunk_size=get_headless_chunk_size(),
+                    regions_per_chunk=get_headless_regions_per_chunk(),
                 )
                 logger.info("classifier headless: %s", headless.summarize(run))
                 if run["failures"]:

@@ -90,6 +90,78 @@ def test_chunk_size_splits_within_region():
     assert [len(c) for c in headless.chunk_posts(posts, size=2)] == [2, 2, 1]
 
 
+def test_mixed_regions_pack_fewer_calls():
+    """Несколько регионов в одном вызове — вызовов меньше, регионы остаются блоками.
+
+    Префикс правил платится за вызов, а не за пост: при 2–3 постах на регион
+    чанк размера 40 вырождался в «один вызов на регион» (замер 10.11: 58 постов
+    → 35 вызовов).
+    """
+    posts = [
+        {"lip": f"mi_{i}", "region_code": "mi", "text": "x"} for i in range(3)
+    ] + [{"lip": f"ur_{i}", "region_code": "ur", "text": "x"} for i in range(3)]
+
+    one_per_region = headless.chunk_posts(posts, size=40, regions_per_chunk=1)
+    mixed = headless.chunk_posts(posts, size=40, regions_per_chunk=2)
+
+    assert len(one_per_region) == 2
+    assert len(mixed) == 1
+    # Регионы внутри чанка — подряд (блоками), а не вперемешку.
+    assert [p["region_code"] for p in mixed[0]] == ["mi", "mi", "mi", "ur", "ur", "ur"]
+
+
+def test_mixed_regions_respect_size_and_region_limit():
+    """Постов в вызове не больше размера чанка, регионов — не больше лимита."""
+    posts = (
+        [{"lip": f"a_{i}", "region_code": "a", "text": "x"} for i in range(4)]
+        + [{"lip": f"b_{i}", "region_code": "b", "text": "x"} for i in range(4)]
+        + [{"lip": f"c_{i}", "region_code": "c", "text": "x"} for i in range(4)]
+    )
+    chunks = headless.chunk_posts(posts, size=10, regions_per_chunk=2)
+    assert all(len(c) <= 10 for c in chunks)
+    assert all(len({p["region_code"] for p in c}) <= 2 for c in chunks)
+
+
+def test_merge_across_regions_is_dropped_by_code():
+    """Склейка за пределы региона отбрасывается КОДОМ, а не только промптом.
+
+    Когда чанк смешивает регионы, модель может ошибиться; цена ошибки — чужой
+    пост, объявленный дублем. Правило держит код.
+    """
+    payload = {
+        "verdicts": [
+            _verdict("mi_1", merge_with=["ur_1"]),
+            _verdict("ur_1", merge_with=["mi_1"]),
+        ]
+    }
+    posts = [
+        {"lip": "mi_1", "region_code": "mi", "text": "x"},
+        {"lip": "ur_1", "region_code": "ur", "text": "y"},
+    ]
+    verdicts, _problems = headless.parse_chunk_response(payload, posts)
+    by_lip = {v.lip: v for v in verdicts}
+    assert by_lip["mi_1"].merge_with == []
+    assert by_lip["ur_1"].merge_with == []
+
+
+def test_merge_within_region_survives():
+    """Склейка внутри своего региона — законная, её не режем."""
+    payload = {
+        "verdicts": [
+            _verdict("mi_1", merge_with=["mi_2"]),
+            _verdict("mi_2", merge_with=["mi_1"]),
+        ]
+    }
+    posts = [
+        {"lip": "mi_1", "region_code": "mi", "text": "x"},
+        {"lip": "mi_2", "region_code": "mi", "text": "y"},
+    ]
+    verdicts, _problems = headless.parse_chunk_response(payload, posts)
+    by_lip = {v.lip: v for v in verdicts}
+    assert by_lip["mi_1"].merge_with == ["mi_2"]
+    assert by_lip["mi_2"].merge_with == ["mi_1"]
+
+
 def test_has_text_accepts_both_field_names():
     assert headless.has_text({"text": "a"})
     assert headless.has_text({"post_text": "a"})
@@ -339,6 +411,30 @@ def test_chunk_default_is_forty(monkeypatch):
     monkeypatch.delenv("CLASSIFIER_HEADLESS_CHUNK", raising=False)
     assert get_headless_chunk_size() == 40
     assert headless.DEFAULT_CHUNK_SIZE == 40
+
+
+def test_regions_per_chunk_defaults_to_one(monkeypatch):
+    """Дефолт 1 — чанк = один регион (как было до 10.11).
+
+    Смешивание регионов включается только явной env-переменной: это меняет
+    смысл склейки, а значит — требует осознанного хода, а не молчаливого.
+    """
+    from config.classifier import get_headless_regions_per_chunk
+
+    monkeypatch.delenv("CLASSIFIER_HEADLESS_REGIONS_PER_CHUNK", raising=False)
+    assert get_headless_regions_per_chunk() == 1
+
+
+def test_regions_per_chunk_is_clamped(monkeypatch):
+    """Границы 1..16: ноль и мусор не должны ломать нарезку."""
+    from config.classifier import get_headless_regions_per_chunk
+
+    monkeypatch.setenv("CLASSIFIER_HEADLESS_REGIONS_PER_CHUNK", "0")
+    assert get_headless_regions_per_chunk() == 1
+    monkeypatch.setenv("CLASSIFIER_HEADLESS_REGIONS_PER_CHUNK", "999")
+    assert get_headless_regions_per_chunk() == 16
+    monkeypatch.setenv("CLASSIFIER_HEADLESS_REGIONS_PER_CHUNK", "ерунда")
+    assert get_headless_regions_per_chunk() == 1
 
 
 def test_unparseable_chunk_is_split_in_half_and_retried(monkeypatch):
