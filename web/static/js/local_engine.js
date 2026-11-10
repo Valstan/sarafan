@@ -14,6 +14,18 @@ function esc(s) {
 
 function pct(v) { return (v == null) ? "?" : (v + "%"); }
 
+// Название источника вердикта — от API (``source_labels``): в базе служебные
+// ключи (``routine``/``api``/``headless``/``local``), а читать должен человек.
+const SOURCE_FALLBACK = {
+  routine: "рутина",
+  api: "через API",
+  headless: "облако",
+  local: "локальный",
+};
+function sourceLabel(src, labels) {
+  return (labels && labels[src]) || SOURCE_FALLBACK[src] || src;
+}
+
 async function load() {
   const box = document.getElementById("alert-box");
   try {
@@ -47,6 +59,7 @@ async function load() {
     }
 
     // ── Качество по источнику ──
+    const labels = d.source_labels || {};
     const q = d.quality_by_source || {};
     const keys = Object.keys(q);
     let html = "";
@@ -59,7 +72,7 @@ async function load() {
       for (const src of keys) {
         const a = q[src].action || {}, t = q[src].theme || {};
         const rights = (a.agree||0) + (a.correct||0) + (t.agree||0) + (t.correct||0);
-        html += `<tr><td><code>${esc(src)}</code></td>` +
+        html += `<tr><td>${esc(sourceLabel(src, labels))}</td>` +
                 `<td class="text-end">${pct(a.agree_pct)} <span class="text-muted small">(${a.agree||0}/${(a.agree||0)+(a.correct||0)})</span></td>` +
                 `<td class="text-end">${pct(t.agree_pct)} <span class="text-muted small">(${t.agree||0}/${(t.agree||0)+(t.correct||0)})</span></td>` +
                 `<td class="text-end">${rights}</td></tr>`;
@@ -78,7 +91,7 @@ async function load() {
       wh = '<table class="table table-sm mb-0"><thead><tr><th>неделя</th>';
       const srcs = new Set();
       weeks.forEach(wk => Object.keys(w[wk]).forEach(s => srcs.add(s)));
-      for (const s of srcs) wh += `<th class="text-end">${esc(s)}</th>`;
+      for (const s of srcs) wh += `<th class="text-end">${esc(sourceLabel(s, labels))}</th>`;
       wh += "</tr></thead><tbody>";
       for (const wk of weeks) {
         wh += `<tr><td>${esc(wk)}</td>`;
@@ -117,7 +130,7 @@ async function load() {
       dh = '<span class="text-muted">нет данных</span>';
     } else {
       dh = '<table class="table table-sm mb-0"><thead><tr><th>день</th>';
-      dsrc.forEach(s => dh += `<th class="text-end">${esc(s)}</th>`);
+      dsrc.forEach(s => dh += `<th class="text-end">${esc(sourceLabel(s, labels))}</th>`);
       dh += "</tr></thead><tbody>";
       const days = new Set();
       dsrc.forEach(s => (daily[s]||[]).forEach(r => days.add(r.day)));
