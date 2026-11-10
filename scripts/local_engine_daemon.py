@@ -50,6 +50,12 @@ DEFAULT_MODEL_URL = "http://127.0.0.1:8081/v1"
 LOG_NAME = "local_engine_daemon.jsonl"
 DEFAULT_LOG_PATH = Path(__file__).resolve().parent.parent / "logs" / LOG_NAME
 
+#: Уже посчитанные посты (режим тени): без этого демон считал бы один и тот же
+#: батч по кругу — пост без записанного вердикта остаётся «свежим» и занимает
+#: место в каждом прогоне. Набор ограничен, чтобы не расти без границ.
+_SEEN_LIPS: set = set()
+_SEEN_LIPS_MAX = 5000
+
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -182,8 +188,16 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
         export_cmd += " --regions %s" % args.regions
     if args.regions_per_chunk:
         export_cmd += " --regions-per-chunk %d" % args.regions_per_chunk
+    # Режим тени: посты без записанного вердикта остаются «свежими» и занимают
+    # место в каждом прогоне — демон считал бы один и тот же батч по кругу.
+    # Поэтому уже посчитанные lip исключаются на стороне бокса, ДО нарезки на
+    # чанк: иначе промпт и посты разошлись бы.
+    exclude_stdin = None
+    if args.shadow and _SEEN_LIPS:
+        export_cmd += " --exclude-lips-stdin"
+        exclude_stdin = json.dumps(sorted(_SEEN_LIPS))
     try:
-        raw = _ssh(args.ssh_host, export_cmd)
+        raw = _ssh(args.ssh_host, export_cmd, stdin_data=exclude_stdin)
     except Exception as e:  # noqa: BLE001 — демон не должен падать из-за SSH
         _log(log_path, {"ts": _now(), "ok": False, "stage": "export", "error": str(e)[:300]})
         print("[%s] не смог забрать батч: %s" % (_now(), e), flush=True)
@@ -296,6 +310,7 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
         "tokens_prompt": usage.get("prompt_tokens"),
         "tokens_completion": usage.get("completion_tokens"),
         "regions": batch.get("regions_in_batch"),
+        "lips": [str(p.get("lip")) for p in posts],
     }
     try:
         # ``--shadow``: вердикты НЕ пишутся в корпус — только отчёт о прогоне.
@@ -326,6 +341,14 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
         report["error"] = str(e)[:300]
         print("[%s] приём не прошёл: %s" % (_now(), e), flush=True)
     _log(log_path, report)
+
+    # Запоминаем посчитанные посты: в режиме тени они не пишутся в корпус, и
+    # без этого демон брал бы один и тот же батч по кругу.
+    if args.shadow:
+        for lip in report.get("lips") or []:
+            _SEEN_LIPS.add(str(lip))
+        while len(_SEEN_LIPS) > _SEEN_LIPS_MAX:
+            _SEEN_LIPS.pop()
     return 0
 
 

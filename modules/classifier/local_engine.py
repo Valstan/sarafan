@@ -69,6 +69,7 @@ async def export_batch(
     regions_per_chunk: int = 8,
     chunk_size: int = 40,
     source_days: int = 3,
+    exclude_lips: Optional[Sequence[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Отдать один батч постов без вердикта + промпт, идентичный облачному.
 
@@ -77,6 +78,11 @@ async def export_batch(
     Батч режется **тем же** чанкером, что и облачный путь
     (:func:`headless.chunk_posts`), чтобы локальная модель получала
     сопоставимые куски, а вызовы считались так же.
+
+    ``exclude_lips`` — посты, которые демон уже посчитал: в режиме тени
+    вердикты не пишутся в корпус, поэтому пост остаётся «неразобранным» и
+    без исключения демон считал бы один и тот же батч по кругу. Исключение
+    применяется **до** нарезки на чанк — иначе промпт и посты разошлись бы.
     """
     region_codes = [r.strip() for r in (regions or []) if r and r.strip()] or None
     posts = await service.fetch_pending(
@@ -86,6 +92,9 @@ async def export_batch(
         days=int(source_days),
         text_only=True,
     )
+    if exclude_lips:
+        skip = {str(x) for x in exclude_lips}
+        posts = [p for p in posts if str(p.get("lip")) not in skip]
     if not posts:
         return None
 
