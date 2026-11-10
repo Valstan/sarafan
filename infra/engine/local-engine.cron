@@ -1,0 +1,14 @@
+# Крона демона локального движка — раз в 5 минут один круг.
+#
+# Демон живёт на боксе (--local): мост зовётся локально, SSH не нужен, движок
+# (opencode serve) — на localhost:4097 под systemd-юнитом opencode-engine.
+#
+# `--once` — один круг и выход: крона и есть расписание.
+# `--regions-per-chunk 2` — free-тир-модель на большом чанке (до 40 постов)
+# уходит в длинное рассуждение и не отвечает (замер 10.11: чанк из 23 постов
+# молчал 11 минут).
+# `--model-timeout 100` — зависшая модель в цепочке съедает свой потолок и не
+# пускает следующую.
+#
+# Путь к python — абсолютный: крона не читает профиль.
+*/5 * * * * cd /home/valstan/SETKA && /home/valstan/SETKA/venv/bin/python scripts/local_engine_daemon.py --local --engine opencode --model-url http://127.0.0.1:4097 --once --regions-per-chunk 2 --model-timeout 100 >> /home/valstan/SETKA/logs/local_engine_daemon.log 2>&1

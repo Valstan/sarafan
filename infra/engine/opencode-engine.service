@@ -1,0 +1,26 @@
+[Unit]
+Description=Локальный движок классификатора — opencode serve (free-тир, loopback)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=valstan
+Group=valstan
+WorkingDirectory=/home/valstan
+Environment=HOME=/home/valstan
+Environment=XDG_DATA_HOME=/home/valstan/.local/share/opencode
+ExecStart=/home/valstan/SETKA/infra/engine/opencode-engine.sh 4097
+Restart=always
+RestartSec=5
+SuccessExitStatus=130
+# Бокс — 1,5 ГБ RAM: потолок памяти обязателен, иначе opencode съест всё и
+# выбьет воркер (ADR-0014: контур на боксе стоил четверть памяти).
+MemoryHigh=384M
+MemoryMax=512M
+PrivateTmp=yes
+# Движку права не нужны: ни sudo, ни setuid. Serve только ходит в сеть.
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target
