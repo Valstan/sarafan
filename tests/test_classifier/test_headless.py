@@ -97,9 +97,9 @@ def test_mixed_regions_pack_fewer_calls():
     чанк размера 40 вырождался в «один вызов на регион» (замер 10.11: 58 постов
     → 35 вызовов).
     """
-    posts = [
-        {"lip": f"mi_{i}", "region_code": "mi", "text": "x"} for i in range(3)
-    ] + [{"lip": f"ur_{i}", "region_code": "ur", "text": "x"} for i in range(3)]
+    posts = [{"lip": f"mi_{i}", "region_code": "mi", "text": "x"} for i in range(3)] + [
+        {"lip": f"ur_{i}", "region_code": "ur", "text": "x"} for i in range(3)
+    ]
 
     one_per_region = headless.chunk_posts(posts, size=40, regions_per_chunk=1)
     mixed = headless.chunk_posts(posts, size=40, regions_per_chunk=2)
@@ -413,16 +413,16 @@ def test_chunk_default_is_forty(monkeypatch):
     assert headless.DEFAULT_CHUNK_SIZE == 40
 
 
-def test_regions_per_chunk_defaults_to_one(monkeypatch):
-    """Дефолт 1 — чанк = один регион (как было до 10.11).
+def test_regions_per_chunk_defaults_to_eight(monkeypatch):
+    """Дефолт 8 регионов в вызове — замер 10.11 (вызовов меньше в 3,3 раза).
 
-    Смешивание регионов включается только явной env-переменной: это меняет
-    смысл склейки, а значит — требует осознанного хода, а не молчаливого.
+    Раньше дефолтом был 1 (чанк = один регион): при 2–3 постах на регион
+    чанк размера 40 вырождался в «один вызов на регион».
     """
     from config.classifier import get_headless_regions_per_chunk
 
     monkeypatch.delenv("CLASSIFIER_HEADLESS_REGIONS_PER_CHUNK", raising=False)
-    assert get_headless_regions_per_chunk() == 1
+    assert get_headless_regions_per_chunk() == 8
 
 
 def test_regions_per_chunk_is_clamped(monkeypatch):
@@ -434,7 +434,7 @@ def test_regions_per_chunk_is_clamped(monkeypatch):
     monkeypatch.setenv("CLASSIFIER_HEADLESS_REGIONS_PER_CHUNK", "999")
     assert get_headless_regions_per_chunk() == 16
     monkeypatch.setenv("CLASSIFIER_HEADLESS_REGIONS_PER_CHUNK", "ерунда")
-    assert get_headless_regions_per_chunk() == 1
+    assert get_headless_regions_per_chunk() == 8
 
 
 def test_unparseable_chunk_is_split_in_half_and_retried(monkeypatch):
