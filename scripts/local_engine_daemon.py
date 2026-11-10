@@ -297,6 +297,12 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
 
     payload = _extract_json(answer["content"])
     verdicts = _normalize_verdicts(payload or {}, posts)
+    # Кто судил — в корпус: иначе вердикт локального движка не отличить от
+    # облачного (source говорит «local», а модели внутри нет).
+    model_name = answer.get("model")
+    if model_name:
+        for verdict in verdicts:
+            verdict["model"] = str(model_name)[:100]
     usage = answer.get("usage") or {}
     report = {
         "ts": _now(),
