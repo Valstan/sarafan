@@ -31,9 +31,10 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import re
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -123,12 +124,81 @@ async def _golden_sample(limit: int) -> List[Dict[str, Any]]:
     return out
 
 
-def _variant_b(effective: str, compact_base: str) -> str:
-    """Сжатая база + словарь тем + выученные правила (тот же хвост)."""
-    if _THEMES_MARKER in effective:
-        tail = effective.split(_THEMES_MARKER, 1)[1]
-        return compact_base.rstrip() + _THEMES_MARKER + tail
-    return compact_base.rstrip() + "\n"
+def _variant_b(effective: str, base_text: str, mode: str) -> str:
+    """Вариант B: кандидатная база + словарь тем (+ выученные правила, если tail).
+
+    ``tail`` — к кандидату добавляется весь хвост действующих эффективных
+    постулатов (словарь тем + выученные правила из БД): так сравнивается
+    «сжатая база» с «действующий промпт».
+
+    ``standalone`` — к кандидату добавляется **только словарь тем**, без
+    выученных правил: так сравнивается «сводный файл, в который влиты
+    выученные правила» с действующим промптом (вывод выученных из БД — за
+    владельцем, поэтому вариант считается отдельно).
+
+    ``compactlearned`` — действующая база + словарь тем + **сжатые формулировки**
+    выученных правил (из ``config/learned_rules_compact.json``): так измеряется
+    вклад сжатия формулировок, а не выноса правил из БД.
+    """
+    if _THEMES_MARKER not in effective:
+        return base_text.rstrip() + "\n"
+    tail = effective.split(_THEMES_MARKER, 1)[1]
+    if mode == "standalone":
+        themes_end = tail.find("## Выученные правила")
+        themes = tail[:themes_end] if themes_end > 0 else tail
+        return base_text.rstrip() + _THEMES_MARKER + themes
+    if mode == "compactlearned":
+        return _with_compact_learned(effective)
+    return base_text.rstrip() + _THEMES_MARKER + tail
+
+
+def _with_compact_learned(effective: str) -> str:
+    """Действующие постулаты, где тексты выученных правил заменены сжатыми.
+
+    Правило в промпте может занимать несколько строк (перенос в исходном
+    тексте) — значит, строки собираются блоками: от «N. » до следующего «M. ».
+    Иначе хвост правила теряется, и вариант B измеряет не сжатие, а обрезку.
+    """
+    import json
+
+    path = Path(__file__).resolve().parent.parent / "config" / "learned_rules_compact.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    # Набор — список в порядке промпта: позиция (номер в промпте) и id строки БД.
+    # Сопоставлять по номеру в промпте нельзя: он не совпадает с id (id=3 — это
+    # первое правило в промпте, id=60 — тридцать четвёртое). Путаница роняла
+    # качество варианта на 8 п.п. — правила просто менялись местами.
+    by_pos = {str(item["pos"]): item for item in payload}
+    header_at = effective.find("## Выученные правила")
+    if header_at < 0:
+        return effective
+    head = effective[:header_at].rstrip()
+    body = effective[header_at:]
+    lines = body.splitlines()
+
+    out = [lines[0], ""]
+    current_num: Optional[int] = None
+
+    def _flush() -> None:
+        if current_num is None:
+            return
+        item = by_pos.get(str(current_num))
+        if item is None:
+            return
+        scope = ""
+        if item.get("region_code"):
+            scope = " _(район %s)_" % item["region_code"]
+        out.append("%d. %s%s" % (current_num, item["new"].strip(), scope))
+
+    for line in lines[1:]:
+        m = re.match(r"^(\d+)\. (.*)$", line)
+        if m:
+            _flush()
+            current_num = int(m.group(1))
+        elif current_num is not None:
+            # Продолжение правила (перенос строки) — часть того же правила.
+            pass
+    _flush()
+    return head + "\n\n" + "\n".join(out) + "\n"
 
 
 def _score(posts: List[Dict[str, Any]], verdicts: List[Any]) -> Dict[str, Any]:
@@ -164,6 +234,14 @@ async def main() -> int:
     ap.add_argument("--chunk", type=int, default=0, help="постов в вызове (0 = из env)")
     ap.add_argument("--show", type=int, default=12, help="сколько расхождений напечатать")
     ap.add_argument(
+        "--variant-b-mode",
+        choices=["tail", "standalone", "compactlearned"],
+        default="tail",
+        help="tail — кандидат + словарь тем + выученные правила; "
+        "standalone — только кандидат + словарь тем; "
+        "compactlearned — действующая база + сжатые формулировки правил",
+    )
+    ap.add_argument(
         "--compact",
         default="config/classification_postulates.compact.md",
         help="кандидат сжатой базы ( относительно корня репо)",
@@ -179,9 +257,13 @@ async def main() -> int:
     async with AsyncSessionLocal() as session:
         effective = await rules.render_effective_postulates(session)
 
-    compact_path = Path(__file__).resolve().parent.parent / args.compact
-    compact_base = compact_path.read_text(encoding="utf-8")
-    variant_b = _variant_b(effective, compact_base)
+    compact_base = ""
+    if args.variant_b_mode != "compactlearned":
+        # В режиме compactlearned кандидат не нужен: там B — действующие
+        # постулаты, где подменены только тексты выученных правил.
+        compact_path = Path(__file__).resolve().parent.parent / args.compact
+        compact_base = compact_path.read_text(encoding="utf-8")
+    variant_b = _variant_b(effective, compact_base, args.variant_b_mode)
 
     print(
         "\nвариант A (действующий): %d символов (~%d токенов)"
@@ -207,6 +289,29 @@ async def main() -> int:
         print(f"\n=== вариант {name} ===")
         print("headless:", headless.summarize(run))
         print(json.dumps(score, ensure_ascii=False, indent=2))
+
+    # Парная статистика: она чувствительнее сравнения двух процентов, потому что
+    # смотрит на ОДНИ И ТЕ ЖЕ посты. Шум выборки (модель не детерминирована,
+    # temperature 0.2) бьёт по обоим процентам сразу, а здесь считается только
+    # разница по конкретным постам.
+    a_right_b_wrong = b_right_a_wrong = 0
+    for p in posts:
+        op = str(p.get("action") or "").strip().casefold()
+        va = verdicts_by_variant["A"].get(p["lip"])
+        vb = verdicts_by_variant["B"].get(p["lip"])
+        if not op or not va or not vb:
+            continue
+        a_ok = va.normalized_action() == op
+        b_ok = vb.normalized_action() == op
+        if a_ok and not b_ok:
+            a_right_b_wrong += 1
+        elif b_ok and not a_ok:
+            b_right_a_wrong += 1
+    print(
+        "\n=== парная статистика по action ===\n"
+        "A прав, B неправ: %d; B прав, A неправ: %d (разница %+d)"
+        % (a_right_b_wrong, b_right_a_wrong, b_right_a_wrong - a_right_b_wrong)
+    )
 
     if args.show:
         print("\n=== расхождения (A против оператора, B против оператора) ===")
