@@ -358,6 +358,27 @@ def test_panel_template_links_static_js_instead_of_inline():
     assert "<script>" not in html
 
 
+def test_source_labels_are_human_readable():
+    """Источники вердикта в панели читаются по-русски, а не служебными ключами.
+
+    В базе ``source`` — служебный ключ (``routine``/``api``/``headless``/
+    ``local``): в панели он должен читаться («рутина», «облако», «локальный»).
+    Названия отдаёт API — тогда они живут в одном месте.
+    """
+    labels = local_engine.SOURCE_LABELS
+    assert labels["routine"] == "рутина"
+    assert labels["headless"] == "облако"
+    assert labels["local"] == "локальный"
+    assert labels["api"] == "через API"
+    for key, label in labels.items():
+        assert label and label != key, "ключ %s должен называться по-русски" % key
+
+    js = (REPO_ROOT / "web" / "static" / "js" / "local_engine.js").read_text(encoding="utf-8")
+    for key in labels:
+        assert "sourceLabel(s, labels)" in js
+    assert "source_labels" in js
+
+
 def test_panel_js_parses():
     """Синтаксис JS панели проверяется node'ом (если он есть)."""
     import shutil

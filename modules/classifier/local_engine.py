@@ -50,6 +50,17 @@ logger = logging.getLogger(__name__)
 #: Источник вердиктов локального движка в ``content_classifications.source``.
 SOURCE_LOCAL = "local"
 
+#: Человеческие названия источников вердикта. ``source`` в базе — служебный
+#: ключ (``routine`` / ``api`` / ``headless`` / ``local``), и в панели он должен
+#: читаться, а не шифровать: кто судил пост — рутинная облачная рутина, приём
+#: через API, облачный headless или локальный движок на ПК.
+SOURCE_LABELS: Dict[str, str] = {
+    "routine": "рутина",
+    "api": "через API",
+    "headless": "облако",
+    "local": "локальный",
+}
+
 #: Журнал прогонов локального движка (одна строка JSON на прогон).
 RUNS_LOG_PATH = Path(
     os.getenv("LOCAL_ENGINE_RUNS_LOG", "") or Path("logs") / "local_engine_runs.jsonl"
@@ -367,6 +378,7 @@ async def stats(session) -> Dict[str, Any]:
         "runs_recorded": total_run_recorded,
         "runs_errors": sum(1 for r in runs if r.get("error")),
         "last_run": runs[-1] if runs else None,
+        "source_labels": dict(SOURCE_LABELS),
         "verdicts_by_source": verdicts_by_source,
         "daily_by_source": daily,
         "quality_by_source": quality,
