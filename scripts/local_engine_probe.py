@@ -85,6 +85,12 @@ def main() -> int:
     ap.add_argument("--model-password-file", default="", help="файл с паролем serve (opencode)")
     ap.add_argument("--limit", type=int, default=0, help="ограничить число чанков (0 = все)")
     ap.add_argument("--timeout", type=float, default=180.0, help="потолок одного вызова, с")
+    ap.add_argument(
+        "--model-timeout",
+        type=float,
+        default=120.0,
+        help="потолок ОДНОЙ модели цепочки, с (free-тир на большом чанке уходит в рассуждение)",
+    )
     ap.add_argument("--max-tokens-per-post", type=int, default=240)
     ap.add_argument("--show-prompt", action="store_true", help="печатать user-промпт первого чанка")
     args = ap.parse_args()
@@ -109,6 +115,25 @@ def main() -> int:
     failures = 0
     started = time.time()
 
+    def flush() -> None:
+        """Записать результат ПРЯМО СЕЙЧАС.
+
+        Замер длинный (free-тир-модель считает чанк минутами), и терять
+        посчитанное из-за прерывания нельзя: файл переписывается после
+        каждого чанка, поэтому его можно забрать и посчитать в любой момент.
+        """
+        payload = {
+            "engine": args.engine,
+            "model_url": args.model_url,
+            "chunks": out_chunks,
+            "failures": failures,
+            "duration_ms": int((time.time() - started) * 1000),
+            "sample_posts": len(sample.get("posts") or []),
+        }
+        Path(args.out).write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+
     for chunk in chunks:
         system = chunk.get("system") or ""
         user = chunk.get("user") or ""
@@ -125,6 +150,7 @@ def main() -> int:
                 model=args.model_name or None,
                 chain=chain,
                 timeout=args.timeout,
+                model_timeout=args.model_timeout,
                 password_file=Path(args.model_password_file) if args.model_password_file else None,
             )
             if not answer.get("ok"):
@@ -141,6 +167,7 @@ def main() -> int:
                         "verdicts": [],
                     }
                 )
+                flush()
                 continue
             content = answer.get("content") or ""
             usage = answer.get("usage") or {}
@@ -166,6 +193,7 @@ def main() -> int:
                         "verdicts": [],
                     }
                 )
+                flush()
                 continue
             content = answer.get("content") or ""
             usage = answer.get("usage") or {}
@@ -192,6 +220,7 @@ def main() -> int:
             ),
             flush=True,
         )
+        flush()
 
     result = {
         "engine": args.engine,
