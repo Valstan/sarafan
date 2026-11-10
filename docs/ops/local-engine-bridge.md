@@ -13,6 +13,9 @@
 | [`scripts/local_bridge.py`](../../scripts/local_bridge.py) | бокс | CLI: `export` (батч + промпт) и `submit` (приём вердиктов) |
 | [`scripts/local_bridge.sh`](../../scripts/local_bridge.sh) | бокс | обёртка: грузит env приложения и зовёт CLI (env-файл root-only, поэтому `sudo`) |
 | [`scripts/local_engine_daemon.py`](../../scripts/local_engine_daemon.py) | **ПК владельца** | демон: тянет батч по SSH → считает локально → отдаёт вердикты; только стандартная библиотека |
+| [`scripts/local_engine_opencode.py`](../../scripts/local_engine_opencode.py) | **ПК владельца** | клиент к opencode v2 (сессионная схема serve: `/api/session` → prompt → wait → message) |
+| [`scripts/local_engine_probe.py`](../../scripts/local_engine_probe.py) | **ПК владельца** | прогон золотой выборки через локальный движок (для теневой сверки) |
+| [`scripts/classifier_local_shadow.py`](../../scripts/classifier_local_shadow.py) | бокс | теневая сверка: локальная модель против облака на одних и тех же постах |
 | [`web/api/local_engine.py`](../../web/api/local_engine.py) + [`web/templates/local_engine.html`](../../web/templates/local_engine.html) + [`web/static/js/local_engine.js`](../../web/static/js/local_engine.js) | бокс | панель `/local-engine`: движок, качество, обучение |
 
 ## Схема Pull
@@ -74,35 +77,86 @@ system-сообщение (задача + эффективные постула�
 без сессии — 401 на API и 302 на страницу. Это не обход гейта, а его нормальная
 работа: страницу видит только владелец.
 
-## Что нужно от владельца (шаги на ПК)
+## Движок на ПК: что стоит и как поднять (замер 10.11)
 
-1. **Модель.** OpenAI-совместимый эндпоинт: `llama-server` или `opencode
-   serve`. Контракт тот же, что у облака: `/v1/chat/completions`,
-   `response_format: {"type": "json_object"}`, `temperature 0.2`,
-   `max_tokens` = 240 на пост.
-2. **Железо.** Сжатый правилник — 8,4K токенов системного сообщения; плюс
-   посты батча. Локальной модели нужен контекст ≥ 16K. По времени: ~1,2 ч
-   вычислений в сутки (мандат мозга) — то есть даже CPU-модель подходит, если
-   RAM хватает.
-3. **Запуск.** Демон ставится на ПК из репозитория:
+**Локальной llama-модели на ПК нет** — весов (`.gguf`) и рантаймов (`llama-server`,
+`ollama`, LM Studio) на машине нет. Но есть **OpenCode v2.1.4** с сохранённой
+авторизацией OpenRouter и free-тир моделей (`opencode/deepseek-v4.1-flash-free` и
+другие) — это тот контур, что использовался на боксе до ADR-0014, только здесь
+он живёт на ПК владельца, а не на боксе.
 
-   ```bash
-   python scripts/local_engine_daemon.py --model-url http://127.0.0.1:8081/v1 \
-       --model-name local-model --interval 300
-   ```
+**Важно, что это не локальная модель, а free-тир облака.** Деньги DeepSeek при
+этом не тратятся (значит, цель P224 достигается), но надёжность — не как у
+локального llama: лимиты аккаунта, гейты по IP, отказы цепочки. Поэтому
+переключение делается **в тени** и по факту сверки.
 
-   Под Windows — Планировщик задач (при загрузке), на Linux — systemd timer.
-   Демон сам переживает падение модели: волна уходит в облако (fail-open).
-4. **Проверка без модели:** `python scripts/local_engine_daemon.py --dry-run --once`
-   — покажет, какой батч он забрал бы.
+**OpenCode v2 — не OpenAI-совместимый сервер.** У него своя схема:
+`POST /api/session` (сессия сразу с моделью) → `POST /api/session/{id}/prompt`
+(сообщение в очередь) → `POST /api/experimental/session/{id}/wait` (тишина) →
+`GET /api/session/{id}/message` (текст в `content[type=text]`, счётчики в
+`tokens`) → `DELETE /api/session/{id}` (сессия убирает себя). Ролевых частей у
+serve нет: постулаты и посты уходят одним сообщением.
+
+Клиент к этой схеме — `scripts/local_engine_opencode.py` (только стандартная
+библиотека, как и демон). Пароль serve сервер пишет сам при старте в
+`~/.config/opencode/service.json`; логин — `opencode`, авторизация basic.
+
+### Запуск на ПК
+
+```bash
+# 1. сервер движка (фоновый, на фиксированном порту)
+opencode serve --service --port 4097
+
+# 2. демон моста (тень: вердикты не пишутся в корпус, только отчёт о прогоне)
+python scripts/local_engine_daemon.py \
+    --engine opencode --model-url http://127.0.0.1:4097 \
+    --shadow --interval 300
+```
+
+Автозапуск — Планировщик задач Windows (при загрузке): две задачи, `serve` и
+демон. Демон сам переживает падение движка: волна уходит в облако (fail-open).
+
+**Проверка без модели:** `python scripts/local_engine_daemon.py --dry-run --once`
+— покажет, какой батч он забрал бы.
+
+**Замер 10.11 на живом промпте** (8,4K токенов постулатов + 8 постов):
+`deepseek-v4.1-flash-free` ответила за 24,5 с, 8/8 вердиктов с разбором,
+11 661 токенов промпта и 744 ответа — деньги DeepSeek не потрачены.
+
+## Теневая сверка: локальная модель против облака
+
+Инструмент — `scripts/classifier_local_shadow.py` (на боксе):
+
+```bash
+# 1. выгрузка: золотая выборка + облачный эталон + промпты для ПК
+sudo bash -c 'set -a; . /etc/setka/setka.env; . /etc/setka/secrets-token.env; set +a;
+    cd /home/valstan/SETKA && ./venv/bin/python
+    scripts/classifier_local_shadow.py --dump-sample /tmp/shadow_sample.json --limit 120'
+
+# 2. на ПК: те же промпты через локальный движок
+python scripts/local_engine_probe.py --sample C:\\temp\\shadow_sample.json \
+    --out C:\\temp\\local_verdicts.json --engine opencode --model-url http://127.0.0.1:4097
+
+# 3. счёт: облако против локальной модели, попарно по одним и тем же постам
+./venv/bin/python scripts/classifier_local_shadow.py \
+    --score /tmp/shadow_sample.json --local /tmp/local_verdicts.json
+```
+
+Сравнение **попарное** (сколько постов прав только облако, сколько — только
+локальная модель), а не сравнение двух процентов: модель не детерминирована
+(temperature 0,2), и проценты гуляют на шуме.
+
+**Измерение ничего не пишет** в корпус: ни одной строки в
+`content_classifications` не появляется.
 
 ## Ограничения, о которых надо знать
 
-* **Качество локальной модели неизвестно на наших постах.** Мозг измерил на
-  прототипе: совпадение с правками оператора **18,2 %** против 37–45 % у облака.
-  Поэтому переключение «как есть» — не приговор: сначала **тень** (оба движка
-  на одних и тех же постах, `scripts/classifier_headless_compare.py`), потом
-  решение по факту сверки.
+* **Качество локальной модели на наших постах** — измеряется (`--dump-sample` /
+  `--score` выше). Мозг мерял на прототипе: 18,2 % против 37–45 % у облака, но
+  прототип и free-тир — разные вещи: решение принимается по факту сверки.
+* **Free-тир — не локальная модель.** Лимиты аккаунта, гейты по IP и отказы
+  цепочки реальны (ADR-0014 описывает весь этот класс на боксе). Отсюда режим
+  тени и фолбэк на облако.
 * **Склейка между регионами** в смешанном чанке отсекается кодом
   (`parse_chunk_response`), а не только промптом.
 * **Отчёт о прогоне** пишется в `logs/local_engine_runs.jsonl` — это

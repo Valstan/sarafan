@@ -30,12 +30,17 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+#: Каталог скриптов — чтобы рядом лежащий клиент opencode импортировался
+#: независимо от текущего каталога.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 DEFAULT_SSH_HOST = "sarafan"
 DEFAULT_REMOTE = "~/SETKA/scripts/local_bridge.sh"
@@ -44,6 +49,12 @@ DEFAULT_MODEL_URL = "http://127.0.0.1:8081/v1"
 #: (каталог в git не едет).
 LOG_NAME = "local_engine_daemon.jsonl"
 DEFAULT_LOG_PATH = Path(__file__).resolve().parent.parent / "logs" / LOG_NAME
+
+#: Уже посчитанные посты (режим тени): без этого демон считал бы один и тот же
+#: батч по кругу — пост без записанного вердикта остаётся «свежим» и занимает
+#: место в каждом прогоне. Набор ограничен, чтобы не расти без границ.
+_SEEN_LIPS: set = set()
+_SEEN_LIPS_MAX = 5000
 
 
 def _now() -> str:
@@ -177,8 +188,16 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
         export_cmd += " --regions %s" % args.regions
     if args.regions_per_chunk:
         export_cmd += " --regions-per-chunk %d" % args.regions_per_chunk
+    # Режим тени: посты без записанного вердикта остаются «свежими» и занимают
+    # место в каждом прогоне — демон считал бы один и тот же батч по кругу.
+    # Поэтому уже посчитанные lip исключаются на стороне бокса, ДО нарезки на
+    # чанк: иначе промпт и посты разошлись бы.
+    exclude_stdin = None
+    if args.shadow and _SEEN_LIPS:
+        export_cmd += " --exclude-lips-stdin"
+        exclude_stdin = json.dumps(sorted(_SEEN_LIPS))
     try:
-        raw = _ssh(args.ssh_host, export_cmd)
+        raw = _ssh(args.ssh_host, export_cmd, stdin_data=exclude_stdin)
     except Exception as e:  # noqa: BLE001 — демон не должен падать из-за SSH
         _log(log_path, {"ts": _now(), "ok": False, "stage": "export", "error": str(e)[:300]})
         print("[%s] не смог забрать батч: %s" % (_now(), e), flush=True)
@@ -226,14 +245,41 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
         return 0
 
     try:
-        answer = _call_model(
-            args.model_url,
-            args.model_name,
-            batch.get("system") or "",
-            batch.get("user") or "",
-            args.max_tokens_per_post * max(1, len(posts)),
-            args.model_timeout,
-        )
+        if args.engine == "opencode":
+            # OpenCode v2 — не OpenAI-совместимый сервер, у него сессионная
+            # схема (/api/session → prompt → wait → message). Клиент — рядом,
+            # только стандартная библиотека.
+            import local_engine_opencode
+
+            chain = [m.strip() for m in (args.model_chain or "").split(",") if m.strip()] or None
+            answer = local_engine_opencode.chat(
+                base_url=args.model_url,
+                user=batch.get("user") or "",
+                system=batch.get("system") or "",
+                model=args.model_name or None,
+                chain=chain,
+                timeout=args.model_timeout,
+                password_file=Path(args.model_password_file) if args.model_password_file else None,
+            )
+            if not answer.get("ok"):
+                raise RuntimeError(
+                    "opencode не ответил: %s (%s)"
+                    % (answer.get("reason"), str(answer.get("detail"))[:200])
+                )
+            answer = {
+                "content": answer.get("content") or "",
+                "usage": answer.get("usage") or {},
+                "model": answer.get("model"),
+            }
+        else:
+            answer = _call_model(
+                args.model_url,
+                args.model_name,
+                batch.get("system") or "",
+                batch.get("user") or "",
+                args.max_tokens_per_post * max(1, len(posts)),
+                args.model_timeout,
+            )
     except Exception as e:  # noqa: BLE001 — недоступная модель = волна уйдёт в облако
         _log(
             log_path,
@@ -264,9 +310,13 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
         "tokens_prompt": usage.get("prompt_tokens"),
         "tokens_completion": usage.get("completion_tokens"),
         "regions": batch.get("regions_in_batch"),
+        "lips": [str(p.get("lip")) for p in posts],
     }
     try:
-        submit_cmd = "sudo -n %s submit" % args.remote
+        # ``--shadow``: вердикты НЕ пишутся в корпус — только отчёт о прогоне.
+        # Так демон может работать, не занимая посты и не вытесняя облачные
+        # вердикты, пока качество локальной модели не измерено.
+        submit_cmd = "sudo -n %s submit%s" % (args.remote, " --shadow" if args.shadow else "")
         out = _ssh(
             args.ssh_host,
             submit_cmd,
@@ -291,6 +341,14 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
         report["error"] = str(e)[:300]
         print("[%s] приём не прошёл: %s" % (_now(), e), flush=True)
     _log(log_path, report)
+
+    # Запоминаем посчитанные посты: в режиме тени они не пишутся в корпус, и
+    # без этого демон брал бы один и тот же батч по кругу.
+    if args.shadow:
+        for lip in report.get("lips") or []:
+            _SEEN_LIPS.add(str(lip))
+        while len(_SEEN_LIPS) > _SEEN_LIPS_MAX:
+            _SEEN_LIPS.pop()
     return 0
 
 
@@ -300,6 +358,28 @@ def main() -> int:
     ap.add_argument("--remote", default=DEFAULT_REMOTE, help="путь к обёртке моста на боксе")
     ap.add_argument("--model-url", default=DEFAULT_MODEL_URL, help="база OpenAI-совместимого API")
     ap.add_argument("--model-name", default="local", help="имя модели в запросе")
+    ap.add_argument(
+        "--engine",
+        choices=["openai", "opencode"],
+        default="openai",
+        help="движок: openai — OpenAI-совместимый (llama-server, LM Studio); "
+        "opencode — сессионный протокол opencode serve v2",
+    )
+    ap.add_argument(
+        "--model-chain",
+        default="",
+        help="цепочка моделей через запятую (opencode): первая живая закрывает вызов",
+    )
+    ap.add_argument(
+        "--model-password-file",
+        default="",
+        help="файл с паролем opencode serve (по умолчанию ~/.config/opencode/service.json)",
+    )
+    ap.add_argument(
+        "--shadow",
+        action="store_true",
+        help="режим тени: вердикты НЕ пишутся в корпус, только отчёт о прогоне",
+    )
     ap.add_argument("--limit", type=int, default=20, help="постов в батч")
     ap.add_argument("--regions", default="", help="коды районов через запятую (пусто = все)")
     ap.add_argument(
@@ -320,8 +400,15 @@ def main() -> int:
 
     log_path = Path(args.log)
     print(
-        "локальный движок: ssh=%s модель=%s (%s) интервал=%d с"
-        % (args.ssh_host, args.model_url, args.model_name, args.interval),
+        "локальный движок: ssh=%s движок=%s модель=%s (%s) интервал=%d с%s"
+        % (
+            args.ssh_host,
+            args.engine,
+            args.model_url,
+            args.model_name,
+            args.interval,
+            " РЕЖИМ ТЕНИ" if args.shadow else "",
+        ),
         flush=True,
     )
     while True:

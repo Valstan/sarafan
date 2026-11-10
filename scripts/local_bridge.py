@@ -25,6 +25,7 @@ import contextlib
 import json
 import sys
 from pathlib import Path
+from typing import List
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -50,6 +51,17 @@ from modules.classifier import local_engine  # noqa: E402
 
 async def _export(args: argparse.Namespace) -> int:
     regions = [r.strip() for r in args.regions.split(",") if r.strip()]
+    exclude: List[str] = []
+    if args.exclude_lips_stdin:
+        # Список уже посчитанных демоном постов (режим тени): без него демон
+        # считал бы один и тот же батч по кругу — посты без вердикта остаются
+        # «свежими» и занимают место в каждом прогоне.
+        raw = sys.stdin.read().strip()
+        if raw:
+            try:
+                exclude = [str(x) for x in json.loads(raw)]
+            except json.JSONDecodeError:
+                exclude = []
     async with AsyncSessionLocal() as session:
         batch = await local_engine.export_batch(
             session,
@@ -58,6 +70,7 @@ async def _export(args: argparse.Namespace) -> int:
             regions_per_chunk=args.regions_per_chunk,
             chunk_size=args.chunk,
             source_days=args.days,
+            exclude_lips=exclude or None,
         )
     if not batch:
         print(json.dumps({"empty": True}, ensure_ascii=False))
@@ -74,7 +87,7 @@ async def _submit(args: argparse.Namespace) -> int:
         print(json.dumps({"ok": False, "error": "не JSON: %s" % e}, ensure_ascii=False))
         return 1
     async with AsyncSessionLocal() as session:
-        result = await local_engine.submit_batch(session, payload)
+        result = await local_engine.submit_batch(session, payload, record=not args.shadow)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result.get("ok") else 1
 
@@ -91,10 +104,20 @@ def main() -> int:
     )
     exp.add_argument("--chunk", type=int, default=0, help="постов в вызов (0 = из env)")
     exp.add_argument("--days", type=int, default=0, help="окно свежести источника (0 = из env)")
+    exp.add_argument(
+        "--exclude-lips-stdin",
+        action="store_true",
+        help="исключить посты, перечисленные в stdin (JSON-список lip) — режим тени",
+    )
     exp.set_defaults(func=_export)
 
     sub_p = sub.add_parser("submit", help="принять вердикты локальной модели")
     sub_p.add_argument("--file", type=argparse.FileType("r", encoding="utf-8"), default=None)
+    sub_p.add_argument(
+        "--shadow",
+        action="store_true",
+        help="режим тени: вердикты НЕ пишутся в корпус, только отчёт о прогоне",
+    )
     sub_p.set_defaults(func=_submit)
 
     args = ap.parse_args()

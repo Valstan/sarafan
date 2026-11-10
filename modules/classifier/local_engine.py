@@ -69,6 +69,7 @@ async def export_batch(
     regions_per_chunk: int = 8,
     chunk_size: int = 40,
     source_days: int = 3,
+    exclude_lips: Optional[Sequence[str]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Отдать один батч постов без вердикта + промпт, идентичный облачному.
 
@@ -77,6 +78,11 @@ async def export_batch(
     Батч режется **тем же** чанкером, что и облачный путь
     (:func:`headless.chunk_posts`), чтобы локальная модель получала
     сопоставимые куски, а вызовы считались так же.
+
+    ``exclude_lips`` — посты, которые демон уже посчитал: в режиме тени
+    вердикты не пишутся в корпус, поэтому пост остаётся «неразобранным» и
+    без исключения демон считал бы один и тот же батч по кругу. Исключение
+    применяется **до** нарезки на чанк — иначе промпт и посты разошлись бы.
     """
     region_codes = [r.strip() for r in (regions or []) if r and r.strip()] or None
     posts = await service.fetch_pending(
@@ -86,6 +92,9 @@ async def export_batch(
         days=int(source_days),
         text_only=True,
     )
+    if exclude_lips:
+        skip = {str(x) for x in exclude_lips}
+        posts = [p for p in posts if str(p.get("lip")) not in skip]
     if not posts:
         return None
 
@@ -117,12 +126,18 @@ async def submit_batch(
     payload: Dict[str, Any],
     *,
     source: str = SOURCE_LOCAL,
+    record: bool = True,
 ) -> Dict[str, Any]:
     """Записать вердикты локального движка (наш код, идемпотентно по ``lip``).
 
     ``payload``: ``{"verdicts": [...], "run": {...}}``. ``run`` — отчёт о прогоне
     (модель, посты, время, ошибки) — он уходит в журнал прогонов, из него
     питается панель.
+
+    ``record=False`` — **режим тени**: вердикты НЕ пишутся в корпус, только
+    отчёт о прогоне. Так демон может работать, не занимая посты и не вытесняя
+    облачные вердикты, пока качество локальной модели не измерено (мандат мозга
+    09.11: «старт в тени»).
     """
     raw_list = payload.get("verdicts") if isinstance(payload, dict) else None
     if not isinstance(raw_list, list):
@@ -133,7 +148,7 @@ async def submit_batch(
     skipped_invalid = len(parsed) - len(good)
 
     counts = {"recorded": 0, "skipped_existing": 0, "skipped_missing": 0}
-    if good:
+    if good and record:
         counts = await service.record_verdicts(session, good, source=source)
 
     run = dict(payload.get("run") or {})
@@ -144,11 +159,18 @@ async def submit_batch(
             "verdicts_sent": len(raw_list),
             "verdicts_parsed": len(good),
             "skipped_invalid": skipped_invalid,
+            "shadow": not record,
             **counts,
         }
     )
     append_run(run)
-    return {"ok": True, "skipped_invalid": skipped_invalid, **counts, "run": run}
+    return {
+        "ok": True,
+        "skipped_invalid": skipped_invalid,
+        "shadow": not record,
+        **counts,
+        "run": run,
+    }
 
 
 def append_run(run: Dict[str, Any]) -> None:
