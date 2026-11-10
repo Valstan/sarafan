@@ -16,6 +16,7 @@ from modules.classifier import local_engine
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DAEMON_PATH = REPO_ROOT / "scripts" / "local_engine_daemon.py"
+TEMPLATES_DIR = REPO_ROOT / "web" / "templates"
 
 
 def _load_daemon():
@@ -234,3 +235,25 @@ def test_truncation_unit_is_literal_not_bind(builder, unit, column):
 def test_json_is_serialisable():
     """Отчёт о прогоне идёт в JSONL — значит, должен быть сериализуем."""
     json.dumps({"posts": 1, "recorded": 1, "regions": ["mi"]})
+
+
+# ───────── шаблон панели ─────────
+
+
+def test_panel_template_uses_blocks_that_exist_in_base():
+    """Дочерний шаблон обязан брать блоки, которые реально есть в base.
+
+    В ``base.html`` нет блока ``scripts`` — есть ``extra_scripts``. Шаблон с
+    несуществующим блоком рендерится **молча**: страница остаётся «загрузка…»,
+    потому что её JS просто не попал в HTML. Поймано на проде 10.11.
+    """
+    import jinja2
+
+    env = jinja2.Environment(loader=jinja2.FileSystemLoader(TEMPLATES_DIR))
+    base = env.get_template("base.html")
+    panel = env.get_template("local_engine.html")
+
+    unknown = sorted(b for b in panel.blocks if b not in base.blocks)
+    assert unknown == [], "шаблон панели использует блоки, которых нет в base: %s" % unknown
+    assert "extra_scripts" in panel.blocks
+    assert "content" in panel.blocks
