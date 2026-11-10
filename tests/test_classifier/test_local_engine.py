@@ -185,6 +185,93 @@ async def test_submit_requires_verdict_list():
     assert "verdicts" in result["error"]
 
 
+@pytest.mark.asyncio
+async def test_submit_shadow_does_not_write_to_corpus(tmp_path, monkeypatch):
+    """Режим тени: вердикт не занимает пост в корпусе, но отчёт пишется.
+
+    Так демон может работать, пока качество локальной модели не измерено:
+    корпус остаётся облачным, а панель видит прогоны.
+    """
+    path = tmp_path / "runs.jsonl"
+    monkeypatch.setenv("LOCAL_ENGINE_RUNS_LOG", str(path))
+
+    called = {"n": 0}
+
+    async def _record(session, verdicts, *, source="routine", region_codes_fallback=None):
+        called["n"] += 1
+        return {"recorded": 1, "skipped_existing": 0, "skipped_missing": 0}
+
+    monkeypatch.setattr(local_engine.service, "record_verdicts", _record)
+
+    from modules.classifier.schema import ClassifierVerdict
+
+    verdict = ClassifierVerdict(lip="1_10", theme="новости", action="publish")
+    result = await local_engine.submit_batch(
+        None,
+        {"verdicts": [verdict.model_dump()], "run": {"model": "test"}},
+        record=False,
+    )
+    assert result["ok"] is True
+    assert result["shadow"] is True
+    assert result["recorded"] == 0
+    assert called["n"] == 0, "в режиме тени корпус трогать нельзя"
+    run = local_engine.read_runs()[-1]
+    assert run["shadow"] is True
+    assert run["verdicts_parsed"] == 1
+
+
+# ───────── клиент opencode (локальный движок) ─────────
+
+
+def _load_opencode_client():
+    """Клиент opencode лежит в scripts/ рядом с демоном — грузим как модуль."""
+    spec = importlib.util.spec_from_file_location(
+        "local_engine_opencode", REPO_ROOT / "scripts" / "local_engine_opencode.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+opencode = _load_opencode_client()
+
+
+def test_opencode_parse_messages_reads_text():
+    """Текст ответа лежит в content[type=text] — по частям, не в одном поле."""
+    messages = [
+        {
+            "info": {"tokens": {"input": 870, "output": 32}},
+            "parts": [{"type": "text", "text": '{"verdicts": []}'}],
+        }
+    ]
+    text, usage, error = opencode.parse_messages(messages)
+    assert text == '{"verdicts": []}'
+    assert error is None
+    assert usage["input"] == 870
+
+
+def test_opencode_parse_messages_surfaces_error():
+    """Отказ сессии (idle.outcome != succeeded) не должен выглядеть как пустой ответ."""
+    text, usage, error = opencode.parse_messages(
+        [{"info": {"error": {"name": "provider.no-route"}}}]
+    )
+    assert text == ""
+    assert error is not None
+    assert "provider.no-route" in error
+
+
+def test_opencode_read_password_missing_file():
+    """Нет файла с паролем — понятный отказ, а не исключение на ровном месте."""
+    with pytest.raises(opencode.OpencodeError):
+        opencode.read_password(Path("нет-такого-файла.json"))
+
+
+def test_opencode_chat_rejects_empty_prompt():
+    result = opencode.chat(base_url="http://127.0.0.1:1", user="   ")
+    assert result["ok"] is False
+    assert result["reason"] == "empty_prompt"
+
+
 # ───────── SQL панели: усечение даты литералом, а не параметром ─────────
 
 

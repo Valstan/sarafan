@@ -74,7 +74,7 @@ async def _submit(args: argparse.Namespace) -> int:
         print(json.dumps({"ok": False, "error": "не JSON: %s" % e}, ensure_ascii=False))
         return 1
     async with AsyncSessionLocal() as session:
-        result = await local_engine.submit_batch(session, payload)
+        result = await local_engine.submit_batch(session, payload, record=not args.shadow)
     print(json.dumps(result, ensure_ascii=False))
     return 0 if result.get("ok") else 1
 
@@ -95,6 +95,11 @@ def main() -> int:
 
     sub_p = sub.add_parser("submit", help="принять вердикты локальной модели")
     sub_p.add_argument("--file", type=argparse.FileType("r", encoding="utf-8"), default=None)
+    sub_p.add_argument(
+        "--shadow",
+        action="store_true",
+        help="режим тени: вердикты НЕ пишутся в корпус, только отчёт о прогоне",
+    )
     sub_p.set_defaults(func=_submit)
 
     args = ap.parse_args()

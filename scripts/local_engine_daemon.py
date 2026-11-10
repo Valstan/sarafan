@@ -30,12 +30,17 @@ from __future__ import annotations
 import argparse
 import json
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+#: Каталог скриптов — чтобы рядом лежащий клиент opencode импортировался
+#: независимо от текущего каталога.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 DEFAULT_SSH_HOST = "sarafan"
 DEFAULT_REMOTE = "~/SETKA/scripts/local_bridge.sh"
@@ -226,14 +231,41 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
         return 0
 
     try:
-        answer = _call_model(
-            args.model_url,
-            args.model_name,
-            batch.get("system") or "",
-            batch.get("user") or "",
-            args.max_tokens_per_post * max(1, len(posts)),
-            args.model_timeout,
-        )
+        if args.engine == "opencode":
+            # OpenCode v2 — не OpenAI-совместимый сервер, у него сессионная
+            # схема (/api/session → prompt → wait → message). Клиент — рядом,
+            # только стандартная библиотека.
+            import local_engine_opencode
+
+            chain = [m.strip() for m in (args.model_chain or "").split(",") if m.strip()] or None
+            answer = local_engine_opencode.chat(
+                base_url=args.model_url,
+                user=batch.get("user") or "",
+                system=batch.get("system") or "",
+                model=args.model_name or None,
+                chain=chain,
+                timeout=args.model_timeout,
+                password_file=Path(args.model_password_file) if args.model_password_file else None,
+            )
+            if not answer.get("ok"):
+                raise RuntimeError(
+                    "opencode не ответил: %s (%s)"
+                    % (answer.get("reason"), str(answer.get("detail"))[:200])
+                )
+            answer = {
+                "content": answer.get("content") or "",
+                "usage": answer.get("usage") or {},
+                "model": answer.get("model"),
+            }
+        else:
+            answer = _call_model(
+                args.model_url,
+                args.model_name,
+                batch.get("system") or "",
+                batch.get("user") or "",
+                args.max_tokens_per_post * max(1, len(posts)),
+                args.model_timeout,
+            )
     except Exception as e:  # noqa: BLE001 — недоступная модель = волна уйдёт в облако
         _log(
             log_path,
@@ -266,7 +298,10 @@ def run_once(args: argparse.Namespace, log_path: Path) -> int:
         "regions": batch.get("regions_in_batch"),
     }
     try:
-        submit_cmd = "sudo -n %s submit" % args.remote
+        # ``--shadow``: вердикты НЕ пишутся в корпус — только отчёт о прогоне.
+        # Так демон может работать, не занимая посты и не вытесняя облачные
+        # вердикты, пока качество локальной модели не измерено.
+        submit_cmd = "sudo -n %s submit%s" % (args.remote, " --shadow" if args.shadow else "")
         out = _ssh(
             args.ssh_host,
             submit_cmd,
@@ -300,6 +335,28 @@ def main() -> int:
     ap.add_argument("--remote", default=DEFAULT_REMOTE, help="путь к обёртке моста на боксе")
     ap.add_argument("--model-url", default=DEFAULT_MODEL_URL, help="база OpenAI-совместимого API")
     ap.add_argument("--model-name", default="local", help="имя модели в запросе")
+    ap.add_argument(
+        "--engine",
+        choices=["openai", "opencode"],
+        default="openai",
+        help="движок: openai — OpenAI-совместимый (llama-server, LM Studio); "
+        "opencode — сессионный протокол opencode serve v2",
+    )
+    ap.add_argument(
+        "--model-chain",
+        default="",
+        help="цепочка моделей через запятую (opencode): первая живая закрывает вызов",
+    )
+    ap.add_argument(
+        "--model-password-file",
+        default="",
+        help="файл с паролем opencode serve (по умолчанию ~/.config/opencode/service.json)",
+    )
+    ap.add_argument(
+        "--shadow",
+        action="store_true",
+        help="режим тени: вердикты НЕ пишутся в корпус, только отчёт о прогоне",
+    )
     ap.add_argument("--limit", type=int, default=20, help="постов в батч")
     ap.add_argument("--regions", default="", help="коды районов через запятую (пусто = все)")
     ap.add_argument(
@@ -320,8 +377,15 @@ def main() -> int:
 
     log_path = Path(args.log)
     print(
-        "локальный движок: ssh=%s модель=%s (%s) интервал=%d с"
-        % (args.ssh_host, args.model_url, args.model_name, args.interval),
+        "локальный движок: ssh=%s движок=%s модель=%s (%s) интервал=%d с%s"
+        % (
+            args.ssh_host,
+            args.engine,
+            args.model_url,
+            args.model_name,
+            args.interval,
+            " РЕЖИМ ТЕНИ" if args.shadow else "",
+        ),
         flush=True,
     )
     while True:
