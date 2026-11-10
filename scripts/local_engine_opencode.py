@@ -178,6 +178,7 @@ def chat(
     model: Optional[str] = None,
     chain: Optional[List[str]] = None,
     timeout: float = 120.0,
+    model_timeout: float = 120.0,
     user_name: str = DEFAULT_USER,
     password_file: Optional[Path] = None,
 ) -> Dict[str, Any]:
@@ -185,6 +186,13 @@ def chat(
 
     ``{"ok": True, "content", "model", "usage"}`` либо
     ``{"ok": False, "reason", "detail"}``. Никогда не бросает.
+
+    ``timeout`` — потолок **всего** вызова (все модели цепочки), ``model_timeout``
+    — потолок **одной** модели. Разделение существенно: free-тир-модель на
+    большом чанке уходит в рассуждение и молчит (замер 10.11 на ПК: чанк из 23
+    постов не ответил за 10 минут), и без потолка на модель весь бюджет уходил
+    на одну зависшую голову цепочки — остальные не начинали. Это тот же класс,
+    что описан в ADR-0014 для боевого контура.
     """
     if not (user or "").strip():
         return {"ok": False, "reason": "empty_prompt"}
@@ -257,7 +265,7 @@ def chat(
             auth=auth,
             body=None,
             method="POST",
-            timeout=timeout,
+            timeout=max(5.0, min(timeout, model_timeout)),
         )
         if status == 0 or status >= 400:
             _close_session(base_url, session_id, auth)
