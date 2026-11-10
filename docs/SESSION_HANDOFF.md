@@ -170,7 +170,7 @@ HTTP 405 (nginx), HTTP 5xx (страница «temporarily unavailable») и HTT
   - `9ab2aa3` — PR #1042: канон по P223 (канал поднят, приём выдачи = политика
     приёма + перепредложение), письмо мозгу с этой поправкой;
   - `f47f324` — PR #1043: МАМА-админ подтверждён фактом, баланс DeepSeek.
-- **Прод:** `4e2d0a7` (код), 4/4 сервиса active, health 200, smoke `mi/novost` —
+- **Прод:** `d7adaa0` (код), 4/4 сервиса active, health 200, smoke `mi/novost` —
     `принесено=280, после отбора=4, would_publish=1, communities=14`.
 - **Раздел промтов:** токен в комнате `setka`, выдача id=26 в `karman-hotline` —
     `active`; `scripts/prompts_fetch.py` на боксе отдаёт «раздел пуст» (200).
