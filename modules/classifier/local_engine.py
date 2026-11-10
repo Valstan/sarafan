@@ -34,8 +34,9 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
-from sqlalchemy import func, select
+from sqlalchemy import func, literal_column, select
 
+import database.models  # noqa: F401 — регистрация моделей: без неё не собрать запросы
 from database.models_extended import (
     ClassificationCorrection,
     ClassificationRule,
@@ -183,6 +184,74 @@ def read_runs(limit: int = 200) -> List[Dict[str, Any]]:
     return rows[-limit:]
 
 
+def _trunc(unit: str, column: Any):
+    """``date_trunc`` с **литералом** единицы измерения, а не с биндом.
+
+    ``func.date_trunc("day", col)`` SQLAlchemy рендерит как ``date_trunc($1, col)``:
+    единица уезжает параметром. Тот же вызов в ``GROUP BY`` получает другой номер
+    параметра ($3), и Postgres перестаёт узнавать выражение — «column must appear
+    in the GROUP BY clause». Поймано на проде 10.11: 500 на
+    ``/api/local-engine/stats``. Литерал даёт одинаковый текст в SELECT, GROUP BY
+    и ORDER BY, и группировка проходит.
+    """
+    if unit not in ("day", "week"):
+        raise ValueError("неизвестная единица усечения: %r" % unit)
+    return func.date_trunc(literal_column("'%s'" % unit), column)
+
+
+def _daily_by_source_query():
+    """Вердикты по источникам по дням (30 дней)."""
+    day = _trunc("day", ContentClassification.created_at)
+    return (
+        select(
+            ContentClassification.source,
+            day.label("d"),
+            func.count().label("n"),
+        )
+        .where(ContentClassification.created_at >= datetime.utcnow() - timedelta(days=30))
+        .group_by(ContentClassification.source, day)
+        .order_by(day)
+    )
+
+
+def _weekly_quality_query():
+    """Согласие оператора по источнику по неделям (60 дней)."""
+    week = _trunc("week", ClassificationCorrection.created_at)
+    return (
+        select(
+            week.label("w"),
+            ContentClassification.source,
+            ClassificationCorrection.outcome,
+            func.count().label("n"),
+        )
+        .join(
+            ClassificationCorrection,
+            ClassificationCorrection.classification_id == ContentClassification.id,
+        )
+        .where(ClassificationCorrection.created_at >= datetime.utcnow() - timedelta(days=60))
+        .group_by(
+            week,
+            ContentClassification.source,
+            ClassificationCorrection.outcome,
+        )
+        .order_by(week)
+    )
+
+
+def _corrections_by_week_query():
+    """Поток коррекций по неделям (60 дней)."""
+    week = _trunc("week", ClassificationCorrection.created_at)
+    return (
+        select(
+            week.label("w"),
+            func.count().label("n"),
+        )
+        .where(ClassificationCorrection.created_at >= datetime.utcnow() - timedelta(days=60))
+        .group_by(week)
+        .order_by(week)
+    )
+
+
 async def stats(session) -> Dict[str, Any]:
     """Статистика для панели: движок, качество, обучение.
 
@@ -196,21 +265,7 @@ async def stats(session) -> Dict[str, Any]:
     """
     runs = read_runs(limit=500)
 
-    by_source_day = (
-        await session.execute(
-            select(
-                ContentClassification.source,
-                func.date_trunc("day", ContentClassification.created_at).label("d"),
-                func.count().label("n"),
-            )
-            .where(ContentClassification.created_at >= datetime.utcnow() - timedelta(days=30))
-            .group_by(
-                ContentClassification.source,
-                func.date_trunc("day", ContentClassification.created_at),
-            )
-            .order_by(func.date_trunc("day", ContentClassification.created_at))
-        )
-    ).all()
+    by_source_day = (await session.execute(_daily_by_source_query())).all()
 
     verdicts_by_source = {str(src or "?"): int(n) for src, _d, n in by_source_day}
     daily: Dict[str, List[Dict[str, Any]]] = {}
@@ -261,27 +316,7 @@ async def stats(session) -> Dict[str, Any]:
     }
 
     # Динамика качества по неделям — «растёт ли фильтрация».
-    weekly_rows = (
-        await session.execute(
-            select(
-                func.date_trunc("week", ClassificationCorrection.created_at).label("w"),
-                ContentClassification.source,
-                ClassificationCorrection.outcome,
-                func.count().label("n"),
-            )
-            .join(
-                ClassificationCorrection,
-                ClassificationCorrection.classification_id == ContentClassification.id,
-            )
-            .where(ClassificationCorrection.created_at >= datetime.utcnow() - timedelta(days=60))
-            .group_by(
-                func.date_trunc("week", ClassificationCorrection.created_at),
-                ContentClassification.source,
-                ClassificationCorrection.outcome,
-            )
-            .order_by(func.date_trunc("week", ClassificationCorrection.created_at))
-        )
-    ).all()
+    weekly_rows = (await session.execute(_weekly_quality_query())).all()
     weekly: Dict[str, Dict[str, Dict[str, int]]] = {}
     for w, src, outcome, n in weekly_rows:
         week = str(w)[:10]
@@ -290,17 +325,7 @@ async def stats(session) -> Dict[str, Any]:
             inner[outcome] += int(n or 0)
 
     # Обучение: коррекции по неделям и судьба выученных правил.
-    corr_rows = (
-        await session.execute(
-            select(
-                func.date_trunc("week", ClassificationCorrection.created_at).label("w"),
-                func.count().label("n"),
-            )
-            .where(ClassificationCorrection.created_at >= datetime.utcnow() - timedelta(days=60))
-            .group_by(func.date_trunc("week", ClassificationCorrection.created_at))
-            .order_by(func.date_trunc("week", ClassificationCorrection.created_at))
-        )
-    ).all()
+    corr_rows = (await session.execute(_corrections_by_week_query())).all()
     corrections_by_week = [{"week": str(w)[:10], "n": int(n)} for w, n in corr_rows]
 
     rule_rows = (
