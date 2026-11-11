@@ -42,6 +42,41 @@
             {% endfor %}
         </div>
 
+        <!-- Пилот #386, шаг 1: слой условий. Условие показывается вместе со
+             ссылкой на источник — человек должен сам открыть источник и
+             проверить, что там написано именно это. Условия без источника
+             не бывает: неизвестное — молчит (см. modules/service_conditions.py). -->
+        <div class="mt-4">
+            <h2 class="h6 mb-1">Условия услуг</h2>
+            <p class="text-secondary small mb-3">
+                Что положено и что для этого нужно. Каждое условие — со ссылкой на источник.
+            </p>
+            {% for card in condition_cards %}
+                {% if card.conditions %}
+                <div class="card shadow-sm mb-3">
+                    <div class="card-body p-3">
+                        <div class="fw-semibold mb-2">{{ card.emoji }} {{ card.title }}</div>
+                        {% for c in card.conditions %}
+                        <div class="border-start border-2 border-light ps-3 mb-3">
+                            <div class="fw-semibold small">{{ c.question }}</div>
+                            <div class="small mt-1">{{ c.then }}</div>
+                            {% if c.documents %}
+                            <div class="small mt-1 text-secondary">
+                                Документы: {{ c.documents | join(', ') }}
+                            </div>
+                            {% endif %}
+                            <div class="small mt-1 text-secondary">Отвечает: {{ c.owner }}</div>
+                            <div class="small mt-1">
+                                <a href="{{ c.source_ref }}" rel="noopener noreferrer" target="_blank">источник</a>
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                {% endif %}
+            {% endfor %}
+        </div>
+
         <p class="text-center text-secondary small mt-4 mb-0">
             Единый вход «Сервисы Малмыжа» — <a class="link-secondary" href="/login">войти</a>
         </p>
