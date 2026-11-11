@@ -50,16 +50,135 @@ logger = logging.getLogger(__name__)
 #: Источник вердиктов локального движка в ``content_classifications.source``.
 SOURCE_LOCAL = "local"
 
-#: Человеческие названия источников вердикта. ``source`` в базе — служебный
+#: Человеческие названия **путей доставки** вердикта. ``source`` в базе — служебный
 #: ключ (``routine`` / ``api`` / ``headless`` / ``local``), и в панели он должен
-#: читаться, а не шифровать: кто судил пост — рутинная облачная рутина, приём
-#: через API, облачный headless или локальный движок на ПК.
+#: читаться, а не шифровать.
+#:
+#: ⚠️ **Путь — это не движок.** Одна и та же волна (``headless``) умеет считать и
+#: платным Дипсиком, и бесплатным Опенкодом: движок выбирает ``CLASSIFIER_ENGINE``.
+#: Панель, которая зовёт «облако» = «Дипсик», врёт на 23 813 вердиктов за месяц —
+#: столько набрала бесплатная ветка Опенкода внутри той же волны. Движок лежит в
+#: ``content_classifications.model``, и считать его надо по нему (см.
+#: :func:`engine_of_model`).
 SOURCE_LABELS: Dict[str, str] = {
-    "routine": "рутина",
-    "api": "через API",
-    "headless": "облако",
-    "local": "локальный",
+    "headless": "Волна на сервере",
+    "local": "Демон Опенкода",
+    "routine": "Старая рутина (удалена)",
+    "api": "Приём готовых вердиктов",
 }
+
+#: Живой ли путь. ``routine`` — облачная рутина на Клоде: владелец её удалил
+#: физически, денег она не тратит и вердиктов больше не пишет. Показывать её
+#: живой нельзя — в панели она выглядела как «ещё один источник, который
+#: обрабатывает посты».
+SOURCE_ALIVE: Dict[str, bool] = {
+    "headless": True,
+    "local": True,
+    "routine": False,
+    "api": True,
+}
+
+#: По одной строке на путь: что это и откуда взялось.
+SOURCE_NOTES: Dict[str, str] = {
+    "headless": "часовая волна на боксе. Движок выбирает переключатель "
+    "CLASSIFIER_ENGINE: Дипсик (платно) или Опенкод (бесплатно).",
+    "local": "Демон Опенкода на боксе: раз в 5 минут забирает посты, которые "
+    "остались без вердикта, и считает их бесплатными моделями.",
+    "routine": "Облачная рутина на Клоде. Удалена владельцем 11.11, денег не "
+    "тратит, вердикты в корпусе — только до 06.11.",
+    "api": "Приём готовых вердиктов по POST /api/classifier/verdicts.",
+}
+
+# ───────── Движки: кто ответил на вердикт ─────────
+
+#: ``source`` — путь, ``model`` — движок. Движок достаётся из имени модели.
+ENGINE_DEEPSEEK = "deepseek"
+ENGINE_OPENCODE = "opencode"
+ENGINE_UNKNOWN = "unknown"
+
+ENGINE_LABELS: Dict[str, str] = {
+    ENGINE_DEEPSEEK: "Дипсик — платно, по ключу",
+    ENGINE_OPENCODE: "Опенкод — бесплатный тир",
+    ENGINE_UNKNOWN: "неизвестно (движок не записан)",
+}
+
+#: Человеческие названия моделей: ключ — как модель лежит в ``model``.
+MODEL_LABELS: Dict[str, str] = {
+    "deepseek-flash": "Дипсик V4.1 Flash",
+    "deepseek-chat": "Дипсик (алиас chat) — снят 06.11",
+    "deepseek-v4-pro": "Дипсик V4 Pro — в коде не используется",
+    "opencode/deepseek-v4.1-flash-free": "Опенкод: Дипсик V4.1 Flash",
+    "opencode/glm-5.3-flash-free": "Опенкод: GLM 5.3 Flash",
+    "opencode/longcat-2.5-preview-free": "Опенкод: LongCat 2.5",
+    "opencode/space-bunny-free": "Опенкод: Space Bunny",
+    "opencode/mimo-v2.6-flash-free": "Опенкод: Mimo v2.6 Flash",
+    "deepseek-v4.1-flash-free": "Опенкод: Дипсик V4.1 Flash",
+    "flint-40b-free": "Опенкод: Flint 40B",
+    "glm-5.3-flash-free": "Опенкод: GLM 5.3 Flash",
+}
+
+
+def engine_of_model(model: Optional[str]) -> str:
+    """Какой движок ответил — по имени модели в корпусе.
+
+    Имена в корпусе разные, и это не опечатки, а два разных пути:
+
+    * ``deepseek-flash`` / ``deepseek-chat`` / ``deepseek-v4-pro`` — **платный**
+      Дипсик по нашему ключу;
+    * ``opencode/<модель>`` — волна, посчитанная бесплатным Опенкодом
+      (движок был переключён на free-тир);
+    * ``<модель>-free`` без префикса — демон Опенкода на боксе: он зовёт
+      ``opencode serve`` и пишет модель как есть;
+    * пусто — вердикты, у которых движок не записан (старая рутина).
+
+    Функция чистая: её проверяет тест, а панель рисует по ней разрез «кем
+    ответили» — без него «облако» читалось как «Дипсик», хотя в «облаке» за
+    месяц было 23 813 вердиктов бесплатного Опенкода.
+    """
+    name = (model or "").strip().lower()
+    if not name:
+        return ENGINE_UNKNOWN
+    if name.startswith("opencode/"):
+        return ENGINE_OPENCODE
+    if name.endswith("-free"):
+        return ENGINE_OPENCODE
+    if name.startswith("deepseek"):
+        return ENGINE_DEEPSEEK
+    return ENGINE_UNKNOWN
+
+
+def model_label(model: Optional[str]) -> str:
+    """Название модели по-русски; неизвестная — как есть."""
+    name = (model or "").strip()
+    if not name:
+        return "движок не записан"
+    return MODEL_LABELS.get(name.lower(), name)
+
+
+def engine_buckets(rows: Sequence[Any]) -> Dict[str, int]:
+    """Вердикты по движку из строк ``(model, n)``.
+
+    Чистая функция — считает то, что панель показывает как «кем отвечено».
+    """
+    bucket = {ENGINE_DEEPSEEK: 0, ENGINE_OPENCODE: 0, ENGINE_UNKNOWN: 0}
+    for model, n in rows:
+        bucket[engine_of_model(str(model or ""))] += int(n or 0)
+    return bucket
+
+
+def sum_by_source(rows: Sequence[Any]) -> Dict[str, int]:
+    """Сумма вердиктов по пути доставки из строк ``(source, day, n)``.
+
+    Именно сумма: словарь «последняя строка на путь» показывал бы цифры
+    одного дня вместо окна — на проде «за 30 дней» выглядело как «за
+    вчера».
+    """
+    total: Dict[str, int] = {}
+    for src, _day, n in rows:
+        key = str(src or "?")
+        total[key] = total.get(key, 0) + int(n or 0)
+    return total
+
 
 #: Журнал прогонов локального движка (одна строка JSON на прогон).
 RUNS_LOG_PATH = Path(
@@ -285,6 +404,50 @@ def _corrections_by_week_query():
     )
 
 
+def _engine_counts_query(days: int):
+    """Вердикты по модели за окно — из этого считается, кто отвечал."""
+    return (
+        select(
+            ContentClassification.model,
+            func.count().label("n"),
+        )
+        .where(ContentClassification.created_at >= datetime.utcnow() - timedelta(days=days))
+        .group_by(ContentClassification.model)
+    )
+
+
+def _engine_by_day_query(days: int):
+    """Вердикты по модели по дням — «кто отвечал» по дням."""
+    day = _trunc("day", ContentClassification.created_at)
+    return (
+        select(
+            day.label("d"),
+            ContentClassification.model,
+            func.count().label("n"),
+        )
+        .where(ContentClassification.created_at >= datetime.utcnow() - timedelta(days=days))
+        .group_by(day, ContentClassification.model)
+        .order_by(day)
+    )
+
+
+def _last_verdict_query():
+    """Время последнего вердикта в корпусе — «жив ли классификатор»."""
+    return select(func.max(ContentClassification.created_at))
+
+
+def _source_counts_query(days: int):
+    """Вердикты по пути доставки за окно — «кто разбирает посты»."""
+    return (
+        select(
+            ContentClassification.source,
+            func.count().label("n"),
+        )
+        .where(ContentClassification.created_at >= datetime.utcnow() - timedelta(days=days))
+        .group_by(ContentClassification.source)
+    )
+
+
 async def stats(session) -> Dict[str, Any]:
     """Статистика для панели: движок, качество, обучение.
 
@@ -300,7 +463,10 @@ async def stats(session) -> Dict[str, Any]:
 
     by_source_day = (await session.execute(_daily_by_source_query())).all()
 
-    verdicts_by_source = {str(src or "?"): int(n) for src, _d, n in by_source_day}
+    # Сумма по дням, а не последняя строка: раньше здесь стоял словарь,
+    # который перетирал предыдущие дни, — и «за 30 дней» показывало цифры
+    # одного дня (на проде: 4 430 вместо 5 065 за 11.11).
+    verdicts_by_source: Dict[str, int] = sum_by_source(by_source_day)
     daily: Dict[str, List[Dict[str, Any]]] = {}
     for src, d, n in by_source_day:
         daily.setdefault(str(src or "?"), []).append({"day": str(d)[:10], "n": int(n)})
@@ -371,6 +537,109 @@ async def stats(session) -> Dict[str, Any]:
 
     total_run_posts = sum(int(r.get("verdicts_sent") or 0) for r in runs)
     total_run_recorded = sum(int(r.get("recorded") or 0) for r in runs)
+
+    # ── Кто отвечал: движок по имени модели ──
+    # Путь (`source`) и движок (`model`) — разные вещи: одна волна считает и
+    # платным Дипсиком, и бесплатным Опенкодом. Панель показывает оба среза.
+    engine_windows: Dict[str, Dict[str, Any]] = {}
+    models_30d: List[Dict[str, Any]] = []
+    for win, days in (("24h", 1), ("7d", 7), ("30d", 30)):
+        rows = (await session.execute(_engine_counts_query(days))).all()
+        bucket = engine_buckets(rows)
+        by_model: Dict[str, int] = {}
+        for m, n in rows:
+            name = str(m or "")
+            by_model[name] = by_model.get(name, 0) + int(n or 0)
+        engine_windows[win] = {
+            "by_engine": bucket,
+            "total": sum(bucket.values()),
+            "by_model": by_model,
+        }
+        if win == "30d":
+            models_30d = [
+                {
+                    "model": name,
+                    "label": model_label(name),
+                    "engine": engine_of_model(name),
+                    "n": int(n),
+                }
+                for name, n in sorted(by_model.items(), key=lambda kv: -kv[1])
+            ]
+
+    day_rows = (await session.execute(_engine_by_day_query(30))).all()
+    engine_by_day: List[Dict[str, Any]] = []
+    day_map: Dict[str, Dict[str, int]] = {}
+    for d, m, n in day_rows:
+        day = str(d)[:10]
+        bucket = day_map.setdefault(
+            day, {ENGINE_DEEPSEEK: 0, ENGINE_OPENCODE: 0, ENGINE_UNKNOWN: 0}
+        )
+        bucket[engine_of_model(str(m or ""))] += int(n or 0)
+    for day in sorted(day_map, reverse=True):
+        row = {"day": day}
+        row.update(day_map[day])
+        engine_by_day.append(row)
+
+    last_verdict = (await session.execute(_last_verdict_query())).scalar()
+
+    src_24h = {
+        str(s or "?"): int(n or 0)
+        for s, n in (await session.execute(_source_counts_query(1))).all()
+    }
+
+    # ── Сейчас: на каком движке считает волна ──
+    mode = (os.getenv("CLASSIFIER_ENGINE") or "").strip().lower() or "deepseek"
+    engine_now = {
+        "mode": mode,
+        "label": ENGINE_LABELS[ENGINE_OPENCODE if mode == "opencode" else ENGINE_DEEPSEEK],
+        "env": "CLASSIFIER_ENGINE",
+    }
+
+    # ── Демон Опенкода: живость и окна ──
+    now = datetime.now(timezone.utc)
+
+    def _run_ts(run: Dict[str, Any]) -> Optional[datetime]:
+        raw = str(run.get("ts") or "").strip()
+        if not raw:
+            return None
+        try:
+            return datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    def _runs_in(hours: int) -> List[Dict[str, Any]]:
+        out = []
+        for r in runs:
+            ts = _run_ts(r)
+            if ts is not None and ts >= now - timedelta(hours=hours):
+                out.append(r)
+        return out
+
+    def _runs_summary(subset: List[Dict[str, Any]]) -> Dict[str, Any]:
+        return {
+            "runs": len(subset),
+            "posts": sum(int(r.get("posts") or r.get("verdicts_sent") or 0) for r in subset),
+            "verdicts_sent": sum(int(r.get("verdicts_sent") or 0) for r in subset),
+            "recorded": sum(int(r.get("recorded") or 0) for r in subset),
+            "errors": sum(1 for r in subset if r.get("error")),
+        }
+
+    runs_24h = _runs_in(24)
+    runs_7d = _runs_in(24 * 7)
+    last_run_ts = _run_ts(runs[-1]) if runs else None
+    daemon = {
+        "runs_24h": _runs_summary(runs_24h),
+        "runs_7d": _runs_summary(runs_7d),
+        "all_time": _runs_summary(runs),
+        "last_run_ts": str(last_run_ts) if last_run_ts else None,
+        "minutes_ago": (
+            round((now - last_run_ts).total_seconds() / 60.0, 1) if last_run_ts else None
+        ),
+        "models": sorted(
+            {str(r.get("model") or "?") for r in runs if r.get("model")},
+        ),
+    }
+
     return {
         "runs": runs[-50:],
         "runs_total": len(runs),
@@ -379,10 +648,28 @@ async def stats(session) -> Dict[str, Any]:
         "runs_errors": sum(1 for r in runs if r.get("error")),
         "last_run": runs[-1] if runs else None,
         "source_labels": dict(SOURCE_LABELS),
+        "source_meta": {
+            key: {
+                "label": SOURCE_LABELS.get(key, key),
+                "alive": SOURCE_ALIVE.get(key, True),
+                "note": SOURCE_NOTES.get(key, ""),
+            }
+            for key in sorted(set(SOURCE_LABELS) | set(verdicts_by_source))
+        },
         "verdicts_by_source": verdicts_by_source,
+        "verdicts_by_source_24h": src_24h,
         "daily_by_source": daily,
         "quality_by_source": quality,
         "weekly_quality": weekly,
         "corrections_by_week": corrections_by_week,
         "rules_by_status": {str(s or "?"): int(n) for s, n in rule_rows},
+        # ── разрез «кем ответили» ──
+        "engine_labels": dict(ENGINE_LABELS),
+        "model_labels": dict(MODEL_LABELS),
+        "engine_windows": engine_windows,
+        "engine_by_day": engine_by_day,
+        "models_30d": models_30d,
+        "engine_now": engine_now,
+        "daemon": daemon,
+        "last_verdict_at": str(last_verdict) if last_verdict else None,
     }

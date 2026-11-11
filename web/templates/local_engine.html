@@ -6,10 +6,10 @@
 
   <div class="d-flex align-items-center justify-content-between mb-3">
     <div>
-      <h4 class="mb-0"><i class="bi bi-cpu"></i> Локальный движок</h4>
+      <h4 class="mb-0"><i class="bi bi-cpu"></i> Движок классификации</h4>
       <div class="text-muted small">
-        Мост Pull: демон на ПК владельца забирает батч по SSH, считает локально и
-        отдаёт вердикты. Облачный DeepSeek забирает то, что локальный не успел.
+        Кто разбирает посты на «наши» и «не наши», какая модель отвечает,
+        сколько это стоит и где что-то сломалось.
       </div>
     </div>
     <button class="btn btn-sm btn-outline-secondary" id="btn-refresh">
@@ -19,31 +19,100 @@
 
   <div id="alert-box"></div>
 
-  <!-- ───────── Движок ───────── -->
-  <h6 class="text-uppercase text-muted small mb-2">Движок</h6>
-  <div class="row g-2 mb-3" id="engine-cards">
+  <!-- ───────── Как это устроено ───────── -->
+  <div class="card mb-3">
+    <div class="card-header py-2"><i class="bi bi-diagram-3"></i> Как это устроено</div>
+    <div class="card-body py-2 small">
+      <p class="mb-2">
+        Пост разбирает <b>тот, кто забрал его первым</b>: у поста один ключ
+        (<code>lip</code>), и второй движок его уже не трогает. Поэтому «волна»
+        и «демон» не делят посты — они забирают разное.
+      </p>
+      <ul class="mb-2">
+        <li>
+          <b>Волна на сервере</b> — часовая волна на боксе, разбирает основную
+          массу постов. Какая модель отвечает, решает переключатель
+          <code>CLASSIFIER_ENGINE</code>: <b>Дипсик</b> (платно, по нашему ключу)
+          или <b>Опенкод</b> (бесплатный тир).
+        </li>
+        <li>
+          <b>Демон Опенкода</b> — отдельный крон раз в 5 минут: забирает посты,
+          которые <b>остались без вердикта</b>, и считает их бесплатными моделями
+          Опенкода. Обычно это 2 поста за тик (по одному на район) — остальное к
+          этому моменту уже разобрала волна.
+        </li>
+        <li>
+          <b>Старая рутина</b> — облачная рутина на Клоде. Удалена 11.11, денег
+          не тратит и посты больше не разбирает; её вердикты в корпусе — только
+          до 06.11.
+        </li>
+      </ul>
+      <p class="mb-0 text-muted">
+        Своей нейросети на компьютере владельца больше нет: бесплатные модели
+        крутит Опенкод на боксе, платный Дипсик отвечает по ключу API.
+      </p>
+    </div>
+  </div>
+
+  <!-- ───────── Сейчас ───────── -->
+  <h6 class="text-uppercase text-muted small mb-2">Сейчас</h6>
+  <div class="text-muted small mb-2">
+    «За сутки» — скользящее окно последних 24 часов. Таблица по дням ниже —
+    календарные сутки по UTC, поэтому цифры могут расходиться на стыке дня.
+  </div>
+  <div class="row g-2 mb-3">
     <div class="col-6 col-md-3"><div class="card h-100"><div class="card-body py-2">
-      <div class="text-muted small">Прогонов</div><div class="h4 mb-0" id="c-runs">—</div>
+      <div class="text-muted small">Волну считает</div>
+      <div class="h6 mb-0" id="c-engine-now">—</div>
     </div></div></div>
     <div class="col-6 col-md-3"><div class="card h-100"><div class="card-body py-2">
-      <div class="text-muted small">Постов обработано</div><div class="h4 mb-0" id="c-posts">—</div>
+      <div class="text-muted small">Вердиктов за сутки</div>
+      <div class="h4 mb-0" id="c-v-24h">—</div>
+      <div class="text-muted small" id="c-v-24h-split">—</div>
     </div></div></div>
     <div class="col-6 col-md-3"><div class="card h-100"><div class="card-body py-2">
-      <div class="text-muted small">Вердиктов записано</div><div class="h4 mb-0" id="c-recorded">—</div>
+      <div class="text-muted small">Демон Опенкода за сутки</div>
+      <div class="h4 mb-0" id="c-daemon">—</div>
+      <div class="text-muted small" id="c-daemon-sub">—</div>
     </div></div></div>
     <div class="col-6 col-md-3"><div class="card h-100"><div class="card-body py-2">
-      <div class="text-muted small">Прогонов с ошибкой</div><div class="h4 mb-0" id="c-errors">—</div>
+      <div class="text-muted small">Последний вердикт</div>
+      <div class="h4 mb-0" id="c-last">—</div>
+      <div class="text-muted small" id="c-last-sub">—</div>
     </div></div></div>
   </div>
 
+  <!-- ───────── Кто отвечал ───────── -->
+  <div class="row g-3 mb-3">
+    <div class="col-12 col-lg-6">
+      <div class="card h-100">
+        <div class="card-header py-2">Кем отвечено (30 дней)</div>
+        <div class="card-body" id="models-box"><span class="text-muted">загрузка…</span></div>
+      </div>
+    </div>
+    <div class="col-12 col-lg-6">
+      <div class="card h-100">
+        <div class="card-header py-2">Кто отвечал по календарным дням (UTC, 30 дней)</div>
+        <div class="card-body" id="engine-days-box"><span class="text-muted">загрузка…</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ───────── Пути доставки ───────── -->
+  <h6 class="text-uppercase text-muted small mb-2">Кто разбирает посты (пути доставки)</h6>
   <div class="card mb-3">
-    <div class="card-header py-2"><i class="bi bi-clock-history"></i> Последние прогоны</div>
+    <div class="card-body" id="sources-box"><span class="text-muted">загрузка…</span></div>
+  </div>
+
+  <!-- ───────── Демон ───────── -->
+  <h6 class="text-uppercase text-muted small mb-2">Демон Опенкода: последние прогоны</h6>
+  <div class="card mb-3">
     <div class="table-responsive">
       <table class="table table-sm mb-0 align-middle">
         <thead><tr>
-          <th>Время (UTC)</th><th>Модель</th><th class="text-end">Постов</th>
+          <th>Время (UTC)</th><th>Чем ответил</th><th class="text-end">Постов</th>
           <th class="text-end">Вердиктов</th><th class="text-end">Записано</th>
-          <th class="text-end">Дублей</th><th class="text-end">Мс</th>
+          <th class="text-end">Пропущено дубликатов</th><th class="text-end">Время, мс</th>
           <th>Районы</th><th>Ошибка</th>
         </tr></thead>
         <tbody id="runs-body"><tr><td colspan="9" class="text-muted">загрузка…</td></tr></tbody>
@@ -54,20 +123,20 @@
   <!-- ───────── Качество ───────── -->
   <h6 class="text-uppercase text-muted small mb-2">Качество (согласие оператора)</h6>
   <div class="text-muted small mb-2">
-    Источники — это движки, которыми судились посты:
-    <b>рутина</b> — старая облачная рутина, <b>облако</b> — headless на DeepSeek,
-    <b>локальный</b> — движок на ПК (opencode, free-тир), <b>через API</b> — приём готовых вердиктов.
+    Считается по правкам оператора в ленте: «согласен» — значит вердикт верный,
+    «исправлен» — оператор поправил. Сравнивается отдельно по путям доставки
+    (см. блок выше): у каждого пути своя доля согласия.
   </div>
   <div class="row g-3 mb-3">
     <div class="col-12 col-lg-6">
       <div class="card h-100">
-        <div class="card-header py-2">Согласие по источнику вердикта</div>
+        <div class="card-header py-2">Согласие по пути доставки</div>
         <div class="card-body" id="quality-box"><span class="text-muted">загрузка…</span></div>
       </div>
     </div>
     <div class="col-12 col-lg-6">
       <div class="card h-100">
-        <div class="card-header py-2">Растёт ли качество (недельные окна)</div>
+        <div class="card-header py-2">Растёт ли качество (по неделям)</div>
         <div class="card-body" id="weekly-box"><span class="text-muted">загрузка…</span></div>
       </div>
     </div>
@@ -84,16 +153,10 @@
     </div>
     <div class="col-12 col-lg-6">
       <div class="card h-100">
-        <div class="card-header py-2">Коррекции оператора по неделям</div>
+        <div class="card-header py-2">Правки оператора по неделям</div>
         <div class="card-body" id="corr-box"><span class="text-muted">загрузка…</span></div>
       </div>
     </div>
-  </div>
-
-  <!-- ───────── Движение вердиктов ───────── -->
-  <h6 class="text-uppercase text-muted small mb-2 mt-3">Вердикты по источникам (30 дней)</h6>
-  <div class="card">
-    <div class="card-body" id="daily-box"><span class="text-muted">загрузка…</span></div>
   </div>
 
 </div>
