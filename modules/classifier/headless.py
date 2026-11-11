@@ -50,7 +50,7 @@ import time
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-from config.opencode import engine_enabled
+from config.opencode import engine_enabled, paid_fallback_enabled
 from modules.classifier.schema import ClassifierVerdict, parse_verdict_loose
 from modules.deepseek_client import chat as _deepseek_chat
 
@@ -58,30 +58,66 @@ logger = logging.getLogger(__name__)
 
 
 def chat(**kwargs: Any) -> Dict[str, Any]:
-    """Вызов модели текущим движком. ``CLASSIFIER_ENGINE=opencode`` → харнесс.
+    """Вызов модели: **free-тир — основной, платный Дипсик — страховка**.
 
-    Переключатель стоит здесь, а не в ``classify_posts``/тасках: один рубеж на
-    все пути классификации (фоновая таска, prepublish внутри волны, кнопка в
-    UI), а DeepSeek остаётся дефолтом — откат пилота без деплоя кода.
+    Решение владельца 11.11: «переключи на Опенкод, там фри-тир, ну когда
+    фритир отвалится — работай платным апи Дипсика, а на следующие сутки снова
+    включай опенкод».
+
+    Раньше переключатель выбирал **один** движок, и при
+    ``CLASSIFIER_ENGINE=opencode`` волна целиком шла в free-тир. Когда тот
+    отваливался (замер 11.11: квота аккаунта кончена — «Free usage limit
+    reached»), волна оставалась без вердиктов: fail-open, посты по обычным
+    фильтрам.
+
+    Теперь отказ free-тира — не отказ волны: платный Дипсик закрывает этот
+    чанк, а как только квота сбросится, следующий вызов снова пойдёт в
+    free-тир (предохранитель открыт на ``ENGINE_BREAKER_QUOTA_COOLDOWN``
+    секунд — потом free пробуется снова).
+
+    Предохранитель остаётся **счётчиком free-тира**: успех платного Дипсика его
+    не закрывает. Иначе квота, которую нельзя снять повтором, опрашивалась бы
+    на каждом чанке и платный Дипсик никогда бы не успевал.
 
     Здесь же стоит предохранитель: под лимитом free-тира вызов возвращает отказ
     сразу, не трогая сеть (``modules.engine_guard``). Рубеж один по той же
     причине — второй экземпляр решения разошёлся бы с первым молча.
+
+    Отключается одним env: ``CLASSIFIER_PAID_FALLBACK=0`` — когда платить
+    нельзя (счёт пуст, оплата закрыта), волна идёт по обычным фильтрам, а не
+    тратит.
     """
     from modules import engine_guard
 
-    if not engine_guard.allow():
-        return {"ok": False, "reason": "breaker_open"}
+    if not engine_enabled():
+        result = _deepseek_chat(**kwargs)
+        engine_guard.note_result(bool(result.get("ok")), _guard_reason(result))
+        return result
 
-    if engine_enabled():
+    # Опенкод (free-тир) — основной движок.
+    if engine_guard.allow():
         from modules.opencode_engine import chat as _opencode_chat
 
         result = _opencode_chat(**kwargs)
+        if result.get("ok"):
+            engine_guard.note_result(True)
+            return result
+        reason = _guard_reason(result)
+        engine_guard.note_result(False, reason)
+        logger.warning(
+            "headless: free-тир не ответил (%s) — закрываем чанк платным Дипсиком",
+            reason,
+        )
+        if not paid_fallback_enabled():
+            return result
     else:
-        result = _deepseek_chat(**kwargs)
+        if not paid_fallback_enabled():
+            return {"ok": False, "reason": "breaker_open"}
+        logger.info("headless: предохранитель free-тира открыт — закрываем платным Дипсиком")
 
-    engine_guard.note_result(bool(result.get("ok")), _guard_reason(result))
-    return result
+    # Страховка. Предохранитель free-тира здесь НЕ трогаем: его успех не
+    # должен закрывать его собственный отказ.
+    return _deepseek_chat(**kwargs)
 
 
 def _guard_reason(result: Dict[str, Any]) -> str:

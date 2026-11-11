@@ -37,6 +37,7 @@ def _clean(monkeypatch):
     monkeypatch.delenv("ENGINE_BREAKER_ENABLED", raising=False)
     monkeypatch.delenv("ENGINE_BREAKER_FAILS", raising=False)
     monkeypatch.delenv("ENGINE_BREAKER_COOLDOWN", raising=False)
+    monkeypatch.delenv("CLASSIFIER_PAID_FALLBACK", raising=False)
     yield
     engine_guard.reset()
 
@@ -131,7 +132,32 @@ def engine(monkeypatch):
     return calls
 
 
-def test_chat_does_not_touch_engine_while_breaker_is_open(engine):
+def _free(monkeypatch, result):
+    """Подменить free-тир (Опенкод) на управляемый ответ."""
+    import modules.opencode_engine as opencode_engine
+
+    monkeypatch.setattr(opencode_engine, "chat", lambda **kw: dict(result))
+
+
+def _paid(monkeypatch, result=None):
+    """Подменить платный Дипсик и запомнить, звали ли его."""
+    calls = []
+
+    def fake(**kwargs):
+        calls.append(kwargs)
+        return dict(result or {"ok": True, "content": "{}", "model": "deepseek-flash"})
+
+    monkeypatch.setattr(headless, "_deepseek_chat", fake)
+    return calls
+
+
+def test_chat_does_not_touch_engine_while_breaker_is_open(engine, monkeypatch):
+    """Открытый предохранитель снимает вызов free-тира до сети.
+
+    Страховка (платный Дипсик) выключена — иначе «до сети» относилось бы
+    только к бесплатному вызову.
+    """
+    monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "0")
     _fail("http_429", 3)
 
     result = headless.chat(user="три поста", system="постулаты")
@@ -142,6 +168,7 @@ def test_chat_does_not_touch_engine_while_breaker_is_open(engine):
 
 def test_chat_reports_throttle_and_opens_breaker(engine, monkeypatch):
     monkeypatch.setattr(headless, "engine_enabled", lambda: True)
+    monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "0")
 
     import modules.opencode_engine as opencode_engine
 
@@ -161,6 +188,85 @@ def test_chat_success_resets_counter(engine, monkeypatch):
     _fail("http_429", 2)
     headless.chat(user="пост")
     assert engine_guard.snapshot()["failures_in_row"] == 0
+
+
+# --- 11.11: free-тир — основной, платный Дипсик — страховка ---
+
+
+def test_free_engine_failure_is_closed_by_paid_deepseek(monkeypatch):
+    """Отказ free-тира — не отказ волны: чанк закрывает платный Дипсик.
+
+    Решение владельца 11.11: «на Опенкод, там фри-тир, ну когда фритир
+    отвалится — работай платным апи Дипсика». До этого переключатель выбирал
+    один движок, и волна на исчерпанной квоте оставалась без вердиктов.
+    """
+    monkeypatch.setattr(headless, "engine_enabled", lambda: True)
+    _free(monkeypatch, {"ok": False, "reason": "quota_exhausted", "quota": True})
+    paid = _paid(monkeypatch)
+
+    result = headless.chat(user="пост")
+
+    assert result["ok"] is True, "волна обязана получить вердикт"
+    assert result["model"] == "deepseek-flash"
+    assert len(paid) == 1, "платный Дипсик обязан закрыть чанк"
+
+
+def test_paid_fallback_can_be_switched_off(monkeypatch):
+    """Счёт пуст — платить нельзя: волна идёт по обычным фильтрам."""
+    monkeypatch.setattr(headless, "engine_enabled", lambda: True)
+    monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "0")
+    _free(monkeypatch, {"ok": False, "reason": "quota_exhausted", "quota": True})
+    paid = _paid(monkeypatch)
+
+    result = headless.chat(user="пост")
+
+    assert result["ok"] is False
+    assert paid == [], "при выключенной страховке платный Дипсик не зовётся"
+
+
+def test_open_breaker_goes_straight_to_paid(monkeypatch):
+    """Предохранитель открыт — free не трогаем, сразу платный Дипсик."""
+    monkeypatch.setattr(headless, "engine_enabled", lambda: True)
+    free_calls = []
+
+    import modules.opencode_engine as opencode_engine
+
+    monkeypatch.setattr(opencode_engine, "chat", lambda **kw: free_calls.append(kw) or {"ok": True})
+    paid = _paid(monkeypatch)
+    engine_guard.note_result(False, "quota_exhausted")
+
+    result = headless.chat(user="пост")
+
+    assert result["ok"] is True
+    assert free_calls == [], "открытый предохранитель обязан снимать вызов free-тира до сети"
+    assert len(paid) == 1
+
+
+def test_paid_success_does_not_close_free_breaker(monkeypatch):
+    """Успех платного Дипсика не закрывает паузу free-тира.
+
+    Иначе квота, которую нельзя снять повтором, опрашивалась бы на каждом
+    чанке — и волна платила бы, ни разу не попробовав бесплатный путь.
+    """
+    monkeypatch.setattr(headless, "engine_enabled", lambda: True)
+    _free(monkeypatch, {"ok": False, "reason": "quota_exhausted", "quota": True})
+    _paid(monkeypatch)
+
+    headless.chat(user="пост")
+
+    assert engine_guard.allow() is False, "пауза free-тира обязана остаться"
+
+
+def test_free_success_never_calls_paid(monkeypatch):
+    """Пока free-тир живой, платный Дипсик не зовётся вовсе."""
+    monkeypatch.setattr(headless, "engine_enabled", lambda: True)
+    _free(monkeypatch, {"ok": True, "content": "{}", "model": "deepseek-v4.1-flash-free"})
+    paid = _paid(monkeypatch)
+
+    result = headless.chat(user="пост")
+
+    assert result["model"] == "deepseek-v4.1-flash-free"
+    assert paid == [], "бесплатный ответ платного звать не должен"
 
 
 def test_quota_opens_breaker_immediately_with_long_fuse(clock, monkeypatch):
@@ -191,6 +297,8 @@ def test_quota_opens_breaker_immediately_with_long_fuse(clock, monkeypatch):
 def test_headless_passes_quota_flag_to_breaker(engine, clock, monkeypatch):
     """Флаг ``quota`` из движка становится отдельной причиной предохранителя."""
     monkeypatch.setenv("ENGINE_BREAKER_QUOTA_COOLDOWN", "1800")
+    # Страховка выключена: тест проверяет предохранитель, а не платный вызов.
+    monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "0")
     monkeypatch.setattr(
         headless,
         "engine_enabled",

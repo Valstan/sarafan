@@ -49,8 +49,13 @@ Env vars:
 
 from __future__ import annotations
 
+import json
 import os
+from pathlib import Path
 from typing import Dict, List
+
+#: Файл с паролем, который ``opencode serve`` пишет сам при старте.
+DEFAULT_PASSWORD_FILE = Path.home() / ".config" / "opencode" / "service.json"
 
 # Замер 20.10 (движок v2.0.32, свой бокс): список моделей платформы сменился —
 # `space-bunny-free` из каталога ушёл (голова цепочки съедала бы таймаут),
@@ -133,8 +138,50 @@ def get_server_username() -> str:
     return (os.getenv("OPENCODE_SERVER_USERNAME") or "opencode").strip()
 
 
+def _password_from_service_file() -> str:
+    """Пароль из файла serve. Любая ошибка — пусто (значит «без пароля»).
+
+    Пусто лучше, чем исключение: клиент уйдёт в 401, отказ станет явным, и
+    волна (или страховка) отработает по правилам, а не упадёт.
+    """
+    try:
+        payload = json.loads(DEFAULT_PASSWORD_FILE.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    return str(payload.get("password") or "").strip()
+
+
 def get_server_password() -> str:
-    return (os.getenv("OPENCODE_SERVER_PASSWORD") or "").strip()
+    """Пароль basic-auth serve.
+
+    Env ``OPENCODE_SERVER_PASSWORD`` — переопределение. Если его нет, берём из
+    файла, который serve пишет **сам при старте**
+    (``~/.config/opencode/service.json``): пароль перевыпускается при каждом
+    рестарте serve, и значение в env-файле молча устарело бы — волна получила
+    бы 401 на каждом вызове после рестарта, а починить это можно было бы
+    только правкой env-файла и рестартом. Демон моста читает тот же файл
+    (``scripts/local_engine_opencode.py::read_password``).
+    """
+    raw = (os.getenv("OPENCODE_SERVER_PASSWORD") or "").strip()
+    if raw:
+        return raw
+    return _password_from_service_file()
+
+
+def paid_fallback_enabled() -> bool:
+    """Разрешена ли платная страховка, когда free-тир не отвечает.
+
+    Решение владельца 11.11: «переключи на Опенкод, там фри-тир, ну когда
+    фритир отвалится — работай платным апи Дипсика, а на следующие сутки снова
+    включай опенкод».
+
+    Выключается одним env, когда платить нельзя (счёт пуст, оплата закрыта):
+    тогда волна идёт по обычным фильтрам, а не тратит.
+    """
+    raw = (os.getenv("CLASSIFIER_PAID_FALLBACK") or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def no_spawn() -> bool:

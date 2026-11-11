@@ -1142,3 +1142,61 @@ def test_quota_mark_keeps_first_age_and_clears(monkeypatch, tmp_path):
 
     engine._clear_quota_mark()
     assert not path.exists()
+
+
+# --- 11.11: пароль serve из его же файла, страховка платным Дипсиком ---
+
+
+def test_server_password_falls_back_to_service_file(monkeypatch, tmp_path):
+    """Пароль serve лежит в файле, который serve пишет сам.
+
+    Значение в env-файле бокса устарело бы молча: serve перевыпускает пароль
+    при каждом рестарте, и волна получала бы 401 на каждом вызове после
+    рестарта — а починить это можно было бы только правкой env и рестартом.
+    """
+    from config import opencode as oc
+
+    monkeypatch.delenv("OPENCODE_SERVER_PASSWORD", raising=False)
+    service = tmp_path / "service.json"
+    service.write_text(json.dumps({"password": "iz-fayla"}), encoding="utf-8")
+    monkeypatch.setattr(oc, "DEFAULT_PASSWORD_FILE", service)
+
+    assert oc.get_server_password() == "iz-fayla"
+
+
+def test_server_password_env_wins_over_file(monkeypatch, tmp_path):
+    """Явное переопределение в env важнее файла."""
+    from config import opencode as oc
+
+    service = tmp_path / "service.json"
+    service.write_text(json.dumps({"password": "iz-fayla"}), encoding="utf-8")
+    monkeypatch.setattr(oc, "DEFAULT_PASSWORD_FILE", service)
+    monkeypatch.setenv("OPENCODE_SERVER_PASSWORD", "iz-env")
+
+    assert oc.get_server_password() == "iz-env"
+
+
+def test_server_password_missing_file_is_empty(monkeypatch, tmp_path):
+    """Нет файла — пустой пароль, а не исключение.
+
+    Пусто значит «позвать сервер без авторизации» → 401 → явный отказ, который
+    волна (или страховка) отработает по правилам. Исключение уронило бы
+    волну.
+    """
+    from config import opencode as oc
+
+    monkeypatch.delenv("OPENCODE_SERVER_PASSWORD", raising=False)
+    monkeypatch.setattr(oc, "DEFAULT_PASSWORD_FILE", tmp_path / "net-takogo.json")
+
+    assert oc.get_server_password() == ""
+
+
+def test_paid_fallback_switch(monkeypatch):
+    """Страховка платным Дипсиком включается по умолчанию и выключается env."""
+    from config import opencode as oc
+
+    monkeypatch.delenv("CLASSIFIER_PAID_FALLBACK", raising=False)
+    assert oc.paid_fallback_enabled() is True
+
+    monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "0")
+    assert oc.paid_fallback_enabled() is False
