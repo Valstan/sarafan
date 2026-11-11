@@ -64,6 +64,7 @@ from web.api import (  # noqa: E402
     regions,
     schedule_management,
     scheduler,
+    service_conditions,
     service_notifications,
     subscriber_growth,
     system_monitoring,
@@ -247,6 +248,14 @@ app.include_router(
 # Карта ingest-контракта источника (пилот варианта B, pool #367): публичный
 # read-only ответ для приёмников конвейера, своя дверь в PUBLIC_EXACT.
 app.include_router(ingest_contract.router, prefix="/api/ingest", tags=["Ingest Contract"])
+# Слой условий услуг (пилот #386, шаг 1): карточка услуги отдаёт условия,
+# документы, владельца и ссылку на источник. Публичный read-only — читают
+# серверы соседних проектов, у которых сессионной cookie нет.
+app.include_router(
+    service_conditions.router,
+    prefix="/api",
+    tags=["Service Conditions"],
+)
 
 
 def _radar_template_ctx(request: Request) -> dict:
@@ -496,11 +505,18 @@ async def services_catalog(request: Request):
 
     Заказ владельца 2026-07-26: на ЕСА (вход.вмалмыже.рф) — список всех
     сайтов-сервисов Малмыжа, а на каждом сервисе — кнопка сюда, чтобы
-    пользователь быстро перемещался между сервисами."""
+    пользователь быстро перемещался между сервисами.
+
+    С 11.11.2026 (пилот #386, шаг 1) страница отдаёт ещё и слой условий:
+    что положено и что для этого нужно, со ссылкой на источник. Условия
+    читаются из живого конфига, а не из шаблона — иначе они разошлись бы
+    с источником тихо (класс #087)."""
     from config.services_catalog import get_services
+    from modules.service_conditions import build_service_cards
 
     return templates.TemplateResponse(
-        "services.html", {"request": request, "services": get_services()}
+        "services.html",
+        {"request": request, "services": get_services(), "condition_cards": build_service_cards()},
     )
 
 
