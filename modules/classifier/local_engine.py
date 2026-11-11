@@ -581,6 +581,14 @@ async def stats(session) -> Dict[str, Any]:
         engine_by_day.append(row)
 
     last_verdict = (await session.execute(_last_verdict_query())).scalar()
+    # Время из БД — **UTC без зоны** (конвенция проекта). Отдаём с пометкой UTC:
+    # иначе браузер прочитает «2026-11-11 18:13:06» как московское время и
+    # покажет «4 ч назад» вместо «1 ч назад» — минус три часа врёт.
+    last_verdict_at: Optional[str] = None
+    if isinstance(last_verdict, datetime):
+        last_verdict_at = last_verdict.replace(tzinfo=timezone.utc).isoformat()
+    elif last_verdict is not None:
+        last_verdict_at = str(last_verdict)
 
     src_24h = {
         str(s or "?"): int(n or 0)
@@ -631,7 +639,7 @@ async def stats(session) -> Dict[str, Any]:
         "runs_24h": _runs_summary(runs_24h),
         "runs_7d": _runs_summary(runs_7d),
         "all_time": _runs_summary(runs),
-        "last_run_ts": str(last_run_ts) if last_run_ts else None,
+        "last_run_ts": last_run_ts.isoformat() if last_run_ts else None,
         "minutes_ago": (
             round((now - last_run_ts).total_seconds() / 60.0, 1) if last_run_ts else None
         ),
@@ -671,5 +679,5 @@ async def stats(session) -> Dict[str, Any]:
         "models_30d": models_30d,
         "engine_now": engine_now,
         "daemon": daemon,
-        "last_verdict_at": str(last_verdict) if last_verdict else None,
+        "last_verdict_at": last_verdict_at,
     }

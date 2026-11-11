@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
@@ -485,7 +486,7 @@ def test_stats_payload_carries_engine_split(tmp_path, monkeypatch):
             return []
 
         def scalar(self):
-            return None
+            return datetime(2026, 11, 11, 18, 13, 6, 840047)
 
     class _Session:
         async def execute(self, *args, **kwargs):
@@ -514,6 +515,12 @@ def test_stats_payload_carries_engine_split(tmp_path, monkeypatch):
     }
     assert data["source_meta"]["routine"]["alive"] is False
     assert data["source_meta"]["headless"]["alive"] is True
+
+    # Время из БД — UTC без зоны. Без пометки UTC браузер прочитает его как
+    # московское и покажет «4 ч назад» вместо «1 ч назад»: минус три часа врёт
+    # ровно в ту сторону, где человек не догадается, что ошибка в часах.
+    assert data["last_verdict_at"].endswith("+00:00")
+    assert "18:13:06" in data["last_verdict_at"]
 
 
 def test_panel_shows_who_answered_and_what_is_alive():
