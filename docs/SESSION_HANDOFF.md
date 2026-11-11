@@ -4,8 +4,8 @@
 
 **Status:** ACTIVE
 **Updated:** 2026-11-11
-**Branch:** `feat/pilot-386-service-conditions` → PR #1067 (готов к мержу; CI `test (3.12)` зелёный)
-**Last release in prod:** `38d0bc5` ([PR #1065](https://github.com/Valstan/sarafan/pull/1065)) — мост к локальному движку в бою, движок перенесён на бокс. Бокс подтянут, 4/4 сервиса active, health 200, `opencode-engine.service` active, крона тикает раз в 5 минут.
+**Branch:** `main` (синхронизирован с origin, sync-гейт зелёный)
+**Last release in prod:** `b61c396` ([PR #1067](https://github.com/Valstan/sarafan/pull/1067)) — слой условий услуг (шаг 1 пилота #386). Выкачено 11.11: pull → рестарт `setka`/`worker`/`beat` → health 200 → smoke OK (280 из ВК → 4 после отбора → 1 would_publish, 14 сообществ). На проде: `GET /api/service-conditions` — 11 услуг, 23 условия по 8 услугам; витрина `/services` показывает 23 блока с источниками; `GET /api/service-answer` по чужому вопросу даёт «не знаю» + владельца.
 
 ---
 
@@ -80,8 +80,9 @@
   - `87f9122` (#1063) — `infra/engine/`: systemd-юнит + крона;
   - `38d0bc5` (#1065) — канон под серверный замер.
   - Раньше в сессии: `d69c0d4` (#1045) — починка троттлинга заливки фото ВК (три лица отказа).
-- **Прод:** `38d0bc5`, 4/4 сервиса active, health 200, `opencode-engine.service` active (opencode на 127.0.0.1:4097, ключ в `~/.config/opencode/service.json`), крона демона раз в 5 минут; в корпусе 36 вердиктов `source="local"`.
-- **Открытых PR:** #1067 (`feat/pilot-386-service-conditions`) — слой условий услуг, шаг 1 пилота #386; ждёт зелёного CI на последнем коммите и мержа.
+- **Прод:** `b61c396`, 5/5 сервисов active (включая `opencode-engine.service`), health 200, крона демона раз в 5 минут; движок тикает, очередь пуста.
+- **Открытых PR:** нет (PR #1067 смержен, `b61c396` на `main`).
+- **Запись пилота:** `docs/pending/P225-pilot-386-usloviya-uslug-i-assistent.md` (шаг 1 закрыт, шаг 3 открыт).
 
 ## Failed approaches (этой нитки)
 
