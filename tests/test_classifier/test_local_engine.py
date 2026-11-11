@@ -380,14 +380,14 @@ def test_source_labels_are_human_readable():
     """Источники вердикта в панели читаются по-русски, а не служебными ключами.
 
     В базе ``source`` — служебный ключ (``routine``/``api``/``headless``/
-    ``local``): в панели он должен читаться («рутина», «облако», «локальный»).
-    Названия отдаёт API — тогда они живут в одном месте.
+    ``local``): в панели он должен читаться. Названия отдаёт API — тогда они
+    живут в одном месте.
     """
     labels = local_engine.SOURCE_LABELS
-    assert labels["routine"] == "рутина"
-    assert labels["headless"] == "облако"
-    assert labels["local"] == "локальный"
-    assert labels["api"] == "через API"
+    assert labels["headless"] == "Волна на сервере"
+    assert labels["local"] == "Демон Опенкода"
+    assert labels["routine"] == "Старая рутина (удалена)"
+    assert labels["api"] == "Приём готовых вердиктов"
     for key, label in labels.items():
         assert label and label != key, "ключ %s должен называться по-русски" % key
 
@@ -395,6 +395,155 @@ def test_source_labels_are_human_readable():
     for key in labels:
         assert "sourceLabel(s, labels)" in js
     assert "source_labels" in js
+
+
+def test_dead_source_is_marked_as_not_working():
+    """Мёртвый путь нельзя показывать живым.
+
+    Старая облачная рутина удалена владельцем 11.11: она не тратит денег и
+    больше не разбирает посты. Пока она в панели светилась как «ещё один
+    источник», человек читал «рутина обрабатывает посты» — а она не
+    обрабатывает ничего с 06.11.
+    """
+    assert local_engine.SOURCE_ALIVE["routine"] is False
+    assert local_engine.SOURCE_ALIVE["headless"] is True
+    assert local_engine.SOURCE_ALIVE["local"] is True
+    for key in local_engine.SOURCE_ALIVE:
+        assert key in local_engine.SOURCE_LABELS
+        assert local_engine.SOURCE_NOTES.get(key), "у пути %s должно быть пояснение" % key
+
+
+@pytest.mark.parametrize(
+    "model,expected",
+    [
+        ("deepseek-flash", local_engine.ENGINE_DEEPSEEK),
+        ("deepseek-chat", local_engine.ENGINE_DEEPSEEK),
+        ("deepseek-v4-pro", local_engine.ENGINE_DEEPSEEK),
+        ("opencode/deepseek-v4.1-flash-free", local_engine.ENGINE_OPENCODE),
+        ("opencode/glm-5.3-flash-free", local_engine.ENGINE_OPENCODE),
+        ("deepseek-v4.1-flash-free", local_engine.ENGINE_OPENCODE),
+        ("flint-40b-free", local_engine.ENGINE_OPENCODE),
+        ("glm-5.3-flash-free", local_engine.ENGINE_OPENCODE),
+        ("", local_engine.ENGINE_UNKNOWN),
+        (None, local_engine.ENGINE_UNKNOWN),
+    ],
+)
+def test_engine_of_model_tells_paid_from_free(model, expected):
+    """Движок достаётся из имени модели: платный Дипсик ≠ бесплатный Опенкод.
+
+    Путь (``source``) и движок (``model``) — разные вещи: одна волна считает и
+    тем, и другим. Пока панель звала «облако» = «Дипсик», работа бесплатного
+    Опенкода внутри той же волны (23 813 вердиктов за месяц) была не видна.
+    """
+    assert local_engine.engine_of_model(model) == expected
+
+
+def test_engine_buckets_split_paid_and_free():
+    """Вердикты раскладываются по движкам, а не по путям доставки."""
+    rows = [
+        ("deepseek-flash", 4430),
+        ("opencode/deepseek-v4.1-flash-free", 23813),
+        ("flint-40b-free", 19),
+        ("", 7),
+    ]
+    bucket = local_engine.engine_buckets(rows)
+    assert bucket[local_engine.ENGINE_DEEPSEEK] == 4430
+    assert bucket[local_engine.ENGINE_OPENCODE] == 23832
+    assert bucket[local_engine.ENGINE_UNKNOWN] == 7
+    assert sum(bucket.values()) == sum(n for _m, n in rows)
+
+
+def test_sum_by_source_adds_days_instead_of_keeping_last():
+    """«За 30 дней» по пути доставки — это сумма дней, а не цифры одного дня.
+
+    На проде словарь собирался так, что предыдущие дни перетирались
+    последним: «за 30 дней» показывало 4 430 (это был один день) вместо
+    суммы. Панель врала молча — цифра выглядела правдоподобно.
+    """
+    rows = [
+        ("headless", "2026-11-10", 5008),
+        ("headless", "2026-11-11", 4430),
+        ("local", "2026-11-11", 55),
+    ]
+    total = local_engine.sum_by_source(rows)
+    assert total["headless"] == 9438
+    assert total["local"] == 55
+    assert sum(total.values()) == 9493
+
+
+def test_stats_payload_carries_engine_split(tmp_path, monkeypatch):
+    """Сводка отдаёт разрез «кем ответили», режим движка и состояние демона.
+
+    Контракт страницы: без этих полей панель снова станет «кашей» — путь,
+    движок и живость должны быть видны в одном ответе.
+    """
+    monkeypatch.setenv("LOCAL_ENGINE_RUNS_LOG", str(tmp_path / "runs.jsonl"))
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "deepseek")
+
+    class _Result:
+        def all(self):
+            return []
+
+        def scalar(self):
+            return None
+
+    class _Session:
+        async def execute(self, *args, **kwargs):
+            return _Result()
+
+    data = __import__("asyncio").run(local_engine.stats(_Session()))
+
+    for key in (
+        "engine_windows",
+        "engine_by_day",
+        "models_30d",
+        "engine_now",
+        "daemon",
+        "source_meta",
+        "last_verdict_at",
+        "verdicts_by_source_24h",
+    ):
+        assert key in data, "сводка без %s" % key
+
+    assert data["engine_now"]["mode"] == "deepseek"
+    assert "Дипсик" in data["engine_now"]["label"]
+    assert set(data["engine_windows"]["24h"]["by_engine"]) == {
+        local_engine.ENGINE_DEEPSEEK,
+        local_engine.ENGINE_OPENCODE,
+        local_engine.ENGINE_UNKNOWN,
+    }
+    assert data["source_meta"]["routine"]["alive"] is False
+    assert data["source_meta"]["headless"]["alive"] is True
+
+
+def test_panel_shows_who_answered_and_what_is_alive():
+    """Панель обязана показывать разрез «кем ответили» и состояние путей.
+
+    Без этого страница читалась как «каша»: в одном блоке «облако», в другом
+    «рутина обрабатывает посты», и понять, что работает и кто платит, было
+    нельзя.
+    """
+    html = (TEMPLATES_DIR / "local_engine.html").read_text(encoding="utf-8")
+    js = (REPO_ROOT / "web" / "static" / "js" / "local_engine.js").read_text(encoding="utf-8")
+
+    for token in ("engine_windows", "engine_by_day", "models_30d", "source_meta"):
+        assert token in js, "JS панели должен рисовать %s" % token
+    for block_id in (
+        "c-engine-now",
+        "c-v-24h",
+        "c-daemon",
+        "c-last",
+        "models-box",
+        "engine-days-box",
+        "sources-box",
+    ):
+        assert block_id in html, "в шаблоне панели нет блока %s" % block_id
+        assert block_id in js, "JS панели не рисует блок %s" % block_id
+
+    # Служебные английские подписи в шаблоне не остаются.
+    assert ">action<" not in html
+    assert ">theme<" not in html
+    assert "merge" not in html
 
 
 def test_panel_js_parses():

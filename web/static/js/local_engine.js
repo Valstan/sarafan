@@ -1,7 +1,12 @@
-/* Панель локального движка: прогоны демона, качество по источникам, обучение.
+/* Панель движка классификации: кто разбирает посты, чем ответили, сколько стоит.
  *
  * Данные — один запрос /api/local-engine/stats (web/api/local_engine.py),
  * отдаёт modules/classifier/local_engine.stats().
+ *
+ * Два разных среза, и их нельзя мешать:
+ *   • путь доставки (`source` в базе): кто принёс вердикт — волна, демон, рутина;
+ *   • движок (`model` в базе): кто ответил — платный Дипсик или бесплатный Опенкод.
+ * Одна и та же волна умеет считать и тем, и другим, поэтому «облако» ≠ «Дипсик».
  *
  * Файл отдельный, а не inline в шаблоне: так его проверяет node --check
  * (тест в tests/test_classifier/test_local_engine.py) и так он кэшируется
@@ -14,137 +19,265 @@ function esc(s) {
 
 function pct(v) { return (v == null) ? "?" : (v + "%"); }
 
-// Название источника вердикта — от API (``source_labels``): в базе служебные
-// ключи (``routine``/``api``/``headless``/``local``), а читать должен человек.
+function num(v) {
+  var n = Number(v || 0);
+  return n.toLocaleString("ru-RU");
+}
+
+// Название пути доставки — от API (`source_labels`): в базе служебные ключи
+// (`routine`/`api`/`headless`/`local`), а читать должен человек.
 const SOURCE_FALLBACK = {
-  routine: "рутина",
-  api: "через API",
-  headless: "облако",
-  local: "локальный",
+  headless: "Волна на сервере",
+  local: "Демон Опенкода",
+  routine: "Старая рутина (удалена)",
+  api: "Приём готовых вердиктов",
 };
 function sourceLabel(src, labels) {
   return (labels && labels[src]) || SOURCE_FALLBACK[src] || src;
 }
 
+// Название модели по-русски — от API (`model_labels`).
+const MODEL_FALLBACK = {};
+function modelLabel(model, labels) {
+  var name = String(model || "");
+  if (!name) return "движок не записан";
+  return (labels && labels[name]) || MODEL_FALLBACK[name] || name;
+}
+
+// Название движка — от API (`engine_labels`).
+const ENGINE_FALLBACK = {
+  deepseek: "Дипсик — платно, по ключу",
+  opencode: "Опенкод — бесплатный тир",
+  unknown: "неизвестно",
+};
+function engineLabel(eng, labels) {
+  return (labels && labels[eng]) || ENGINE_FALLBACK[eng] || eng;
+}
+
+// Тип вердикта по-русски: action/theme/merge — служебные ключи в базе.
+const VERDICT_TYPES = [
+  ["action", "действие"],
+  ["theme", "тема"],
+  ["merge", "слияние"],
+];
+function verdictTypeLabel(t) {
+  for (var i = 0; i < VERDICT_TYPES.length; i++) {
+    if (VERDICT_TYPES[i][0] === t) return VERDICT_TYPES[i][1];
+  }
+  return t;
+}
+
+// «12 мин назад» из ISO-времени.
+function ago(iso) {
+  if (!iso) return "—";
+  var ts = Date.parse(iso);
+  if (isNaN(ts)) return "—";
+  var mins = Math.round((Date.now() - ts) / 60000);
+  if (mins < 1) return "только что";
+  if (mins < 60) return mins + " мин назад";
+  var hours = Math.round(mins / 60);
+  if (hours < 24) return hours + " ч назад";
+  return Math.round(hours / 24) + " дн назад";
+}
+
 async function load() {
-  const box = document.getElementById("alert-box");
+  var box = document.getElementById("alert-box");
   try {
-    const resp = await fetch("/api/local-engine/stats");
-    const d = await resp.json();
+    var resp = await fetch("/api/local-engine/stats");
+    var d = await resp.json();
     if (!d.ok) throw new Error(d.detail || "ошибка API");
 
-    // ── Движок ──
-    document.getElementById("c-runs").textContent = d.runs_total ?? 0;
-    document.getElementById("c-posts").textContent = d.runs_posts ?? 0;
-    document.getElementById("c-recorded").textContent = d.runs_recorded ?? 0;
-    document.getElementById("c-errors").textContent = d.runs_errors ?? 0;
+    var labels = d.source_labels || {};
+    var engineLabels = d.engine_labels || {};
+    var modelLabels = d.model_labels || {};
+    var win = d.engine_windows || {};
+    var w24 = win["24h"] || {by_engine: {}, total: 0};
+    var be = w24.by_engine || {};
 
-    const tb = document.getElementById("runs-body");
-    const runs = d.runs || [];
+    // ── Сейчас ──
+    var now = d.engine_now || {};
+    document.getElementById("c-engine-now").textContent = now.label || "—";
+    document.getElementById("c-v-24h").textContent = num(w24.total || 0);
+    document.getElementById("c-v-24h-split").textContent =
+      "Дипсик: " + num(be.deepseek || 0) + " · Опенкод: " + num(be.opencode || 0);
+
+    var daemon = d.daemon || {};
+    var d24 = daemon.runs_24h || {};
+    document.getElementById("c-daemon").textContent = num(d24.recorded || 0);
+    document.getElementById("c-daemon-sub").textContent =
+      "прогонов: " + num(d24.runs || 0) +
+      " · последний " + ago(daemon.last_run_ts) +
+      (d24.errors ? " · с ошибкой: " + num(d24.errors) : "");
+
+    document.getElementById("c-last").textContent = ago(d.last_verdict_at);
+    document.getElementById("c-last-sub").textContent = d.last_verdict_at || "вердиктов ещё нет";
+
+    // ── Кем отвечено (30 дней) ──
+    var models = d.models_30d || [];
+    var mh = "";
+    if (!models.length) {
+      mh = '<span class="text-muted">нет данных</span>';
+    } else {
+      mh = '<table class="table table-sm mb-0"><thead><tr><th>Чем ответил</th>' +
+           '<th>Движок</th><th class="text-end">Вердиктов</th></tr></thead><tbody>';
+      for (var i = 0; i < models.length; i++) {
+        var m = models[i];
+        mh += '<tr><td>' + esc(m.label) + '</td>' +
+              '<td class="small text-muted">' + esc(engineLabel(m.engine, engineLabels)) + '</td>' +
+              '<td class="text-end">' + num(m.n) + '</td></tr>';
+      }
+      mh += "</tbody></table>";
+    }
+    document.getElementById("models-box").innerHTML = mh;
+
+    // ── Кто отвечал по дням ──
+    var days = d.engine_by_day || [];
+    var dh = "";
+    if (!days.length) {
+      dh = '<span class="text-muted">нет данных</span>';
+    } else {
+      dh = '<table class="table table-sm mb-0"><thead><tr><th>День</th>' +
+           '<th class="text-end">Дипсик (платно)</th>' +
+           '<th class="text-end">Опенкод (бесплатно)</th>' +
+           '<th class="text-end">Неизвестно</th></tr></thead><tbody>';
+      for (var j = 0; j < days.length; j++) {
+        var r = days[j];
+        dh += '<tr><td>' + esc(r.day) + '</td>' +
+              '<td class="text-end">' + num(r.deepseek || 0) + '</td>' +
+              '<td class="text-end">' + num(r.opencode || 0) + '</td>' +
+              '<td class="text-end">' + num(r.unknown || 0) + '</td></tr>';
+      }
+      dh += "</tbody></table>";
+    }
+    document.getElementById("engine-days-box").innerHTML = dh;
+
+    // ── Пути доставки ──
+    var meta = d.source_meta || {};
+    var bySource = d.verdicts_by_source || {};
+    var bySource24 = d.verdicts_by_source_24h || {};
+    var keys = Object.keys(meta);
+    var sh = "";
+    if (!keys.length) {
+      sh = '<span class="text-muted">нет данных</span>';
+    } else {
+      sh = '<table class="table table-sm mb-0"><thead><tr><th>Путь</th><th>Состояние</th>' +
+           '<th class="text-end">За 30 дней</th><th class="text-end">За сутки</th>' +
+           '<th>Что это</th></tr></thead><tbody>';
+      for (var s = 0; s < keys.length; s++) {
+        var key = keys[s];
+        var info = meta[key] || {};
+        var alive = info.alive !== false;
+        sh += '<tr' + (alive ? "" : ' class="text-muted"') + '>' +
+              '<td>' + esc(info.label || sourceLabel(key, labels)) + '</td>' +
+              '<td>' + (alive
+                  ? '<span class="badge text-bg-success">работает</span>'
+                  : '<span class="badge text-bg-secondary">не работает</span>') + '</td>' +
+              '<td class="text-end">' + num(bySource[key] || 0) + '</td>' +
+              '<td class="text-end">' + num(bySource24[key] || 0) + '</td>' +
+              '<td class="small">' + esc(info.note || "") + '</td></tr>';
+      }
+      sh += "</tbody></table>";
+    }
+    document.getElementById("sources-box").innerHTML = sh;
+
+    // ── Прогоны демона ──
+    var tb = document.getElementById("runs-body");
+    var runs = d.runs || [];
     if (!runs.length) {
       tb.innerHTML = '<tr><td colspan="9" class="text-muted">прогонов пока нет — демон не запускался</td></tr>';
     } else {
-      tb.innerHTML = runs.slice().reverse().map(r => `
-        <tr class="${r.ok ? "" : "table-warning"}">
-          <td class="text-nowrap">${esc((r.ts||"").slice(5,19).replace("T"," "))}</td>
-          <td>${esc(r.model || r.stage || "—")}</td>
-          <td class="text-end">${r.posts ?? r.verdicts_sent ?? "—"}</td>
-          <td class="text-end">${r.verdicts_sent ?? "—"}</td>
-          <td class="text-end">${r.recorded ?? "—"}</td>
-          <td class="text-end">${r.skipped_existing ?? "—"}</td>
-          <td class="text-end">${r.duration_ms ?? "—"}</td>
-          <td class="small">${esc((r.regions || []).join(", "))}</td>
-          <td class="small">${esc(r.error || "")}</td>
-        </tr>`).join("");
+      tb.innerHTML = runs.slice().reverse().map(function (r) {
+        return '<tr class="' + (r.ok ? "" : "table-warning") + '">' +
+          '<td class="text-nowrap">' + esc((r.ts||"").slice(5,19).replace("T"," ")) + '</td>' +
+          '<td>' + esc(modelLabel(r.model || r.stage, modelLabels)) + '</td>' +
+          '<td class="text-end">' + (r.posts ?? r.verdicts_sent ?? "—") + '</td>' +
+          '<td class="text-end">' + (r.verdicts_sent ?? "—") + '</td>' +
+          '<td class="text-end">' + (r.recorded ?? "—") + '</td>' +
+          '<td class="text-end">' + (r.skipped_existing ?? "—") + '</td>' +
+          '<td class="text-end">' + (r.duration_ms ?? "—") + '</td>' +
+          '<td class="small">' + esc((r.regions || []).join(", ")) + '</td>' +
+          '<td class="small">' + esc(r.error || "") + '</td>' +
+        '</tr>';
+      }).join("");
     }
 
-    // ── Качество по источнику ──
-    const labels = d.source_labels || {};
-    const q = d.quality_by_source || {};
-    const keys = Object.keys(q);
-    let html = "";
-    if (!keys.length) {
-      html = '<span class="text-muted">правок оператора ещё нет</span>';
+    // ── Качество по пути доставки ──
+    var q = d.quality_by_source || {};
+    var qkeys = Object.keys(q);
+    var qh = "";
+    if (!qkeys.length) {
+      qh = '<span class="text-muted">правок оператора ещё нет</span>';
     } else {
-      html = '<table class="table table-sm mb-0"><thead><tr><th>источник</th>' +
-             '<th class="text-end">action</th><th class="text-end">theme</th>' +
-             '<th class="text-end">правок</th></tr></thead><tbody>';
-      for (const src of keys) {
-        const a = q[src].action || {}, t = q[src].theme || {};
-        const rights = (a.agree||0) + (a.correct||0) + (t.agree||0) + (t.correct||0);
-        html += `<tr><td>${esc(sourceLabel(src, labels))}</td>` +
-                `<td class="text-end">${pct(a.agree_pct)} <span class="text-muted small">(${a.agree||0}/${(a.agree||0)+(a.correct||0)})</span></td>` +
-                `<td class="text-end">${pct(t.agree_pct)} <span class="text-muted small">(${t.agree||0}/${(t.agree||0)+(t.correct||0)})</span></td>` +
-                `<td class="text-end">${rights}</td></tr>`;
+      qh = '<table class="table table-sm mb-0"><thead><tr><th>Путь</th>' +
+           '<th class="text-end">Действие</th><th class="text-end">Тема</th>' +
+           '<th class="text-end">Слияние</th>' +
+           '<th class="text-end">Правок</th></tr></thead><tbody>';
+      for (var t = 0; t < qkeys.length; t++) {
+        var src = qkeys[t];
+        var a = q[src].action || {}, th = q[src].theme || {}, mg = q[src].merge || {};
+        var rights = (a.agree||0) + (a.correct||0) + (th.agree||0) + (th.correct||0) +
+                     (mg.agree||0) + (mg.correct||0);
+        qh += '<tr><td>' + esc(sourceLabel(src, labels)) + '</td>' +
+              '<td class="text-end">' + pct(a.agree_pct) + ' <span class="text-muted small">(' +
+                (a.agree||0) + '/' + ((a.agree||0)+(a.correct||0)) + ')</span></td>' +
+              '<td class="text-end">' + pct(th.agree_pct) + ' <span class="text-muted small">(' +
+                (th.agree||0) + '/' + ((th.agree||0)+(th.correct||0)) + ')</span></td>' +
+              '<td class="text-end">' + pct(mg.agree_pct) + ' <span class="text-muted small">(' +
+                (mg.agree||0) + '/' + ((mg.agree||0)+(mg.correct||0)) + ')</span></td>' +
+              '<td class="text-end">' + num(rights) + '</td></tr>';
       }
-      html += "</tbody></table>";
+      qh += "</tbody></table>";
     }
-    document.getElementById("quality-box").innerHTML = html;
+    document.getElementById("quality-box").innerHTML = qh;
 
     // ── Недельная динамика ──
-    const w = d.weekly_quality || {};
-    const weeks = Object.keys(w).sort();
-    let wh = "";
+    var w = d.weekly_quality || {};
+    var weeks = Object.keys(w).sort();
+    var wh = "";
     if (!weeks.length) {
       wh = '<span class="text-muted">недостаточно данных</span>';
     } else {
-      wh = '<table class="table table-sm mb-0"><thead><tr><th>неделя</th>';
-      const srcs = new Set();
-      weeks.forEach(wk => Object.keys(w[wk]).forEach(s => srcs.add(s)));
-      for (const s of srcs) wh += `<th class="text-end">${esc(sourceLabel(s, labels))}</th>`;
+      wh = '<table class="table table-sm mb-0"><thead><tr><th>Неделя</th>';
+      var srcs = new Set();
+      weeks.forEach(function (wk) { Object.keys(w[wk]).forEach(function (s) { srcs.add(s); }); });
+      srcs.forEach(function (s) {
+        wh += '<th class="text-end">' + esc(sourceLabel(s, labels)) + '</th>';
+      });
       wh += "</tr></thead><tbody>";
-      for (const wk of weeks) {
-        wh += `<tr><td>${esc(wk)}</td>`;
-        for (const s of srcs) {
-          const v = (w[wk][s] || {});
-          const tot = (v.agree||0) + (v.correct||0);
-          const p = tot ? (100*v.agree/tot).toFixed(1) + "%" : "—";
-          wh += `<td class="text-end">${p} <span class="text-muted small">(${v.agree||0}/${tot})</span></td>`;
-        }
+      weeks.slice().reverse().forEach(function (wk) {
+        wh += '<tr><td>' + esc(wk) + '</td>';
+        srcs.forEach(function (s) {
+          var v = (w[wk][s] || {});
+          var tot = (v.agree||0) + (v.correct||0);
+          var p = tot ? (100*v.agree/tot).toFixed(1) + "%" : "—";
+          wh += '<td class="text-end">' + p + ' <span class="text-muted small">(' +
+                (v.agree||0) + '/' + tot + ')</span></td>';
+        });
         wh += "</tr>";
-      }
+      });
       wh += "</tbody></table>";
     }
     document.getElementById("weekly-box").innerHTML = wh;
 
     // ── Обучение ──
-    const rs = d.rules_by_status || {};
+    var rs = d.rules_by_status || {};
     document.getElementById("rules-box").innerHTML =
       '<table class="table table-sm mb-0"><tbody>' +
       [["proposed","предложено"],["approved","утверждено"],["rejected","отклонено"],["retired","выведено"]]
-        .map(([k,label]) => `<tr><td>${label}</td><td class="text-end"><b>${rs[k] ?? 0}</b></td></tr>`).join("") +
+        .map(function (pair) {
+          return '<tr><td>' + pair[1] + '</td><td class="text-end"><b>' + num(rs[pair[0]] || 0) +
+                 '</b></td></tr>';
+        }).join("") +
       "</tbody></table>";
 
-    const cw = d.corrections_by_week || [];
+    var cw = d.corrections_by_week || [];
     document.getElementById("corr-box").innerHTML = cw.length
-      ? '<table class="table table-sm mb-0"><thead><tr><th>неделя</th><th class="text-end">коррекций</th></tr></thead><tbody>' +
-        cw.slice().reverse().map(r => `<tr><td>${esc(r.week)}</td><td class="text-end">${r.n}</td></tr>`).join("") +
+      ? '<table class="table table-sm mb-0"><thead><tr><th>Неделя</th><th class="text-end">Правок</th></tr></thead><tbody>' +
+        cw.slice().reverse().map(function (r) {
+          return '<tr><td>' + esc(r.week) + '</td><td class="text-end">' + num(r.n) + '</td></tr>';
+        }).join("") +
         "</tbody></table>"
-      : '<span class="text-muted">коррекций пока нет</span>';
-
-    // ── Вердикты по дням ──
-    const daily = d.daily_by_source || {};
-    const dsrc = Object.keys(daily);
-    let dh = "";
-    if (!dsrc.length) {
-      dh = '<span class="text-muted">нет данных</span>';
-    } else {
-      dh = '<table class="table table-sm mb-0"><thead><tr><th>день</th>';
-      dsrc.forEach(s => dh += `<th class="text-end">${esc(sourceLabel(s, labels))}</th>`);
-      dh += "</tr></thead><tbody>";
-      const days = new Set();
-      dsrc.forEach(s => (daily[s]||[]).forEach(r => days.add(r.day)));
-      [...days].sort().reverse().slice(0, 30).forEach(day => {
-        dh += `<tr><td>${esc(day)}</td>`;
-        dsrc.forEach(s => {
-          const row = (daily[s]||[]).find(r => r.day === day);
-          dh += `<td class="text-end">${row ? row.n : "—"}</td>`;
-        });
-        dh += "</tr>";
-      });
-      dh += "</tbody></table>";
-    }
-    document.getElementById("daily-box").innerHTML = dh;
+      : '<span class="text-muted">правок пока нет</span>';
 
     box.innerHTML = "";
   } catch (e) {
