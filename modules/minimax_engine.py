@@ -66,6 +66,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import urlencode
 
 logger = logging.getLogger(__name__)
 
@@ -112,6 +113,12 @@ TASK_TEXT = (
     "Ответ — только JSON по схеме из системного промпта, без пояснений."
 )
 
+#: OAuth-эндпоинт MiniMax Code: обновление access-токена по refresh-токену.
+OAUTH_TOKEN_URL = "https://account.minimax.io/oauth2/token"
+OAUTH_CLIENT_ID = "mcode-public"
+OAUTH_SCOPE = "agent.default"
+OAUTH_AUDIENCE = "agent-backend"
+
 #: Признаки «очки кончились» в ответах MiniMax Code.
 _QUOTA_MARKERS = (
     "insufficient balance",
@@ -152,21 +159,98 @@ class MinimaxAccount:
     def token(self) -> Optional[str]:
         """Живой access-токен из токен-стора профиля.
 
-        В сторе несколько записей (десктоп и CLI); берём ту, что не протухла.
-        Токен сам обновляется — CLI делает это при первом обращении к профилю.
+        Токен протухает, а обновляет его **CLI** — но только когда CLI сам
+        запускается. Движок читает токен напрямую (панель чекина), и протухший
+        токен молча выкинул бы аккаунт из пула: «401» на панели выглядел бы
+        как «у аккаунта нет очков», и контур тихо работал бы вхолостую.
+        Поэтому обновление — здесь, по refresh-токену того же аккаунта.
         """
-        try:
-            data = json.loads(self.auth_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return None
-        records = list((data.get("records") or {}).values())
+        records = self._records()
         if not records:
             return None
         now_ms = int(time.time() * 1000)
-        live = [r for r in records if (r.get("expiresAtMs") or 0) > now_ms]
-        best = max(live or records, key=lambda r: r.get("expiresAtMs") or 0)
+        live = [r for r in records.values() if (r.get("expiresAtMs") or 0) > now_ms]
+        if not live and self.refresh():
+            records = self._records()
+            live = [r for r in records.values() if (r.get("expiresAtMs") or 0) > now_ms]
+        best = max(live or records.values(), key=lambda r: r.get("expiresAtMs") or 0)
         token = best.get("accessToken")
         return str(token) if token else None
+
+    def _records(self) -> Dict[str, Any]:
+        """Записи токен-стора (их несколько: десктоп и CLI)."""
+        try:
+            data = json.loads(self.auth_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+        return data.get("records") or {}
+
+    def refresh(self) -> bool:
+        """Обновить access-токен по refresh-токену и записать обратно в стор.
+
+        Контракт взят из рантайма MiniMax Code (замерено 13.11): обмен на
+        ``account.minimax.io/oauth2/token``, форма ``grant_type=refresh_token``,
+        ``client_id``/``scope``/``audience`` — как у публичного клиента.
+        """
+        records = self._records()
+        if not records:
+            return False
+        key = next(iter(records))
+        record = records[key]
+        refresh_token = record.get("refreshToken")
+        if not refresh_token:
+            return False
+        body = urlencode(
+            {
+                "grant_type": "refresh_token",
+                "refresh_token": refresh_token,
+                "client_id": record.get("clientId") or OAUTH_CLIENT_ID,
+                "scope": OAUTH_SCOPE,
+                "audience": OAUTH_AUDIENCE,
+            }
+        ).encode("utf-8")
+        req = urllib.request.Request(
+            OAUTH_TOKEN_URL,
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/x-www-form-urlencoded",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=30) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "minimax: не обновить токен аккаунта %s (%s: %s)",
+                self.name,
+                type(exc).__name__,
+                str(exc)[:120],
+            )
+            return False
+        access = payload.get("access_token")
+        if not access:
+            return False
+        expires_in = int(payload.get("expires_in") or 3600)
+        record["accessToken"] = access
+        if payload.get("refresh_token"):
+            record["refreshToken"] = payload["refresh_token"]
+        record["expiresAtMs"] = int(time.time() * 1000) + expires_in * 1000 - 300 * 1000
+        try:
+            store = json.loads(self.auth_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False
+        store.setdefault("records", {})[key] = record
+        tmp = self.auth_path.with_suffix(".json.tmp")
+        try:
+            tmp.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+            tmp.replace(self.auth_path)
+        except OSError as exc:
+            logger.warning("minimax: токен обновлён, но не записан (%s)", exc)
+            return False
+        logger.info("minimax: access-токен аккаунта %s обновлён", self.name)
+        return True
 
     def summary(self) -> Dict[str, Any]:
         panel = self.panel or {}
