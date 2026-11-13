@@ -130,6 +130,57 @@ def test_token_reads_live_record(tmp_path):
     assert account.token() == "tok-acc1"
 
 
+def test_expired_token_is_refreshed(monkeypatch, tmp_path):
+    """Протухший токен обновляется по refresh-токену — иначе аккаунт молча
+    выпадает из пула («401» на панели выглядит как «нет очков»)."""
+    account = _account(tmp_path, "acc1")
+    path = account.auth_path
+    data = json.loads(path.read_text(encoding="utf-8"))
+    record = data["records"]["client"]
+    record["accessToken"] = "старый"
+    record["expiresAtMs"] = 1000
+    record["refreshToken"] = "ref-1"
+    path.write_text(json.dumps(data), encoding="utf-8")
+
+    seen = {}
+
+    class _Resp:
+        def read(self):
+            return json.dumps(
+                {"access_token": "новый", "refresh_token": "ref-2", "expires_in": 3600}
+            ).encode("utf-8")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+    def _fake_urlopen(req, timeout=None):
+        seen["body"] = req.data.decode("utf-8")
+        return _Resp()
+
+    monkeypatch.setattr(mx.urllib.request, "urlopen", _fake_urlopen)
+    assert account.token() == "новый"
+    assert "grant_type=refresh_token" in seen["body"]
+    assert "refresh_token=ref-1" in seen["body"]
+    # и токен записан обратно в стор
+    saved = json.loads(path.read_text(encoding="utf-8"))
+    assert saved["records"]["client"]["accessToken"] == "новый"
+    assert saved["records"]["client"]["refreshToken"] == "ref-2"
+
+
+def test_refresh_without_refresh_token_gives_up(tmp_path):
+    account = _account(tmp_path, "acc1")
+    path = account.auth_path
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["records"]["client"].pop("refreshToken", None)
+    data["records"]["client"]["expiresAtMs"] = 1000
+    path.write_text(json.dumps(data), encoding="utf-8")
+    # живой записи нет — возвращаем что есть, но не падаем
+    assert account.token() is not None
+
+
 def test_token_prefers_live_record_over_expired(tmp_path):
     account = _account(tmp_path, "acc2")
     path = account.auth_path
