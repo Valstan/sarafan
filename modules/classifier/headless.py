@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import time
 from datetime import datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
@@ -88,6 +89,30 @@ def chat(**kwargs: Any) -> Dict[str, Any]:
     тратит.
     """
     from modules import engine_guard
+
+    engine = (os.getenv("CLASSIFIER_ENGINE") or "").strip().lower() or "deepseek"
+
+    # MiniMax Code — второй контур (ADR-0017). Пул аккаунтов с ежедневными
+    # очками чекина; когда очки кончились у всех — это НЕ поломка движка,
+    # поэтому причина тут «accounts_exhausted», а не «quota_exhausted»:
+    # иначе общий предохранитель закрыл бы контур на полчаса из-за одного
+    # аккаунта, тогда как пул разберётся сам.
+    if engine == "minimax":
+        from modules.minimax_engine import chat as _minimax_chat
+
+        result = _minimax_chat(**kwargs)
+        if result.get("ok"):
+            engine_guard.note_result(True)
+            return result
+        reason = str(result.get("reason") or "engine_failed")
+        engine_guard.note_result(False, reason)
+        logger.warning(
+            "headless: MiniMax не ответил (%s) — закрываем чанк платным Дипсиком",
+            reason,
+        )
+        if not paid_fallback_enabled():
+            return result
+        return _deepseek_chat(**kwargs)
 
     if not engine_enabled():
         result = _deepseek_chat(**kwargs)
