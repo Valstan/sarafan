@@ -27,10 +27,9 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import sys
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -41,7 +40,6 @@ bootstrap_secrets()
 from database.connection import AsyncSessionLocal  # noqa: E402
 from modules.classifier import headless, rules  # noqa: E402
 from modules.minimax_engine import (  # noqa: E402
-    _ensure_points,
     account_sort_key,
     claim_points,
     discover_accounts,
@@ -143,8 +141,11 @@ async def main() -> int:
                 entry["day_no"],
                 entry["points"],
                 entry["status"],
-                "можно забрать" if entry["claimable"] else
-                ("уже забрано" if entry["claimed"] else "нет очков"),
+                (
+                    "можно забрать"
+                    if entry["claimable"]
+                    else ("уже забрано" if entry["claimed"] else "нет очков")
+                ),
             )
         )
         if "claim" in entry:
