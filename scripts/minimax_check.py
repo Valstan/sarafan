@@ -41,6 +41,7 @@ import database.models  # noqa: E402,F401 — регионы и прочие м�
 from database.connection import AsyncSessionLocal  # noqa: E402
 from modules.classifier import headless, rules  # noqa: E402
 from modules.minimax_engine import (  # noqa: E402
+    _match_lease_account,
     account_sort_key,
     claim_points,
     discover_accounts,
@@ -48,11 +49,56 @@ from modules.minimax_engine import (  # noqa: E402
 )
 
 
+def _lease_probe(accounts) -> Dict[str, Any]:
+    """Спросить у Кармана аккаунт и проверить, есть ли у нас такой профиль.
+
+    Только чтение: аккаунт не активируется, очки не забираются — проба
+    показывает, сойдётся ли выдача Кармана с нашим пулом.
+    """
+    from modules import karman_minimax
+
+    if not karman_minimax.enabled():
+        return {
+            "enabled": False,
+            "reason": "ручки пула не настроены (адрес или токен комнаты не задан)",
+        }
+    try:
+        offer = karman_minimax.take_account()
+    except RuntimeError as exc:
+        return {"enabled": True, "ok": False, "reason": str(exc)[:200]}
+    if offer.empty:
+        return {
+            "enabled": True,
+            "ok": False,
+            "reason": "у Кармана нет свободных аккаунтов (свободно %s, скоро %s)"
+            % (offer.free, offer.soon),
+        }
+    matched = _match_lease_account(accounts, offer.account or {})
+    return {
+        "enabled": True,
+        "ok": True,
+        "account": {
+            "id": (offer.account or {}).get("id"),
+            "email": (offer.account or {}).get("email"),
+            "title": (offer.account or {}).get("title"),
+            "activation_index": (offer.account or {}).get("activation_index"),
+            "points_next": (offer.account or {}).get("points_next"),
+        },
+        "tier": offer.tier,
+        "free": offer.free,
+        "soon": offer.soon,
+        "project": offer.project,
+        "provisioned": matched is not None,
+        "profile": matched.name if matched else None,
+    }
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser(description="Проба контура MiniMax")
     ap.add_argument("--verify", action="store_true", help="сходить до модели и вынести вердикт")
     ap.add_argument("--accounts-dir", default="", help="каталог пула аккаунтов")
     ap.add_argument("--posts", type=int, default=3, help="сколько постов взять для пробы")
+    ap.add_argument("--lease", action="store_true", help="спросить у Кармана аккаунт")
     ap.add_argument("--json", action="store_true", help="вывод в JSON")
     args = ap.parse_args()
 
@@ -87,6 +133,9 @@ async def main() -> int:
     accounts.sort(key=account_sort_key)
     report["rotation"] = [a.name for a in accounts]
 
+    if args.lease:
+        report["lease"] = _lease_probe(accounts)
+
     if args.verify:
         from modules.classifier import service as classifier_service
 
@@ -112,9 +161,11 @@ async def main() -> int:
             report["verdict"] = {
                 "ok": bool(result.get("ok")),
                 "account": result.get("account"),
+                "tried_accounts": result.get("tried_accounts"),
                 "model": result.get("model"),
                 "usage": result.get("usage"),
                 "reason": result.get("reason"),
+                "detail": str(result.get("detail") or "")[:400],
                 "problems": problems,
                 "verdicts": [
                     {
@@ -153,6 +204,33 @@ async def main() -> int:
             print("      claim:", entry["claim"])
     print("=== порядок ротации ===")
     print("  " + " → ".join(report["rotation"]))
+    if "lease" in report:
+        lease = report["lease"]
+        print("=== аренда у Кармана ===")
+        if not lease.get("enabled"):
+            print("  выключена: " + str(lease.get("reason")))
+        elif not lease.get("ok"):
+            print("  аккаунт не выдан: " + str(lease.get("reason")))
+        else:
+            account = lease.get("account") or {}
+            print(
+                "  аккаунт: id=%s %s (%s), клетка %s, очки %s"
+                % (
+                    account.get("id"),
+                    account.get("title") or "?",
+                    account.get("email") or "?",
+                    account.get("activation_index"),
+                    account.get("points_next"),
+                )
+            )
+            print(
+                "  пул: свободно %s, скоро %s, класс %s, проект %s"
+                % (lease.get("free"), lease.get("soon"), lease.get("tier"), lease.get("project"))
+            )
+            print(
+                "  профиль на этой машине: %s"
+                % (lease.get("profile") if lease.get("provisioned") else "НЕТ (не заведён)")
+            )
     if "verdict" in report:
         print("=== вердикт ===")
         print(json.dumps(report["verdict"], ensure_ascii=False, indent=2))

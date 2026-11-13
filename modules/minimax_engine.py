@@ -49,6 +49,13 @@ JSON`` на любой схеме (и полной, и плоской). Поэт
 **Учёт.** Каждый вызов пишется в журнал (JSONL) и в общий учёт Кармана — там
 живёт счёт активаций по проектам, и без общей статистики один и тот же аккаунт
 достанется и Сарафану, и владельцу в одни сутки.
+
+**Аренда у Кармана.** Подбор аккаунта — не наш: по схеме владельца Сарафан
+приходит к Карману за следующим аккаунтом (``modules/karman_minimax.py``),
+активирует его у себя (забирает очки чекина — это и есть активация) и работает,
+пока очки не кончатся; потом приходит за следующим. Подбор, статистику и
+оптимальный выбор кандидата считает движок Кармана. Пока ручек у Кармана нет,
+движок работает своим пулом и своей ротацией — переключается само.
 """
 
 from __future__ import annotations
@@ -67,6 +74,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
+
+from modules import karman_minimax
 
 logger = logging.getLogger(__name__)
 
@@ -107,6 +116,20 @@ DEFAULT_CLI_MODE = "standard"
 #: ответить; на 3 шагах он не успевает (замер 13.11: ``limit_exceeded``).
 ENV_MAX_STEPS = "MINIMAX_MAX_STEPS"
 DEFAULT_MAX_STEPS = 6
+#: Сколько аккаунтов за один вызов разрешено запросить у Кармана. Больше трёх
+#: подряд «пустых» ответов — уже не «очки кончились», а неполадки на стороне
+#: Кармана, и волна должна уйти на платный движок-страховку.
+ENV_MAX_LEASES = "MINIMAX_MAX_LEASES"
+DEFAULT_MAX_LEASES = 3
+#: Пауза после сбоя связи с Карманом. Пока она не истекла, мы к нему не ходим:
+#: каждый чанк иначе ждал бы сетевого таймаута, а учёт активаций он всё равно
+#: не примет. Это НЕ предохранитель движка: волна уходит в платный DeepSeek.
+ENV_KARMAN_DOWN_TTL = "MINIMAX_KARMAN_DOWN_TTL"
+DEFAULT_KARMAN_DOWN_TTL = 60
+_karman_down_until = 0.0
+#: Файл с метаданными профиля рядом с ``auth.json``: почта аккаунта и его id
+#: в Кармане. По почве аккаунт, выданный Карманом, узнаётся у нас.
+PROFILE_META_NAME = "profile.json"
 #: Задача, которую CLI получает вместе с файлом с постами.
 TASK_TEXT = (
     "Вынеси вердикты по постам из прикреплённого файла. "
@@ -143,6 +166,12 @@ class MinimaxAccount:
     email: str = ""
     panel: Optional[Dict[str, Any]] = None
     claimed_today: bool = False
+    #: id аккаунта в Кармане (из ``profile.json``) — по нему отмечаем активацию.
+    karman_id: Optional[int] = None
+    #: Очки, забранные за сегодня (нужны для отчёта в Карман).
+    claimed_points: int = 0
+    #: Номер клетки серии (1..7) — тоже для отчёта в Карман.
+    activation_index: Optional[int] = None
 
     @property
     def config_dir(self) -> Path:
@@ -417,6 +446,8 @@ def _ensure_points(account: MinimaxAccount) -> bool:
     today = _today_cell(panel)
     if not today:
         return False
+    account.activation_index = today.get("day_no")
+    account.claimed_points = int(today.get("points") or 0)
     if today.get("status") == 3:
         account.claimed_today = True
         return True
@@ -434,6 +465,54 @@ def _ensure_points(account: MinimaxAccount) -> bool:
     return bool(account.claimed_today)
 
 
+def _report_activation(account_id: Any, account: MinimaxAccount) -> bool:
+    """Отметить активацию в журнале Кармана.
+
+    Отмечаем **все** активации Сарафана, а не только арендованные: иначе
+    владелец увидит у себя аккаунт «свободным», который уже израсходован на
+    Сарафане, и предложит его себе же (требование владельца: один аккаунт не
+    достается одновременно Сарафану и владельцу).
+
+    ``activation_index`` — клетка, которую мы увидели на панели MiniMax: у
+    Кармана это истина, а расхождение с их предсказанием помечается флагом
+    ``mismatch`` (их правило клетки от чужого показания не меняется).
+    """
+    if not karman_minimax.enabled():
+        return False
+    if account_id is None:
+        logger.warning("minimax: у профиля %s нет id Кармана — активация не отмечена", account.name)
+        return False
+    try:
+        record = karman_minimax.report_activation(
+            account_id,
+            points=account.claimed_points or None,
+            activation_index=account.activation_index,
+        )
+    except RuntimeError as exc:
+        logger.warning("minimax: активация не записана (%s)", exc)
+        return False
+    if record.get("mismatch"):
+        logger.warning(
+            "minimax: у Кармана расхождение по очкам аккаунта (ожидали %s, у нас %s)",
+            record.get("points_expected"),
+            record.get("points"),
+        )
+    return True
+
+
+def _read_profile_meta(root: Path) -> Dict[str, Any]:
+    """Метаданные профиля (``profile.json``): почта аккаунта и его id в Кармане.
+
+    Файл необязательный: профиль без него работает, но аккаунт не узнаётся по
+    выдаче Кармана и активация не отмечается в его журнале.
+    """
+    try:
+        data = json.loads((root / PROFILE_META_NAME).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def discover_accounts(accounts_dir: Optional[str] = None) -> List[MinimaxAccount]:
     """Найти аккаунты в каталоге пула (каталог = профиль CLI)."""
     root = Path(accounts_dir or os.getenv(ENV_ACCOUNTS_DIR) or DEFAULT_ACCOUNTS_DIR)
@@ -446,8 +525,33 @@ def discover_accounts(accounts_dir: Optional[str] = None) -> List[MinimaxAccount
         account = MinimaxAccount(name=entry.name, root=entry)
         if not account.auth_path.exists():
             continue
+        meta = _read_profile_meta(entry)
+        account.email = str(meta.get("email") or "").strip()
+        karman_id = meta.get("karman_account_id")
+        account.karman_id = int(karman_id) if karman_id is not None else None
         out.append(account)
     return out
+
+
+def _match_lease_account(
+    accounts: List[MinimaxAccount], lease: Dict[str, Any]
+) -> Optional[MinimaxAccount]:
+    """Профиль для аккаунта, выданного Карманом.
+
+    Сначала по id (он у нас точный), потом по почте. Почва — идентификатор
+    входа у Кармана, и он же лежит в метаданных профиля.
+    """
+    wanted_id = lease.get("id")
+    wanted_email = str(lease.get("email") or "").strip().lower()
+    if wanted_id is not None:
+        for account in accounts:
+            if account.karman_id is not None and account.karman_id == int(wanted_id):
+                return account
+    if wanted_email:
+        for account in accounts:
+            if account.email.strip().lower() == wanted_email:
+                return account
+    return None
 
 
 def _is_quota_error(detail: str) -> bool:
@@ -630,7 +734,7 @@ def record_usage(
         logger.warning("minimax: журнал расхода недоступен (%s)", exc)
 
 
-def chat(**kwargs: Any) -> Dict[str, Any]:
+def _chat_local(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any]:
     """Вызов модели через пул аккаунтов MiniMax Code.
 
     Контракт тот же, что у остальных движков (``modules/deepseek_client``):
@@ -642,7 +746,6 @@ def chat(**kwargs: Any) -> Dict[str, Any]:
     if not user.strip():
         return {"ok": False, "reason": "empty_prompt"}
 
-    accounts = discover_accounts()
     if not accounts:
         return {"ok": False, "reason": "no_accounts"}
 
@@ -668,6 +771,7 @@ def chat(**kwargs: Any) -> Dict[str, Any]:
             tried.append(account.name)
             continue
         tried.append(account.name)
+        _report_activation(account.karman_id, account)
         ok, content, details = run_classification(
             account,
             system=system,
@@ -705,8 +809,10 @@ def chat(**kwargs: Any) -> Dict[str, Any]:
     else:
         # Все аккаунты кончились по очкам — это НЕ поломка движка: пул разберут
         # завтра, а волна сегодня идёт по обычным фильтрам (fail-open).
-        last_reason = "accounts_exhausted"
-        last_detail = "нет аккаунта с очками на сегодня"
+        # Причина про квоту не маскируется: «accounts_exhausted» — только если
+        # отказа по очкам не было вовсе.
+        if last_reason == "accounts_exhausted":
+            last_detail = "нет аккаунта с очками на сегодня"
 
     return {
         "ok": False,
@@ -714,3 +820,170 @@ def chat(**kwargs: Any) -> Dict[str, Any]:
         "detail": last_detail,
         "tried_accounts": tried,
     }
+
+
+def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any]:
+    """Работа по аккаунтам, которые выдаёт Карман.
+
+    Кто выбирает аккаунт — Карман: он же ведёт журнал и знает, что уже
+    израсходовано. Мы получаем аккаунт, активируем его у себя (забираем очки
+    чекина — это и есть активация), отмечаем активацию в его журнале и работаем,
+    пока очки не кончатся; потом — снова за аккаунтом.
+    """
+    global _karman_down_until
+
+    system = str(kwargs.get("system") or "")
+    user = str(kwargs.get("user") or "")
+
+    if time.monotonic() < _karman_down_until:
+        # Карман лежит: не ходим к нему до конца паузы (каждый чанк иначе ждал
+        # бы сетевого таймаута). Волна уходит в платный движок-страховку.
+        return {
+            "ok": False,
+            "reason": "karman_unavailable",
+            "detail": "Карман не отвечает (пауза после сбоя)",
+            "tried_accounts": [],
+        }
+
+    try:
+        max_leases = max(1, int(os.getenv(ENV_MAX_LEASES) or DEFAULT_MAX_LEASES))
+    except ValueError:
+        max_leases = DEFAULT_MAX_LEASES
+
+    tried: List[str] = []
+    last_reason = "accounts_exhausted"
+    last_detail = ""
+
+    for _ in range(max_leases):
+        try:
+            offer = karman_minimax.take_account()
+        except RuntimeError as exc:
+            logger.warning("minimax: Карман не ответил (%s)", exc)
+            try:
+                down_ttl = max(
+                    5.0, float(os.getenv(ENV_KARMAN_DOWN_TTL) or DEFAULT_KARMAN_DOWN_TTL)
+                )
+            except ValueError:
+                down_ttl = DEFAULT_KARMAN_DOWN_TTL
+            _karman_down_until = time.monotonic() + down_ttl
+            return {
+                "ok": False,
+                "reason": "karman_unavailable",
+                "detail": str(exc)[:300],
+                "tried_accounts": tried,
+            }
+        if offer.empty:
+            # Честная пустота: сегодня брать нечего. Это НЕ поломка движка.
+            last_reason = "accounts_exhausted"
+            last_detail = "у Кармана нет свободных аккаунтов (свободно %s, скоро %s)" % (
+                offer.free,
+                offer.soon,
+            )
+            break
+        _karman_down_until = 0.0
+        account = _match_lease_account(accounts, offer.account or {})
+        if account is None:
+            # Аккаунт от Кармана, а нашего профиля под него нет: вход в этот
+            # аккаунт ещё не сделан (device-flow — только браузер владельца).
+            # Работать нечем, и крутить пул бессмысленно: Карман отдаст тот же.
+            last_reason = "account_not_authorized"
+            last_detail = "аккаунт %s не авторизован на этой машине (нужен вход владельца)" % (
+                karman_minimax.account_identity(offer.account),
+            )
+            logger.warning("minimax: %s", last_detail)
+            break
+        if not _ensure_points(account):
+            last_reason = "accounts_exhausted"
+            last_detail = "у аккаунта %s сегодня нет очков" % account.name
+            continue
+        tried.append(account.name)
+        account_id = (offer.account or {}).get("id")
+        if account_id is None:
+            account_id = account.karman_id
+        # Активация в журнале Кармана: с этого момента аккаунт считается
+        # израсходованным на Сарафане и владельцу в те же сутки не предлагается.
+        try:
+            karman_minimax.report_activation(
+                account_id,
+                points=account.claimed_points or None,
+                activation_index=account.activation_index,
+            )
+        except RuntimeError as exc:
+            # 409: аккаунт уже записан за другим проектом или занят окном.
+            last_reason = "account_conflict"
+            last_detail = str(exc)[:200]
+            logger.warning("minimax: аккаунт %s занят (%s) — берём другой", account.name, exc)
+            continue
+        ok, content, details = run_classification(
+            account,
+            system=system,
+            user=user,
+            timeout=kwargs.get("timeout"),
+        )
+        if ok:
+            record_usage(
+                account,
+                ok=True,
+                points=int(details.get("points") or 0),
+                posts=int(kwargs.get("posts") or 0),
+                usage=details.get("usage"),
+            )
+            return {
+                "ok": True,
+                "content": content,
+                "model": details.get("model") or os.getenv(ENV_MODEL) or DEFAULT_MODEL,
+                "usage": details.get("usage") or {},
+                "account": account.name,
+                "leased": True,
+                "karman_account_id": account_id,
+            }
+        last_reason = str(details.get("reason") or "engine_failed")
+        last_detail = str(details.get("detail") or "")
+        record_usage(
+            account,
+            ok=False,
+            reason=last_reason,
+            points=int(details.get("points") or 0),
+            posts=int(kwargs.get("posts") or 0),
+            usage=details.get("usage"),
+        )
+        if last_reason != "quota_exhausted":
+            return {
+                "ok": False,
+                "reason": last_reason,
+                "detail": last_detail,
+                "tried_accounts": tried,
+            }
+        # Очки кончились: активация уже записана, дальше — следующий аккаунт.
+
+    return {
+        "ok": False,
+        "reason": last_reason,
+        "detail": last_detail,
+        "tried_accounts": tried,
+    }
+
+
+def chat(**kwargs: Any) -> Dict[str, Any]:
+    """Вызов модели через пул аккаунтов MiniMax Code.
+
+    Контракт тот же, что у остальных движков (``modules/deepseek_client``):
+    ``{"ok": True, "content": ..., "model": ..., "usage": ...}`` либо
+    ``{"ok": False, "reason": ..., "detail": ...}``.
+
+    **Кто выбирает аккаунт.** Если ручки учёта у Кармана настроены, аккаунт
+    выбирает Карман: он же ведёт статистику и знает, что уже израсходовано.
+    Мы активируем выданный аккаунт и работаем на нём. Если ручек нет — работаем
+    своим пулом и своей ротацией (как до аренды).
+    """
+    user = str(kwargs.get("user") or "")
+    if not user.strip():
+        return {"ok": False, "reason": "empty_prompt"}
+
+    accounts = discover_accounts()
+    if not accounts:
+        return {"ok": False, "reason": "no_accounts"}
+
+    if karman_minimax.enabled():
+        return _chat_leased(accounts, **kwargs)
+    return _chat_local(accounts, **kwargs)
