@@ -21,7 +21,14 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from sqlalchemy import select
 
-from config.classifier import get_rule_stale_days, read_postulates
+from config.classifier import (
+    COMPACT_POSTULATES_PATH,
+    LOCAL_RULEBOOK_COMPACT,
+    get_local_rulebook_mode,
+    get_rule_stale_days,
+    read_compact_postulates,
+    read_postulates,
+)
 from database.models_extended import (
     ClassificationCorrection,
     ClassificationRule,
@@ -107,6 +114,27 @@ async def render_effective_postulates(session) -> str:
         r.last_effective_at = now
     await session.commit()
     return rendered
+
+
+async def resolve_local_postulates(session) -> str:
+    """Правильник для локального контура — по флагу ``LOCAL_ENGINE_RULEBOOK``.
+
+    ``effective`` (дефолт) — боевой путь: база из git + живые выученные правила
+    из БД. ``compact`` — сжатый файл целиком (ADR-0016): нужен локальной модели,
+    у которой окно контекста режется, и промпт должен быть коротким.
+
+    Файл недоступен → откат на боевой путь, а не пустой промпт: модель без
+    правил отвечает «мусор» на всё подряд, и это хуже, чем длинный промпт.
+    """
+    if get_local_rulebook_mode() == LOCAL_RULEBOOK_COMPACT:
+        compact = read_compact_postulates()
+        if compact.strip():
+            return compact
+        logger.warning(
+            "classifier: сжатый правилник недоступен (%s) — беру действующий",
+            COMPACT_POSTULATES_PATH,
+        )
+    return await render_effective_postulates(session)
 
 
 async def render_learned_snapshot(session) -> str:
