@@ -7,7 +7,11 @@
 
 * **A** — действующие эффективные постулаты (база + словарь тем + выученные
   правила из БД);
-* **B** — сжатая база + тот же словарь тем + те же выученные правила.
+* **B** — кандидат: по умолчанию сжатый файл целиком
+  (``config/classification_postulates.compact.md``, ADR-0016 — база + выученные
+  в одном файле); либо сжатая база + словарь тем + выученные правила из БД
+  (режимы ``tail``/``standalone`` — только для кандидата БЕЗ выученного слоя,
+  иначе слои задваиваются, и измерялось бы не то, что в бою).
 
 Сравниваются: доля совпадений с решением оператора по ``action`` и по ``theme``,
 плюс размер промпта в символах и в грубых токенах.
@@ -51,6 +55,7 @@ from database.models_extended import ClassificationCorrection, ContentClassifica
 from modules.classifier import headless, rules  # noqa: E402
 
 _THEMES_MARKER = "\n\n## Разрешённые темы (theme)\n\n"
+_LEARNED_HEADER = "## Выученные правила"
 
 
 def _approx_tokens(text: str) -> int:
@@ -139,7 +144,20 @@ def _variant_b(effective: str, base_text: str, mode: str) -> str:
     ``compactlearned`` — действующая база + словарь тем + **сжатые формулировки**
     выученных правил (из ``config/learned_rules_compact.json``): так измеряется
     вклад сжатия формулировок, а не выноса правил из БД.
+
+    ``merged`` — сжатый файл целиком, как есть: в нём уже есть и база, и
+    выученные правила (ADR-0016). Хвост действующих постулатов НЕ добавляется:
+    иначе выученные правила попали бы в промпт дважды — из файла и из БД.
     """
+    if mode == "merged":
+        return base_text.rstrip() + "\n"
+    if _LEARNED_HEADER in base_text:
+        # Кандидат уже слитый (base + выученные). Добавление хвоста дало бы
+        # выученные правила дважды — и замер считал бы не то, что в бою.
+        raise ValueError(
+            "кандидат уже содержит раздел «Выученные правила» — режимы "
+            "tail/standalone добавят их второй раз; для такого файла режим merged"
+        )
     if _THEMES_MARKER not in effective:
         return base_text.rstrip() + "\n"
     tail = effective.split(_THEMES_MARKER, 1)[1]
@@ -235,9 +253,10 @@ async def main() -> int:
     ap.add_argument("--show", type=int, default=12, help="сколько расхождений напечатать")
     ap.add_argument(
         "--variant-b-mode",
-        choices=["tail", "standalone", "compactlearned"],
-        default="tail",
-        help="tail — кандидат + словарь тем + выученные правила; "
+        choices=["tail", "standalone", "compactlearned", "merged"],
+        default="merged",
+        help="merged — сжатый файл целиком, как есть (ADR-0016, дефолт); "
+        "tail — кандидат + словарь тем + выученные правила; "
         "standalone — только кандидат + словарь тем; "
         "compactlearned — действующая база + сжатые формулировки правил",
     )
@@ -263,7 +282,11 @@ async def main() -> int:
         # постулаты, где подменены только тексты выученных правил.
         compact_path = Path(__file__).resolve().parent.parent / args.compact
         compact_base = compact_path.read_text(encoding="utf-8")
-    variant_b = _variant_b(effective, compact_base, args.variant_b_mode)
+    try:
+        variant_b = _variant_b(effective, compact_base, args.variant_b_mode)
+    except ValueError as exc:
+        print("измерять нельзя: %s" % exc)
+        return 1
 
     print(
         "\nвариант A (действующий): %d символов (~%d токенов)"

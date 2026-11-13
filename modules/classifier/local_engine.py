@@ -228,7 +228,7 @@ async def export_batch(
     if not posts:
         return None
 
-    postulates = await rules.render_effective_postulates(session)
+    postulates = await rules.resolve_local_postulates(session)
     chunks = headless.chunk_posts(posts, chunk_size, regions_per_chunk=regions_per_chunk)
     chunk = chunks[0] if chunks else posts[:1]
 

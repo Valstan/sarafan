@@ -48,6 +48,18 @@ logger = logging.getLogger(__name__)
 # версия = git. Подаётся в промпт классификатора (рутины/API).
 POSTULATES_PATH = Path(__file__).resolve().parent / "classification_postulates.md"
 
+# Сжатая версия правилника (ADR-0016): база + выученные правила в одном файле.
+# Живёт ОТДЕЛЬНО от боевой базы не по вкусу, а по существу: выученные правила
+# здесь заморожены снимком, а в боевом пути они живые (БД, ADR-0005) — новое
+# утверждённое правило оператора обязано доехать до промпта без пересборки файла.
+# Подменять базу этим файлом нельзя: замёрзший выученный слой тихо перестаёт
+# расти, и пропавший пост не выдаёт себя ошибкой.
+COMPACT_POSTULATES_PATH = Path(__file__).resolve().parent / "classification_postulates.compact.md"
+
+# Режимы правильника локального контура (env ``LOCAL_ENGINE_RULEBOOK``).
+LOCAL_RULEBOOK_EFFECTIVE = "effective"  # база (git) + живые выученные из БД
+LOCAL_RULEBOOK_COMPACT = "compact"  # сжатый файл целиком (ADR-0016)
+
 
 def get_ingest_key() -> str:
     """Секрет облачной рутины (env ``CLASSIFIER_INGEST_KEY``). Пусто = ingest выключен."""
@@ -270,6 +282,42 @@ def read_postulates() -> str:
         return POSTULATES_PATH.read_text(encoding="utf-8")
     except OSError:
         return ""
+
+
+def read_compact_postulates() -> str:
+    """Текст сжатого правилника (ADR-0016). Нет файла → ''.
+
+    Отдельная функция, а не флаг у :func:`read_postulates`: файла два, и
+    подменить один другим нельзя — у них разный срок жизни (см.
+    ``COMPACT_POSTULATES_PATH``).
+    """
+    try:
+        return COMPACT_POSTULATES_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+
+
+def get_local_rulebook_mode() -> str:
+    """Какой правилник у локального контура (env ``LOCAL_ENGINE_RULEBOOK``).
+
+    ``effective`` (дефолт) — боевой путь: база из git + живые выученные правила
+    из БД. ``compact`` — сжатый файл целиком: нужен локальной модели, у которой
+    окно контекста режется, и промпт должен быть коротким (ADR-0016).
+
+    Неизвестное значение читается как ``effective`` и логируется: опечатка в env
+    не должна молча переключить контур на другой промпт посреди волны.
+    """
+    raw = (os.getenv("LOCAL_ENGINE_RULEBOOK") or "").strip().lower()
+    if not raw:
+        return LOCAL_RULEBOOK_EFFECTIVE
+    if raw in (LOCAL_RULEBOOK_EFFECTIVE, LOCAL_RULEBOOK_COMPACT):
+        return raw
+    logger.warning(
+        "classifier: неизвестный LOCAL_ENGINE_RULEBOOK=%s — работаем как %s",
+        raw,
+        LOCAL_RULEBOOK_EFFECTIVE,
+    )
+    return LOCAL_RULEBOOK_EFFECTIVE
 
 
 # Показатель степени при просмотрах в рейтинге отбора (звено 5, шаг 1).
