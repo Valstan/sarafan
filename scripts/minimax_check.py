@@ -37,8 +37,8 @@ from modules.secrets_bootstrap import bootstrap_secrets  # noqa: E402
 
 bootstrap_secrets()
 
-from database.connection import AsyncSessionLocal  # noqa: E402
 import database.models  # noqa: E402,F401 — регионы и прочие модели для мапперов
+from database.connection import AsyncSessionLocal  # noqa: E402
 from modules.classifier import headless, rules  # noqa: E402
 from modules.minimax_engine import (  # noqa: E402
     account_sort_key,
