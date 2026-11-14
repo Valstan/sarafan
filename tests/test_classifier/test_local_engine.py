@@ -425,6 +425,7 @@ def test_dead_source_is_marked_as_not_working():
         ("deepseek-v4.1-flash-free", local_engine.ENGINE_OPENCODE),
         ("flint-40b-free", local_engine.ENGINE_OPENCODE),
         ("glm-5.3-flash-free", local_engine.ENGINE_OPENCODE),
+        ("minimax/MiniMax-M3.1-Flash", local_engine.ENGINE_MINIMAX),
         ("", local_engine.ENGINE_UNKNOWN),
         (None, local_engine.ENGINE_UNKNOWN),
     ],
@@ -445,11 +446,13 @@ def test_engine_buckets_split_paid_and_free():
         ("deepseek-flash", 4430),
         ("opencode/deepseek-v4.1-flash-free", 23813),
         ("flint-40b-free", 19),
+        ("minimax/MiniMax-M3.1-Flash", 120),
         ("", 7),
     ]
     bucket = local_engine.engine_buckets(rows)
     assert bucket[local_engine.ENGINE_DEEPSEEK] == 4430
     assert bucket[local_engine.ENGINE_OPENCODE] == 23832
+    assert bucket[local_engine.ENGINE_MINIMAX] == 120
     assert bucket[local_engine.ENGINE_UNKNOWN] == 7
     assert sum(bucket.values()) == sum(n for _m, n in rows)
 
@@ -479,7 +482,7 @@ def test_stats_payload_carries_engine_split(tmp_path, monkeypatch):
     движок и живость должны быть видны в одном ответе.
     """
     monkeypatch.setenv("LOCAL_ENGINE_RUNS_LOG", str(tmp_path / "runs.jsonl"))
-    monkeypatch.setenv("CLASSIFIER_ENGINE", "deepseek")
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "minimax")
 
     class _Result:
         def all(self):
@@ -506,15 +509,19 @@ def test_stats_payload_carries_engine_split(tmp_path, monkeypatch):
     ):
         assert key in data, "сводка без %s" % key
 
-    assert data["engine_now"]["mode"] == "deepseek"
-    assert "Дипсик" in data["engine_now"]["label"]
+    assert data["engine_now"]["mode"] == "minimax"
+    assert "Минимакс" in data["engine_now"]["label"]
     assert set(data["engine_windows"]["24h"]["by_engine"]) == {
         local_engine.ENGINE_DEEPSEEK,
         local_engine.ENGINE_OPENCODE,
+        local_engine.ENGINE_MINIMAX,
         local_engine.ENGINE_UNKNOWN,
     }
     assert data["source_meta"]["routine"]["alive"] is False
     assert data["source_meta"]["headless"]["alive"] is True
+    # Контур opencode снят с прода 14.11 — панель говорит об этом прямо.
+    assert data["daemon"]["decommissioned"] is True
+    assert "MiniMax" in data["daemon"]["note"]
 
     # Время из БД — UTC без зоны. Без пометки UTC браузер прочитает его как
     # московское и покажет «4 ч назад» вместо «1 ч назад»: минус три часа врёт

@@ -48,10 +48,21 @@ function modelLabel(model, labels) {
 const ENGINE_FALLBACK = {
   deepseek: "Дипсик — платно, по ключу",
   opencode: "Опенкод — бесплатный тир",
+  minimax: "Минимакс — аккаунты Кармана, очки за чекин",
   unknown: "неизвестно",
+};
+// Короткое имя — для колонок и разбивки: полные подписи туда не влезают.
+const ENGINE_SHORT = {
+  deepseek: "Дипсик (платно)",
+  opencode: "Опенкод (бесплатно)",
+  minimax: "Минимакс (очки)",
+  unknown: "Неизвестно",
 };
 function engineLabel(eng, labels) {
   return (labels && labels[eng]) || ENGINE_FALLBACK[eng] || eng;
+}
+function engineShort(eng) {
+  return ENGINE_SHORT[eng] || eng;
 }
 
 // Тип вердикта по-русски: action/theme/merge — служебные ключи в базе.
@@ -98,20 +109,26 @@ async function load() {
     var now = d.engine_now || {};
     document.getElementById("c-engine-now").textContent = now.label || "—";
     document.getElementById("c-v-24h").textContent = num(w24.total || 0);
-    document.getElementById("c-v-24h-split").textContent =
-      "Дипсик: " + num(be.deepseek || 0) + " · Опенкод: " + num(be.opencode || 0);
+    // Разбивка — по тем движкам, что реально есть в ответе: новый движок
+    // (Минимакс) не должен требовать правки этой панели.
+    var splitParts = [];
+    Object.keys(be).forEach(function (k) {
+      if (!be[k]) return;
+      splitParts.push(engineShort(k) + ": " + num(be[k]));
+    });
+    document.getElementById("c-v-24h-split").textContent = splitParts.join(" · ");
 
     var daemon = d.daemon || {};
     var d24 = daemon.runs_24h || {};
     document.getElementById("c-daemon").textContent = num(d24.recorded || 0);
-    document.getElementById("c-daemon-sub").textContent =
-      "прогонов: " + num(d24.runs || 0) +
-      " · последний " + ago(daemon.last_run_ts) +
-      (d24.errors ? " · с ошибкой: " + num(d24.errors) : "");
+    document.getElementById("c-daemon-sub").textContent = daemon.decommissioned
+      ? (daemon.note || "контур снят")
+      : ("прогонов: " + num(d24.runs || 0) +
+         " · последний " + ago(daemon.last_run_ts) +
+         (d24.errors ? " · с ошибкой: " + num(d24.errors) : ""));
 
     document.getElementById("c-last").textContent = ago(d.last_verdict_at);
     document.getElementById("c-last-sub").textContent = d.last_verdict_at || "вердиктов ещё нет";
-
     // ── Кем отвечено (30 дней) ──
     var models = d.models_30d || [];
     var mh = "";
@@ -136,16 +153,25 @@ async function load() {
     if (!days.length) {
       dh = '<span class="text-muted">нет данных</span>';
     } else {
-      dh = '<table class="table table-sm mb-0"><thead><tr><th>День</th>' +
-           '<th class="text-end">Дипсик (платно)</th>' +
-           '<th class="text-end">Опенкод (бесплатно)</th>' +
-           '<th class="text-end">Неизвестно</th></tr></thead><tbody>';
+      // Колонки — по тем движкам, что реально встречаются в ответе.
+      var dayKeys = [];
+      days.forEach(function (r) {
+        Object.keys(r).forEach(function (k) {
+          if (k !== "day" && dayKeys.indexOf(k) < 0) dayKeys.push(k);
+        });
+      });
+      dh = '<table class="table table-sm mb-0"><thead><tr><th>День</th>';
+      dayKeys.forEach(function (k) {
+        dh += '<th class="text-end">' + esc(engineShort(k)) + '</th>';
+      });
+      dh += "</tr></thead><tbody>";
       for (var j = 0; j < days.length; j++) {
         var r = days[j];
-        dh += '<tr><td>' + esc(r.day) + '</td>' +
-              '<td class="text-end">' + num(r.deepseek || 0) + '</td>' +
-              '<td class="text-end">' + num(r.opencode || 0) + '</td>' +
-              '<td class="text-end">' + num(r.unknown || 0) + '</td></tr>';
+        dh += '<tr><td>' + esc(r.day) + '</td>';
+        dayKeys.forEach(function (k) {
+          dh += '<td class="text-end">' + num(r[k] || 0) + '</td>';
+        });
+        dh += "</tr>";
       }
       dh += "</tbody></table>";
     }
