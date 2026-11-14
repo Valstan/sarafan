@@ -134,6 +134,15 @@ DEFAULT_KARMAN_DOWN_TTL = 60
 #: («слишком много запросов») — а отвечает он всё равно тем же.
 ENV_KARMAN_EMPTY_TTL = "MINIMAX_KARMAN_EMPTY_TTL"
 DEFAULT_KARMAN_EMPTY_TTL = 60
+#: Пауза после того, как свежий аккаунт от Кармана отказал сразу (у пула
+#: сегодня нет очков). Без неё волна крутила бы ротацию и сжигала пул: живой
+#: факт 15.11 — 15 аккаунтов за две минуты.
+ENV_KARMAN_NO_POINTS_TTL = "MINIMAX_KARMAN_NO_POINTS_TTL"
+DEFAULT_KARMAN_NO_POINTS_TTL = 1800
+#: Сколько свежих аккаунтов подряд могут отказать (у пула нет очков), прежде
+#: чем мы встанем на паузу.
+ENV_KARMAN_FRESH_FAIL_LIMIT = "MINIMAX_KARMAN_FRESH_FAIL_LIMIT"
+DEFAULT_FRESH_FAIL_LIMIT = 3
 #: Ограничить выдачу Кармана нашими почтами (``?emails=``). По умолчанию
 #: **выключено**: аккаунтами пула занимается Карман, он сам решает, какой дать,
 #: и отдаёт токен — ограничивать его выбор нашими локальными профилями нельзя.
@@ -1090,6 +1099,79 @@ def _remember_exhausted(account: MinimaxAccount) -> None:
         pass
 
 
+#: Потолок памяти «пустых» аккаунтов в рабочей области. За день их может
+#: набраться много (живой факт 15.11: 15 аккаунтов подряд за две минуты), но
+#: держать больше сотни смысла нет — список только растёт, а аккаунты у
+#: Кармана живут сутки.
+EMPTY_ACCOUNTS_MAX = 100
+
+
+def _known_empty_accounts(accounts: List[MinimaxAccount]) -> List[int]:
+    """Id аккаунтов, которые сегодня отказали (очков не было) — их не просим.
+
+    Помним это рядом с рабочей областью: у нас одна область на всех, и без
+    памяти мы брали бы у Кармана тот же аккаунт снова и снова.
+    """
+    for account in accounts:
+        meta = _read_profile_meta(account.root)
+        raw = meta.get("empty_accounts")
+        if not isinstance(raw, list):
+            continue
+        if str(meta.get("empty_day") or "") != karman_minimax.moscow_today():
+            continue
+        out: List[int] = []
+        for item in raw:
+            try:
+                out.append(int(item))
+            except (TypeError, ValueError):
+                continue
+        return out
+    return []
+
+
+def _remember_empty_account(account: MinimaxAccount) -> None:
+    """Запомнить: этот аккаунт сегодня отказал (очков не было)."""
+    if account.karman_id is None:
+        return
+    meta = _read_profile_meta(account.root)
+    today = karman_minimax.moscow_today()
+    raw = meta.get("empty_accounts")
+    known = []
+    if str(meta.get("empty_day") or "") == today and isinstance(raw, list):
+        for item in raw:
+            try:
+                known.append(int(item))
+            except (TypeError, ValueError):
+                continue
+    if account.karman_id not in known:
+        known.append(int(account.karman_id))
+    known = known[-EMPTY_ACCOUNTS_MAX:]
+    meta["empty_accounts"] = known
+    meta["empty_day"] = today
+    try:
+        (account.root / PROFILE_META_NAME).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def _no_points_ttl() -> float:
+    """Пауза после того, как свежий аккаунт отказал сразу (пул без очков)."""
+    try:
+        return max(5.0, float(os.getenv(ENV_KARMAN_NO_POINTS_TTL) or DEFAULT_KARMAN_NO_POINTS_TTL))
+    except ValueError:
+        return DEFAULT_KARMAN_NO_POINTS_TTL
+
+
+def _fresh_fail_limit() -> int:
+    """Сколько свежих аккаунтов подряд могут отказать до паузы."""
+    try:
+        return max(1, int(os.getenv(ENV_KARMAN_FRESH_FAIL_LIMIT) or DEFAULT_FRESH_FAIL_LIMIT))
+    except ValueError:
+        return DEFAULT_FRESH_FAIL_LIMIT
+
+
 def _activation_reported_today(account: MinimaxAccount) -> bool:
     """Отмечали ли мы этот аккаунт у Кармана сегодня."""
     meta = _read_profile_meta(account.root)
@@ -1175,7 +1257,11 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
         max_leases = DEFAULT_MAX_LEASES
 
     tried: List[str] = []
-    excluded: List[Any] = []
+    # Аккаунты, которые сегодня уже отдали отказ (очки кончились или клетка
+    # забрата не нами): их больше не просим — ручка Кармана их не отдаёт заново,
+    # а мы их исключаем, чтобы не жечь пул (живой факт 15.11: без этого за две
+    # минуты сгорело 15 аккаунтов).
+    excluded: List[Any] = list(_known_empty_accounts(accounts))
     # Фильтр «только эти аккаунты» — по умолчанию выключен: аккаунтами пула
     # занимается Карман, он сам выбирает, какой отдать, и отдаёт токен.
     known_emails: List[str] = []
@@ -1192,6 +1278,12 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
     # Текущий аккаунт: тот, что уже в рабочей области. Он наш — его мы у
     # Кармана заново не просим.
     current = _work_area_account(accounts)
+    # Аккаунт только что выдан Карманом (а не лежавший в рабочей области):
+    # если такой откажет сразу — пул сейчас без очков, и крутить ротацию
+    # дальше нельзя.
+    leased_fresh = False
+    # Сколько свежих аккаунтов подряд отказали (пул без очков).
+    fresh_failures = 0
 
     for _attempt in range(max_leases + 1):
         if current is not None:
@@ -1255,6 +1347,32 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                     # Очки кончились сегодня — до завтра этот аккаунт не трогаем
                     # (и не тратим на него вызовы).
                     _remember_exhausted(current)
+                if leased_fresh:
+                    # Свежий аккаунт от Кармана отказал сразу. Запоминаем его
+                    # (больше не попросим) и считаем серию: когда отказали
+                    # несколько подряд — у пула сегодня нет очков, и крутить
+                    # ротацию дальше бессмысленно: это жжёт пул (живой факт
+                    # 15.11 — 15 аккаунтов за две минуты). Ставим паузу.
+                    _remember_empty_account(current)
+                    fresh_failures += 1
+                    if fresh_failures >= _fresh_fail_limit():
+                        last_detail = (
+                            "%s; %d аккаунтов подряд без очков — пауза, чтобы не жечь пул"
+                            % (last_detail, fresh_failures)
+                        )
+                        logger.warning(
+                            "minimax: %d аккаунтов подряд без очков — пауза %s с, "
+                            "дальше не долбим Кармана",
+                            fresh_failures,
+                            int(_no_points_ttl()),
+                        )
+                        _karman_down_until = time.monotonic() + _no_points_ttl()
+                        return {
+                            "ok": False,
+                            "reason": last_reason,
+                            "detail": last_detail,
+                            "tried_accounts": tried,
+                        }
                 logger.warning(
                     "minimax: аккаунт %s больше не работает (%s: %s) — берём следующий",
                     current.name,
@@ -1356,6 +1474,7 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                 logger.warning("minimax: аккаунт %s занят (%s) — берём другой", account.name, exc)
                 continue
         current = account
+        leased_fresh = True
 
     return {
         "ok": False,

@@ -934,6 +934,61 @@ def test_chat_rotates_to_next_account_when_login_expired(monkeypatch, tmp_path):
     assert 67 in seen_excludes[-1]
 
 
+def test_pool_is_not_burned_when_fresh_accounts_have_no_points(monkeypatch, tmp_path):
+    """Свежий аккаунт без очков — запомнили, второй раз не просим, пауза.
+
+    Живой факт 15.11: в полночь волна взяла 15 аккаунтов подряд, каждый отказал
+    сразу («insufficient balance»), и пул Кармана ушёл впустую.
+    """
+    _lease_env(monkeypatch)
+    _account(tmp_path, "work", email="cur@example.com", karman_id=67)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+    monkeypatch.setattr(mx, "_fresh_fail_limit", lambda: 1)
+    monkeypatch.setattr(mx, "_no_points_ttl", lambda: 1800.0)
+
+    fresh = _offer(68, "b@example.com")
+    fresh.access_token = "tok-2"
+    taken = []
+
+    def _take(**kw):
+        taken.append(list(kw.get("exclude") or []))
+        return fresh
+
+    monkeypatch.setattr(km, "take_account", _take)
+    monkeypatch.setattr(
+        mx,
+        "run_classification",
+        lambda *a, **k: (
+            False,
+            "",
+            {"reason": "quota_exhausted", "detail": "insufficient balance (1008)"},
+        ),
+    )
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is False
+    assert result["reason"] == "quota_exhausted"
+    assert "пул" in result["detail"]
+    # Взяли ровно один свежий аккаунт — и остановились.
+    assert len(taken) == 1
+    # Аккаунт без очков запомнен: в следующий раз мы его не попросим.
+    meta = json.loads((tmp_path / "work" / "profile.json").read_text(encoding="utf-8"))
+    assert 68 in meta["empty_accounts"]
+
+    # Следующий батч: пауза — к Карману не идём вовсе.
+    taken.clear()
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is False
+    assert result["reason"] == "karman_unavailable"
+    assert taken == []
+
+
 def test_chat_does_not_fall_back_to_local_pool_when_karman_is_down(monkeypatch, tmp_path):
     """Карман недоступен — это не повод работать на аккаунте, который он держит."""
     _lease_env(monkeypatch)

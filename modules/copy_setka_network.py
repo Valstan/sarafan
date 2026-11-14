@@ -142,6 +142,7 @@ async def execute_copy_setka_network(
     from config.runtime import (
         copy_setka_disabled,
         get_copy_setka_max_post_age_hours,
+        get_copy_setka_max_regions_per_tick,
         get_copy_setka_post_interval_seconds,
         get_copy_setka_repost_message,
         get_copy_setka_source_owner_id,
@@ -426,6 +427,20 @@ async def execute_copy_setka_network(
     # репостами (анти-Captcha: бурст с одного аккаунта триггерит капчу).
     targets_remaining = [reg for reg in regions if reg.code not in done_codes]
     interval = get_copy_setka_post_interval_seconds()
+    # Потолок веера на тик: без него один пост уходил во все активные регионы
+    # разом — 25–102 публикации в одну минуту (замер 15.11). Хвост не теряется:
+    # его добирает следующий тик (механизм pending ниже).
+    max_per_tick = get_copy_setka_max_regions_per_tick()
+    deferred = 0
+    if max_per_tick > 0 and len(targets_remaining) > max_per_tick:
+        deferred = len(targets_remaining) - max_per_tick
+        targets_remaining = targets_remaining[:max_per_tick]
+        logger.info(
+            "copy-setka: %s — в этом тике %d регионов из %d, остальные ждут следующего",
+            src_lip,
+            max_per_tick,
+            max_per_tick + deferred,
+        )
 
     newly_done: Set[str] = set()
     errors: List[str] = []
@@ -466,7 +481,10 @@ async def execute_copy_setka_network(
         wt.hash = []
         logger.info("copy-setka: пост %s доставлен всем %d регионам", src_lip, len(target_codes))
     else:
-        tries = pending_tries + 1
+        # Попытка считается, только если были реальные сбои публикации.
+        # Отложенные по потолку регионы — не сбой: их доберёт следующий тик,
+        # иначе разведение по тикам выело бы лимит попыток (PENDING_MAX_TRIES).
+        tries = pending_tries + 1 if errors else pending_tries
         if tries >= PENDING_MAX_TRIES:
             logger.warning(
                 "copy-setka: пост %s не добран за %d попыток — сдаюсь; " "пропущены регионы: %s",
@@ -480,11 +498,12 @@ async def execute_copy_setka_network(
             wt.hash = {"lip": src_lip, "done": sorted(all_done), "tries": tries}
             logger.info(
                 "copy-setka: пост %s разослан частично (%d/%d), добор на след. тике; "
-                "осталось: %s",
+                "осталось: %s%s",
                 src_lip,
                 len(all_done),
                 len(target_codes),
                 ", ".join(missing),
+                ("; отложено по потолку: %d" % deferred) if deferred else "",
             )
     await session.commit()
 
