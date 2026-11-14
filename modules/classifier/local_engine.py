@@ -94,11 +94,13 @@ SOURCE_NOTES: Dict[str, str] = {
 #: ``source`` — путь, ``model`` — движок. Движок достаётся из имени модели.
 ENGINE_DEEPSEEK = "deepseek"
 ENGINE_OPENCODE = "opencode"
+ENGINE_MINIMAX = "minimax"
 ENGINE_UNKNOWN = "unknown"
 
 ENGINE_LABELS: Dict[str, str] = {
     ENGINE_DEEPSEEK: "Дипсик — платно, по ключу",
     ENGINE_OPENCODE: "Опенкод — бесплатный тир",
+    ENGINE_MINIMAX: "Минимакс — аккаунты Кармана, очки за чекин",
     ENGINE_UNKNOWN: "неизвестно (движок не записан)",
 }
 
@@ -129,6 +131,8 @@ def engine_of_model(model: Optional[str]) -> str:
       (движок был переключён на free-тир);
     * ``<модель>-free`` без префикса — демон Опенкода на боксе: он зовёт
       ``opencode serve`` и пишет модель как есть;
+    * ``minimax/<модель>`` — волна, посчитанная MiniMax Code через аккаунты
+      Кармана (модель пишется как ``minimax/MiniMax-M3.1-Flash``);
     * пусто — вердикты, у которых движок не записан (старая рутина).
 
     Функция чистая: её проверяет тест, а панель рисует по ней разрез «кем
@@ -142,6 +146,8 @@ def engine_of_model(model: Optional[str]) -> str:
         return ENGINE_OPENCODE
     if name.endswith("-free"):
         return ENGINE_OPENCODE
+    if name.startswith("minimax"):
+        return ENGINE_MINIMAX
     if name.startswith("deepseek"):
         return ENGINE_DEEPSEEK
     return ENGINE_UNKNOWN
@@ -160,7 +166,7 @@ def engine_buckets(rows: Sequence[Any]) -> Dict[str, int]:
 
     Чистая функция — считает то, что панель показывает как «кем отвечено».
     """
-    bucket = {ENGINE_DEEPSEEK: 0, ENGINE_OPENCODE: 0, ENGINE_UNKNOWN: 0}
+    bucket = {ENGINE_DEEPSEEK: 0, ENGINE_OPENCODE: 0, ENGINE_MINIMAX: 0, ENGINE_UNKNOWN: 0}
     for model, n in rows:
         bucket[engine_of_model(str(model or ""))] += int(n or 0)
     return bucket
@@ -572,7 +578,7 @@ async def stats(session) -> Dict[str, Any]:
     for d, m, n in day_rows:
         day = str(d)[:10]
         bucket = day_map.setdefault(
-            day, {ENGINE_DEEPSEEK: 0, ENGINE_OPENCODE: 0, ENGINE_UNKNOWN: 0}
+            day, {ENGINE_DEEPSEEK: 0, ENGINE_OPENCODE: 0, ENGINE_MINIMAX: 0, ENGINE_UNKNOWN: 0}
         )
         bucket[engine_of_model(str(m or ""))] += int(n or 0)
     for day in sorted(day_map, reverse=True):
@@ -599,7 +605,10 @@ async def stats(session) -> Dict[str, Any]:
     mode = (os.getenv("CLASSIFIER_ENGINE") or "").strip().lower() or "deepseek"
     engine_now = {
         "mode": mode,
-        "label": ENGINE_LABELS[ENGINE_OPENCODE if mode == "opencode" else ENGINE_DEEPSEEK],
+        "label": ENGINE_LABELS.get(
+            mode if mode in ENGINE_LABELS else ENGINE_DEEPSEEK,
+            "движок не записан",
+        ),
         "env": "CLASSIFIER_ENGINE",
     }
 
@@ -646,6 +655,12 @@ async def stats(session) -> Dict[str, Any]:
         "models": sorted(
             {str(r.get("model") or "?") for r in runs if r.get("model")},
         ),
+        # Контур opencode на проде снят 14.11 (юнит и крон): волна считает
+        # MiniMax через аккаунты Кармана. Панель не должна показывать «0
+        # прогонов» как будто демон ещё должен ходить.
+        "decommissioned": True,
+        "note": "Контур opencode снят с прода 14.11: волна считает MiniMax "
+        "через аккаунты Кармана, платный Дипсик выключен.",
     }
 
     return {
