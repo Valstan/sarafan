@@ -169,6 +169,27 @@ def test_take_account_raises_on_broken_answer(monkeypatch):
         raise AssertionError("ожидался RuntimeError")
 
 
+def test_take_account_passes_filters(monkeypatch):
+    """Фильтры Кармана: exclude по id и emails по списку наших почт."""
+    monkeypatch.setenv(km.ENV_API_URL, "https://karman.invalid/api/minimax")
+    monkeypatch.setenv(km.ENV_TOKEN, "room-token")
+    calls, call = _call_recorder([(200, OFFER)])
+    km.take_account(exclude=[67, 68], emails=["a@example.com"], call=call)
+    url = calls[0]["url"]
+    assert "exclude=67%2C68" in url
+    assert "emails=a%40example.com" in url
+
+
+def test_take_account_reads_why(monkeypatch):
+    monkeypatch.setenv(km.ENV_API_URL, "https://karman.invalid/api/minimax")
+    monkeypatch.setenv(km.ENV_TOKEN, "room-token")
+    payload = json.loads(json.dumps(OFFER))
+    payload["why"] = "клетка 5 — сегодня 400 очков"
+    calls, call = _call_recorder([(200, payload)])
+    offer = km.take_account(call=call)
+    assert offer.why == "клетка 5 — сегодня 400 очков"
+
+
 def test_report_activation_sends_only_known_fields(monkeypatch):
     """Проект и дату определяет сервер по токену — клиент их не присылает."""
     monkeypatch.setenv(km.ENV_API_URL, "https://karman.invalid/api/minimax")
@@ -341,6 +362,99 @@ def test_chat_takes_next_account_after_conflict(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["account"] == "acc2"
     assert calls == [1, 2]
+
+
+def test_chat_skips_account_without_profile_and_takes_next(monkeypatch, tmp_path):
+    """Нет профиля — просим Кармана пропустить аккаунт (exclude) и берём следующего."""
+    _lease_env(monkeypatch)
+    _account(tmp_path, "acc5", email="good@example.com", karman_id=42)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "run_classification", _ok_call())
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+
+    offers = [_offer(7, "other@example.com"), _offer(42, "good@example.com")]
+    asked = []
+
+    def _next(exclude=None, emails=None, **kw):
+        asked.append({"exclude": list(exclude or []), "emails": list(emails or [])})
+        return offers.pop(0)
+
+    monkeypatch.setattr(km, "take_account", _next)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is True
+    assert result["account"] == "acc5"
+    # Первый запрос — без исключений; второй — с id неподходящего аккаунта.
+    assert asked[0]["exclude"] == []
+    assert asked[1]["exclude"] == [7]
+    # Наши почты уходят фильтром: Карман отдаёт только то, что нам доступно.
+    assert asked[0]["emails"] == ["good@example.com"]
+
+
+def test_enabled_can_be_switched_off(monkeypatch):
+    """Аренда выключается флагом, не вынимая адрес и токен из окружения."""
+    monkeypatch.setenv(km.ENV_API_URL, "https://karman.invalid/api/minimax")
+    monkeypatch.setenv(km.ENV_TOKEN, "room-token")
+    assert km.enabled() is True
+    monkeypatch.setenv(km.ENV_LEASE_SWITCH, "0")
+    assert km.enabled() is False
+
+
+def test_token_store_key_matches_runtime_formula(tmp_path):
+    """Ключ записи токена выводится из пути — иначе CLI не найдёт токен."""
+    import base64
+    import hashlib
+
+    auth_home = tmp_path / "data" / "auth"
+    digest = hashlib.sha256(("%s\0mcode-public" % str(auth_home)).encode("utf-8")).digest()
+    expected = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    assert mx.token_store_key(auth_home).endswith(expected)
+    assert mx.token_store_key(auth_home).startswith("com.minimax.mcode.oauth.prod.en")
+
+
+def test_materialize_leased_profile_writes_token_store(tmp_path, monkeypatch):
+    """Токен от Кармана → готовый профиль, который CLI признаёт."""
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    offer = km.PoolOffer(
+        account={"id": 67, "email": "a@example.com"},
+        access_token="tok-abc",
+        refresh_token="ref-abc",
+        expires_at_ms=1794696314153,
+    )
+    account = mx.materialize_leased_profile(67, offer)
+    assert account is not None
+    store = json.loads(account.auth_path.read_text(encoding="utf-8"))
+    key = next(iter(store["records"]))
+    assert key == mx.token_store_key((account.root / "data" / "auth").resolve())
+    assert store["records"][key]["accessToken"] == "tok-abc"
+    assert store["records"][key]["refreshToken"] == "ref-abc"
+
+
+def test_chat_works_on_token_from_karman(monkeypatch, tmp_path):
+    """Карман отдал токен — работаем на нём, без локального профиля."""
+    _lease_env(monkeypatch)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "run_classification", _ok_call())
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+
+    offer = _offer(67, "a@example.com")
+    offer.access_token = "tok-abc"
+    offer.refresh_token = "ref-abc"
+    monkeypatch.setattr(km, "take_account", lambda **kw: offer)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is True
+    assert result["account"] == "leased-67"
 
 
 def test_chat_does_not_fall_back_to_local_pool_when_karman_is_down(monkeypatch, tmp_path):

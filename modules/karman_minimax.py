@@ -55,10 +55,11 @@ import json
 import logging
 import os
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, Optional, Sequence, Tuple
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +67,10 @@ logger = logging.getLogger(__name__)
 ENV_API_URL = "KARMAN_MINIMAX_API_URL"
 #: Токен комнаты с правом записи. По умолчанию — общий токен комнаты setka.
 ENV_TOKEN = "KARMAN_MINIMAX_TOKEN"
+#: Явный выключатель аренды: "0"/"off"/"no" — пул не берётся у Кармана, движок
+#: работает своим пулом. Нужен, чтобы отключить контур, не вынимая адрес и
+#: токен из окружения (адрес сам приходит из vault при старте приложения).
+ENV_LEASE_SWITCH = "MINIMAX_KARMAN_LEASE"
 #: Хвост URL хранилища секретов: по нему восстанавливаем корень приложения.
 SECRETS_URL_SUFFIX = "/api/secrets"
 
@@ -104,7 +109,14 @@ def token() -> str:
 
 
 def enabled() -> bool:
-    """Ручки пула доступны? Пока нет — Сарафан работает своим пулом."""
+    """Ручки пула доступны? Пока нет — Сарафан работает своим пулом.
+
+    Выключается флагом ``MINIMAX_KARMAN_LEASE=0``: адрес сам приходит из
+    vault при старте приложения, и без флага «выключить» было бы нечем.
+    """
+    switch = (os.getenv(ENV_LEASE_SWITCH) or "1").strip().lower()
+    if switch in ("0", "off", "no", "false"):
+        return False
     return bool(api_base() and token())
 
 
@@ -119,6 +131,19 @@ class PoolOffer:
     soon: int = 0
     project: str = ""
     today: str = ""
+    #: Человекочитаемое объяснение выбора (клетка, очки, до бонуса) — от Кармана.
+    why: str = ""
+    #: Пометил ли Карман аккаунт как рекомендованный.
+    recommended: bool = False
+    #: Токен аккаунта, если Карман его хранит (вход владельца уже сделан).
+    access_token: str = ""
+    refresh_token: str = ""
+    expires_at_ms: Optional[int] = None
+
+    @property
+    def has_tokens(self) -> bool:
+        """Карман отдал готовый вход — профиль собирается на лету."""
+        return bool(self.access_token and self.refresh_token)
 
     @property
     def empty(self) -> bool:
@@ -158,8 +183,22 @@ def _call(
         return 0, {"error": ("%s: %s" % (type(exc).__name__, exc))[:300]}
 
 
-def take_account(*, call=_call) -> PoolOffer:
+def take_account(
+    *,
+    exclude: Optional[Iterable[Any]] = None,
+    emails: Optional[Iterable[str]] = None,
+    call=_call,
+) -> PoolOffer:
     """Попросить у Кармана следующий аккаунт (его выбор, его правила).
+
+    Фильтры (их сделал Карман 13.11 по нашей просьбе, оба чистые, без записи
+    в базу):
+
+    * ``exclude=12,13`` — id аккаунтов, которые нам не подошли (например, под
+      них нет нашего профиля): Карман отдаст следующего;
+    * ``emails=a@b.c,d@e.f`` — отдать аккаунт **только** из нашего списка почт
+      (регистр не важен). Это главный фильтр: он снимает затык «Карман дал
+      аккаунт, которого у нас нет».
 
     Пустой пул — это **не** ошибка: Карман отвечает 200 с ``account: null`` и
     ``reason: no_free_accounts``. Ошибка связи или отказ — ``RuntimeError``:
@@ -169,7 +208,17 @@ def take_account(*, call=_call) -> PoolOffer:
     token_value = token()
     if not base or not token_value:
         raise RuntimeError("ручки пула не настроены (адрес или токен не задан)")
-    status, payload = call("GET", "%s/accounts/available" % base, token_value)
+    query: Dict[str, str] = {}
+    ids = [str(i) for i in (exclude or []) if i is not None]
+    if ids:
+        query["exclude"] = ",".join(ids)
+    mails = [str(m).strip() for m in (emails or []) if str(m or "").strip()]
+    if mails:
+        query["emails"] = ",".join(mails)
+    url = "%s/accounts/available" % base
+    if query:
+        url += "?" + urllib.parse.urlencode(query)
+    status, payload = call("GET", url, token_value)
     if status != 200:
         raise RuntimeError(
             "Карман не ответил: %s %s" % (status, str(payload.get("error") or "")[:200])
@@ -183,6 +232,11 @@ def take_account(*, call=_call) -> PoolOffer:
         soon=int(payload.get("soon") or 0),
         project=str(payload.get("project") or ""),
         today=str(payload.get("today") or ""),
+        why=str(payload.get("why") or ""),
+        recommended=bool(payload.get("recommended")),
+        access_token=str(payload.get("access_token") or ""),
+        refresh_token=str(payload.get("refresh_token") or ""),
+        expires_at_ms=(int(payload["expires_at_ms"]) if payload.get("expires_at_ms") else None),
     )
 
 

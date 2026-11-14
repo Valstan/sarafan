@@ -60,6 +60,8 @@ JSON`` на любой схеме (и полной, и плоской). Поэт
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 import logging
 import os
@@ -120,7 +122,7 @@ DEFAULT_MAX_STEPS = 6
 #: подряд «пустых» ответов — уже не «очки кончились», а неполадки на стороне
 #: Кармана, и волна должна уйти на платный движок-страховку.
 ENV_MAX_LEASES = "MINIMAX_MAX_LEASES"
-DEFAULT_MAX_LEASES = 3
+DEFAULT_MAX_LEASES = 5
 #: Пауза после сбоя связи с Карманом. Пока она не истекла, мы к нему не ходим:
 #: каждый чанк иначе ждал бы сетевого таймаута, а учёт активаций он всё равно
 #: не примет. Это НЕ предохранитель движка: волна уходит в платный DeepSeek.
@@ -500,6 +502,69 @@ def _report_activation(account_id: Any, account: MinimaxAccount) -> bool:
     return True
 
 
+#: Ключ записи токена в сторе MiniMax Code. Рантайм ищет запись по ключу,
+#: который выводится из **абсолютного пути** каталога данных профиля, — поэтому
+#: для профиля, собранного на лету, ключ надо посчитать заранее.
+TOKEN_KEY_PREFIX = "com.minimax.mcode.oauth.prod.en"
+TOKEN_CLIENT_ID = "mcode-public"
+
+
+def accounts_root(accounts_dir: Optional[str] = None) -> Path:
+    """Каталог пула аккаунтов (тот же, что читает :func:`discover_accounts`)."""
+    return Path(accounts_dir or os.getenv(ENV_ACCOUNTS_DIR) or DEFAULT_ACCOUNTS_DIR)
+
+
+def token_store_key(auth_home: Path) -> str:
+    """Ключ, под которым рантайм ищет запись токена для этого пути."""
+    digest = hashlib.sha256(("%s\0%s" % (str(auth_home), TOKEN_CLIENT_ID)).encode("utf-8")).digest()
+    suffix = base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
+    return "%s\0%s" % (TOKEN_KEY_PREFIX, suffix)
+
+
+def materialize_leased_profile(
+    account_id: Any, offer: Any, accounts_dir: Optional[str] = None
+) -> Optional[MinimaxAccount]:
+    """Собрать профиль из токена, который отдал Карман.
+
+    Это снимает ручной труд: если у Кармана по аккаунту сохранён вход
+    (владелец входил), он отдаёт токен — и мы пишем его в стор профиля по
+    ключу, выведенному из пути. Копировать профили на бокс вручную больше
+    не нужно, и сопоставление «почта → профиль» тоже не нужно: токен пришёл
+    вместе с аккаунтом.
+    """
+    access_token = str(getattr(offer, "access_token", "") or "")
+    refresh_token = str(getattr(offer, "refresh_token", "") or "")
+    if not access_token or not refresh_token:
+        return None
+    root = accounts_root(accounts_dir) / ("leased-%s" % account_id)
+    auth_home = root / "data" / "auth"
+    store_path = auth_home / "prod" / "en" / TOKEN_CLIENT_ID / "auth.json"
+    expires_at_ms = getattr(offer, "expires_at_ms", None)
+    record = {
+        "schemaVersion": 1,
+        "accessToken": access_token,
+        "refreshToken": refresh_token,
+        "tokenType": "Bearer",
+        "clientId": TOKEN_CLIENT_ID,
+        "scopes": ["agent.default"],
+        "audience": "agent-backend",
+        "expiresAtMs": int(expires_at_ms or 0),
+    }
+    store = {
+        "schemaVersion": 1,
+        "records": {token_store_key(auth_home.resolve()): record},
+    }
+    try:
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        (root / "config").mkdir(parents=True, exist_ok=True)
+        store_path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("minimax: профиль из токена не записан (%s)", exc)
+        return None
+    logger.info("minimax: профиль %s собран из токена Кармана", root.name)
+    return MinimaxAccount(name=root.name, root=root)
+
+
 def _read_profile_meta(root: Path) -> Dict[str, Any]:
     """Метаданные профиля (``profile.json``): почта аккаунта и его id в Кармане.
 
@@ -851,12 +916,16 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
         max_leases = DEFAULT_MAX_LEASES
 
     tried: List[str] = []
+    excluded: List[Any] = []
+    # Почты наших профилей — фильтр «только эти аккаунты» для Кармана: он
+    # снимает затык, когда в пуле 85 аккаунтов, а профилей у нас несколько.
+    known_emails = [a.email for a in accounts if a.email]
     last_reason = "accounts_exhausted"
     last_detail = ""
 
     for _ in range(max_leases):
         try:
-            offer = karman_minimax.take_account()
+            offer = karman_minimax.take_account(exclude=excluded, emails=known_emails)
         except RuntimeError as exc:
             logger.warning("minimax: Карман не ответил (%s)", exc)
             try:
@@ -880,24 +949,34 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                 offer.soon,
             )
             break
+        if offer.why:
+            logger.info(
+                "minimax: Карман выбрал аккаунт %s — %s", (offer.account or {}).get("id"), offer.why
+            )
         _karman_down_until = 0.0
-        account = _match_lease_account(accounts, offer.account or {})
+        account_id = (offer.account or {}).get("id")
+        account = None
+        if account_id is not None and offer.has_tokens:
+            # Карман отдал готовый вход — профиль собираем на лету.
+            account = materialize_leased_profile(account_id, offer)
+        if account is None:
+            account = _match_lease_account(accounts, offer.account or {})
         if account is None:
             # Аккаунт от Кармана, а нашего профиля под него нет: вход в этот
             # аккаунт ещё не сделан (device-flow — только браузер владельца).
-            # Работать нечем, и крутить пул бессмысленно: Карман отдаст тот же.
+            # Просим Кармана пропустить его (exclude) и взять следующего.
+            excluded.append((offer.account or {}).get("id"))
             last_reason = "account_not_authorized"
             last_detail = "аккаунт %s не авторизован на этой машине (нужен вход владельца)" % (
                 karman_minimax.account_identity(offer.account),
             )
-            logger.warning("minimax: %s", last_detail)
-            break
+            logger.warning("minimax: %s — просим следующего", last_detail)
+            continue
         if not _ensure_points(account):
             last_reason = "accounts_exhausted"
             last_detail = "у аккаунта %s сегодня нет очков" % account.name
             continue
         tried.append(account.name)
-        account_id = (offer.account or {}).get("id")
         if account_id is None:
             account_id = account.karman_id
         # Активация в журнале Кармана: с этого момента аккаунт считается
@@ -981,9 +1060,12 @@ def chat(**kwargs: Any) -> Dict[str, Any]:
         return {"ok": False, "reason": "empty_prompt"}
 
     accounts = discover_accounts()
-    if not accounts:
+    lease = karman_minimax.enabled()
+    if not accounts and not lease:
         return {"ok": False, "reason": "no_accounts"}
 
-    if karman_minimax.enabled():
+    if lease:
+        # При аренде локальные профили не обязательны: если Карман отдал токен,
+        # профиль собирается на лету.
         return _chat_leased(accounts, **kwargs)
     return _chat_local(accounts, **kwargs)
