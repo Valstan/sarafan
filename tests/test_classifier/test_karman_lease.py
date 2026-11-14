@@ -529,7 +529,12 @@ def test_materialize_leased_profile_works_with_access_token_only(tmp_path, monke
     """Refresh-токен — страховка, а не условие работы: входа достаточно."""
     monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
     offer = km.PoolOffer(
-        account={"id": 67, "email": "a@example.com"},
+        account={
+            "id": 67,
+            "email": "a@example.com",
+            "activation_index": 7,
+            "points_next": 1000,
+        },
         access_token="tok-only",
     )
     assert offer.has_tokens is True
@@ -537,6 +542,11 @@ def test_materialize_leased_profile_works_with_access_token_only(tmp_path, monke
 
     account = mx.materialize_leased_profile(67, offer)
     assert account is not None
+    # Данные аккаунта из выдачи — они нужны журналу активаций.
+    assert account.email == "a@example.com"
+    assert account.karman_id == 67
+    assert account.activation_index == 7
+    assert account.claimed_points == 1000
     store = json.loads(account.auth_path.read_text(encoding="utf-8"))
     record = list(store["records"].values())[0]
     assert record["accessToken"] == "tok-only"

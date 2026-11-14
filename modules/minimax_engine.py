@@ -627,7 +627,21 @@ def materialize_leased_profile(
             "но продлить его автоматически нечем"
         )
     logger.info("minimax: рабочая область %s переведена на новый аккаунт", root.name)
-    return MinimaxAccount(name=root.name, root=root)
+    # Данные аккаунта — из выдачи Кармана: они нужны журналу активаций
+    # (клетка серии, почта, id) и не должны теряться при переезде токена.
+    offered = getattr(offer, "account", None) or {}
+    cell = offered.get("activation_index")
+    try:
+        return MinimaxAccount(
+            name=root.name,
+            root=root,
+            email=str(offered.get("email") or ""),
+            karman_id=account_id,
+            claimed_points=int(offered.get("points_next") or 0),
+            activation_index=int(cell) if cell is not None else None,
+        )
+    except (TypeError, ValueError):
+        return MinimaxAccount(name=root.name, root=root, karman_id=account_id)
 
 
 def _read_profile_meta(root: Path) -> Dict[str, Any]:
