@@ -291,7 +291,11 @@ def _offer(account_id=67, email="54@id45d.myjino.ru"):
 
 
 def test_chat_works_on_account_from_karman(monkeypatch, tmp_path):
-    """Аккаунт выбирает Карман; мы его активируем и отмечаем активацию."""
+    """Аккаунт выбирает Карман; по контракту 14.11 мы его НЕ активируем.
+
+    Карман сам пишет гашение, очки и статистику в момент выдачи, а
+    `POST /api/minimax/activations` звать не надо.
+    """
     _lease_env(monkeypatch)
     _account(tmp_path, "acc5", email="54@id45d.myjino.ru", karman_id=67)
     monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
@@ -314,7 +318,12 @@ def test_chat_works_on_account_from_karman(monkeypatch, tmp_path):
     assert result["ok"] is True
     assert result["account"] == "acc5"
     assert result["leased"] is True
-    # Активация отмечена в журнале Кармана: id из выдачи + наша клетка и очки.
+    # В журнал Кармана мы не заходим: учёт у него.
+    assert reported == []
+
+    # Старая схема возвращается одним флагом — тогда отметка уходит.
+    monkeypatch.setenv(mx.ENV_REPORT_ACTIVATION, "1")
+    assert mx.chat(system="S", user="U", posts=1)["ok"] is True
     assert reported and reported[0][0] == 67
     assert reported[0][1]["points"] == 400
     assert reported[0][1]["activation_index"] == 5
@@ -376,8 +385,13 @@ def _fail_once_with_quota(monkeypatch):
 
 
 def test_chat_takes_next_account_after_conflict(monkeypatch, tmp_path):
-    """409 по первому аккаунту — берём следующий."""
+    """409 по первому аккаунту — берём следующий.
+
+    Путь отметки активации по контракту 14.11 выключен, поэтому 409-ветку
+    проверяем с флагом ``MINIMAX_REPORT_ACTIVATION=1``.
+    """
     _lease_env(monkeypatch)
+    monkeypatch.setenv(mx.ENV_REPORT_ACTIVATION, "1")
     # Пула нет: движок сразу идёт за аккаунтом к Карману.
     monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
     monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
@@ -801,10 +815,12 @@ def test_exhausted_account_is_not_tried_again_today(monkeypatch, tmp_path):
 def test_activation_is_reported_once_per_day(monkeypatch, tmp_path):
     """Один аккаунт — одна отметка в журнале Кармана в сутки.
 
-    Иначе статистика Кармана видела бы нас только в день, когда мы взяли
-    аккаунт, а не в те дни, когда мы в нём работали.
+    По контракту 14.11 мы отметку не шлём (учёт у Кармана), поэтому ветка
+    проверяется с флагом ``MINIMAX_REPORT_ACTIVATION=1`` — на случай возврата
+    к прежней схеме.
     """
     _lease_env(monkeypatch)
+    monkeypatch.setenv(mx.ENV_REPORT_ACTIVATION, "1")
     _account(tmp_path, "work", email="cur@example.com", karman_id=42)
     monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
     monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)

@@ -147,6 +147,15 @@ DEFAULT_EMAILS_FILTER = "0"
 #: ключ записи токена (он выводится из пути) остаётся верным.
 ENV_WORK_AREA = "MINIMAX_WORK_AREA"
 DEFAULT_WORK_AREA = "work"
+#: Отмечать ли активацию в журнале Кармана (``POST /api/minimax/activations``).
+#:
+#: По контракту 14.11 (ответ Кармана, id 142) — **не отмечаем**: «в карман
+#: больше заходить не нужно: ни активацию записывать, ни что-то помечать —
+#: всё это теперь делаем мы» (гашение аккаунта, очки и статистику он пишет сам
+#: в момент выдачи). Ручка у него осталась, но звать её не надо. Флаг нужен
+#: только на случай, если разделение труда поменяется обратно.
+ENV_REPORT_ACTIVATION = "MINIMAX_REPORT_ACTIVATION"
+DEFAULT_REPORT_ACTIVATION = "0"
 _karman_down_until = 0.0
 #: Файл с метаданными профиля рядом с ``auth.json``: почта аккаунта и его id
 #: в Кармане. По почве аккаунт, выданный Карманом, узнаётся у нас.
@@ -1067,10 +1076,13 @@ def _remember_activation_day(account: MinimaxAccount) -> None:
 def _report_activation_once(account: MinimaxAccount) -> None:
     """Отметить активацию у Кармана — раз в сутки на аккаунт.
 
-    Иначе статистика Кармана видела бы нас только в тот день, когда мы взяли
-    аккаунт, а не в те дни, когда мы в нём работали. Отказ не роняет волну:
-    тогда аккаунт просто не переиспользуется (см. ``_activation_reported_today``).
+    По контракту 14.11 этого **не делаем**: учёт (гашение, очки, статистику)
+    Карман ведёт сам в момент выдачи, а ``POST /api/minimax/activations`` звать
+    не надо. Функция осталась на случай возврата к прежней схеме — включается
+    флагом ``MINIMAX_REPORT_ACTIVATION=1``.
     """
+    if not _activation_reporting_enabled():
+        return
     if account.karman_id is None or _activation_reported_today(account):
         return
     try:
@@ -1083,6 +1095,12 @@ def _report_activation_once(account: MinimaxAccount) -> None:
         _remember_activation_day(account)
     except RuntimeError as exc:
         logger.warning("minimax: не отметили активацию аккаунта %s (%s)", account.name, exc)
+
+
+def _activation_reporting_enabled() -> bool:
+    """Шлём ли мы активацию в журнал Кармана (по умолчанию — нет)."""
+    raw = (os.getenv(ENV_REPORT_ACTIVATION) or DEFAULT_REPORT_ACTIVATION).strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any]:
@@ -1283,22 +1301,25 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
         tried.append(account.name)
         if account_id is None:
             account_id = account.karman_id
-        # Активация в журнале Кармана: с этого момента аккаунт считается
-        # израсходованным на Сарафане и владельцу в те же сутки не предлагается.
-        try:
-            karman_minimax.report_activation(
-                account_id,
-                email=str((offer.account or {}).get("email") or "") or None,
-                points=account.claimed_points or None,
-                activation_index=account.activation_index,
-            )
-            _remember_activation_day(account)
-        except RuntimeError as exc:
-            # 409: аккаунт уже записан за другим проектом или занят окном.
-            last_reason = "account_conflict"
-            last_detail = str(exc)[:200]
-            logger.warning("minimax: аккаунт %s занят (%s) — берём другой", account.name, exc)
-            continue
+        # Активация в журнале Кармана — по контракту 14.11 мы её **не шлём**:
+        # учёт (гашение, очки, статистику) Карман ведёт сам в момент выдачи,
+        # а `POST /api/minimax/activations` звать не надо. Флаг
+        # `MINIMAX_REPORT_ACTIVATION=1` возвращает прежнее поведение.
+        if _activation_reporting_enabled():
+            try:
+                karman_minimax.report_activation(
+                    account_id,
+                    email=str((offer.account or {}).get("email") or "") or None,
+                    points=account.claimed_points or None,
+                    activation_index=account.activation_index,
+                )
+                _remember_activation_day(account)
+            except RuntimeError as exc:
+                # 409: аккаунт уже записан за другим проектом или занят окном.
+                last_reason = "account_conflict"
+                last_detail = str(exc)[:200]
+                logger.warning("minimax: аккаунт %s занят (%s) — берём другой", account.name, exc)
+                continue
         current = account
 
     return {
