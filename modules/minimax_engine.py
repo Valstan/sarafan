@@ -128,6 +128,12 @@ DEFAULT_MAX_LEASES = 5
 #: не примет. Это НЕ предохранитель движка: волна уходит в платный DeepSeek.
 ENV_KARMAN_DOWN_TTL = "MINIMAX_KARMAN_DOWN_TTL"
 DEFAULT_KARMAN_DOWN_TTL = 60
+#: Ограничить выдачу Кармана нашими почтами (``?emails=``). По умолчанию
+#: **выключено**: аккаунтами пула занимается Карман, он сам решает, какой дать,
+#: и отдаёт токен — ограничивать его выбор нашими локальными профилями нельзя.
+#: Флаг нужен только для режима «работаем на своих профилях» (без токенов).
+ENV_EMAILS_FILTER = "MINIMAX_EMAILS_FILTER"
+DEFAULT_EMAILS_FILTER = "0"
 _karman_down_until = 0.0
 #: Файл с метаданными профиля рядом с ``auth.json``: почта аккаунта и его id
 #: в Кармане. По почве аккаунт, выданный Карманом, узнаётся у нас.
@@ -925,9 +931,16 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
 
     tried: List[str] = []
     excluded: List[Any] = []
-    # Почты наших профилей — фильтр «только эти аккаунты» для Кармана: он
-    # снимает затык, когда в пуле 85 аккаунтов, а профилей у нас несколько.
-    known_emails = [a.email for a in accounts if a.email]
+    # Фильтр «только эти аккаунты» — по умолчанию выключен: аккаунтами пула
+    # занимается Карман, он сам выбирает, какой отдать, и отдаёт токен.
+    known_emails: List[str] = []
+    if (os.getenv(ENV_EMAILS_FILTER) or DEFAULT_EMAILS_FILTER).strip().lower() in (
+        "1",
+        "on",
+        "yes",
+        "true",
+    ):
+        known_emails = [a.email for a in accounts if a.email]
     last_reason = "accounts_exhausted"
     last_detail = ""
 
@@ -979,6 +992,11 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                 karman_minimax.account_identity(offer.account),
             )
             logger.warning("minimax: %s — просим следующего", last_detail)
+            if not offer.has_tokens:
+                logger.warning(
+                    "minimax: Карман не отдал токен — работать пока не на чем "
+                    "(ждём выдачу access_token/refresh_token в ответе)"
+                )
             continue
         if not _ensure_points(account):
             last_reason = "accounts_exhausted"

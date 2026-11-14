@@ -416,7 +416,35 @@ def test_chat_skips_account_without_profile_and_takes_next(monkeypatch, tmp_path
     # Первый запрос — без исключений; второй — с id неподходящего аккаунта.
     assert asked[0]["exclude"] == []
     assert asked[1]["exclude"] == [7]
-    # Наши почты уходят фильтром: Карман отдаёт только то, что нам доступно.
+    # Наши почты по умолчанию НЕ фильтруются: выбор аккаунта — у Кармана.
+    assert asked[0]["emails"] == []
+    assert asked[1]["emails"] == []
+
+
+def test_chat_sends_emails_filter_only_when_enabled(monkeypatch, tmp_path):
+    """Режим «работаем на своих профилях»: фильтр включается флагом."""
+    _lease_env(monkeypatch)
+    monkeypatch.setenv(mx.ENV_EMAILS_FILTER, "1")
+    _account(tmp_path, "acc5", email="good@example.com", karman_id=42)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "run_classification", _ok_call())
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+
+    asked = []
+
+    def _next(exclude=None, emails=None, **kw):
+        asked.append({"exclude": list(exclude or []), "emails": list(emails or [])})
+        return _offer(42, "good@example.com")
+
+    monkeypatch.setattr(km, "take_account", _next)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is True
     assert asked[0]["emails"] == ["good@example.com"]
 
 
