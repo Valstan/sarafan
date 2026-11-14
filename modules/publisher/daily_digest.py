@@ -52,6 +52,12 @@ DEFAULT_ITEMS = 5
 MAX_ITEMS = 7
 MAX_ITEM_CHARS = 260
 MAX_TOTAL_CHARS = 3400
+#: Сколько знаков исходника отдаём модели на один пост. Пункт сборника — это
+#: одна-две фразы (потолок ``MAX_ITEM_CHARS``), а хвост длинного поста для
+#: пересказа не нужен. Без этого ограничения файл с исходниками уезжал в
+#: десятки тысяч знаков, и агент MiniMax Code на нём не укладывался в шаги:
+#: ``limit_exceeded`` (замерено 14.11 на боксе, живой вызов).
+MAX_SOURCE_CHARS = 1500
 
 #: Потолок вложений на один пост ВК — десять. Это общий потолок сборника:
 #: столько фотографий может уйти в пост в сумме.
@@ -434,6 +440,10 @@ def build_items_prompt(posts: Sequence[Dict[str, Any]], *, region: str = "") -> 
     lines = [f"Район: {(region or 'район').strip()}", ""]
     for index, post in enumerate(posts, start=1):
         text = _MULTI_SPACE_RE.sub(" ", str(post.get("text") or "")).strip()
+        if len(text) > MAX_SOURCE_CHARS:
+            # Хвост длинного поста для пересказа не нужен, а файл из десятков
+            # тысяч знаков агент не переваривает (limit_exceeded).
+            text = text[:MAX_SOURCE_CHARS].rsplit(" ", 1)[0] + "…"
         lines.append(f"[{index}]")
         lines.append(text)
         lines.append("")

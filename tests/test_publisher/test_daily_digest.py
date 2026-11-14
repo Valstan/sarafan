@@ -753,3 +753,22 @@ async def test_photo_candidates_default_window_is_moscow_day(db_session):
     assert [p["lip"] for p in photos] == [
         "100_1"
     ], "в окно московских суток попал пост вчерашнего дня"
+
+
+def test_items_prompt_caps_long_sources():
+    """Длинный исходник в промпт не тащим: агент на нём не укладывается в шаги.
+
+    Замерено 14.11 на боксе, живой вызов: файл с исходниками на десятки тысяч
+    знаков даёт от CLI статус ``limit_exceeded``, и сборник уходит в свой
+    фолбэк («первые предложения источников»). Пункт сборника — одна-две фразы,
+    хвост поста для пересказа не нужен.
+    """
+    long_text = "Жители обсудили ремонт дороги. " * 400
+    posts = [{"text": long_text}, {"text": "Короткий пост."}]
+
+    prompt = daily_digest.build_items_prompt(posts, region="mi")
+
+    assert len(prompt) < len(long_text)
+    assert "…" in prompt
+    # Короткий исходник остаётся как есть.
+    assert "Короткий пост." in prompt
