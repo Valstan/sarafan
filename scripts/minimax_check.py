@@ -76,8 +76,13 @@ def _lease_probe(accounts) -> Dict[str, Any]:
         return {
             "enabled": True,
             "ok": False,
-            "reason": "у Кармана нет свободных аккаунтов (свободно %s, скоро %s)"
-            % (offer.free, offer.soon),
+            "reason": "у Кармана нет свободных аккаунтов (свободно %s, скоро %s)%s"
+            % (
+                offer.free,
+                offer.soon,
+                ("; причина: " + str(offer.reason)) if offer.reason else "",
+            ),
+            "karman_reason": offer.reason,
         }
     matched = _match_lease_account(accounts, offer.account or {})
     account_id = (offer.account or {}).get("id")
@@ -228,6 +233,8 @@ async def main() -> int:
             print("  выключена: " + str(lease.get("reason")))
         elif not lease.get("ok"):
             print("  аккаунт не выдан: " + str(lease.get("reason")))
+            if lease.get("karman_reason"):
+                print("  причина у Кармана: " + str(lease.get("karman_reason")))
         else:
             account = lease.get("account") or {}
             print(
