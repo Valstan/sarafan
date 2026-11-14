@@ -855,6 +855,24 @@ def test_activation_is_reported_once_per_day(monkeypatch, tmp_path):
     assert reported == [42, 42]
 
 
+def test_classify_failure_recognizes_rejected_credential_record():
+    """Рантайм отверг саму запись токен-стора — это отказ аккаунта, а не движка.
+
+    Без этого мы бились бы в одну и ту же битую запись десятки раз подряд
+    (живой факт 14.11: 37 отказов подряд, пока ротация не вывела на другой
+    аккаунт).
+    """
+    assert (
+        mx._classify_failure(
+            "mcode exec failed: The run failed: The stored OAuth credential record is invalid."
+        )
+        == "auth_expired"
+    )
+    assert mx._classify_failure("insufficient balance") == "quota_exhausted"
+    assert mx._classify_failure("Sign in to MiniMax") == "auth_expired"
+    assert mx._classify_failure("что-то другое", default="exec_failed") == "exec_failed"
+
+
 def test_chat_rotates_to_next_account_when_login_expired(monkeypatch, tmp_path):
     """Протух вход — тот же класс, что кончились очки: идём к Карману за другим."""
     _lease_env(monkeypatch)
