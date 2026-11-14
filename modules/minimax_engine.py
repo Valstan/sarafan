@@ -1068,10 +1068,14 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
             }
         if offer.empty:
             # Честная пустота: сегодня брать нечего. Это НЕ поломка движка.
+            # Причина от Кармана (например ``no_tokens_ready``: аккаунты есть,
+            # но ни у одного нет готового входа) — в детали, иначе диагностика
+            # врала бы, что свободных аккаунтов нет.
             last_reason = "accounts_exhausted"
-            last_detail = "у Кармана нет свободных аккаунтов (свободно %s, скоро %s)" % (
+            last_detail = "у Кармана нет свободных аккаунтов (свободно %s, скоро %s)%s" % (
                 offer.free,
                 offer.soon,
+                ("; причина: " + str(offer.reason)) if offer.reason else "",
             )
             break
         if offer.why:

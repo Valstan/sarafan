@@ -627,6 +627,22 @@ def test_chat_works_on_token_from_karman(monkeypatch, tmp_path):
     assert result["account"] == "work"
 
 
+def test_empty_offer_keeps_karman_reason(monkeypatch, tmp_path):
+    """Пустая выдача с причиной Кармана — причина попадает в деталь отказа."""
+    _lease_env(monkeypatch)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    empty = km.PoolOffer(account=None, reason="no_tokens_ready", free=73, soon=1)
+    monkeypatch.setattr(km, "take_account", lambda **kw: empty)
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is False
+    # Причина Кармана видна: «свободных аккаунтов нет» — было бы враньём,
+    # когда свободны 73, но нет ни одного готового входа.
+    assert "no_tokens_ready" in result["detail"]
+    assert "73" in result["detail"]
+
+
 def test_chat_rotates_to_next_account_when_login_expired(monkeypatch, tmp_path):
     """Протух вход — тот же класс, что кончились очки: идём к Карману за другим."""
     _lease_env(monkeypatch)
