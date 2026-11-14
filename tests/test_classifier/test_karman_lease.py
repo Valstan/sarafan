@@ -356,11 +356,29 @@ def test_chat_reports_empty_pool(monkeypatch, tmp_path):
     assert result["reason"] == "accounts_exhausted"
 
 
+def _fail_once_with_quota(monkeypatch):
+    """Первый вызов движка — отказ по очкам, дальше успех.
+
+    Нужно там, где тест проверяет аренду: в новой модели движок сначала
+    работает на текущем аккаунте рабочей области, и за следующим аккаунтом
+    идёт только после отказа.
+    """
+    calls = []
+
+    def _run(account, **kwargs):
+        calls.append(account.name)
+        if len(calls) == 1:
+            return False, "", {"reason": "quota_exhausted", "detail": "insufficient balance"}
+        return True, '{"verdicts": []}', {"model": "MiniMax-M3.1-Flash", "usage": {"total": 1}}
+
+    monkeypatch.setattr(mx, "run_classification", _run)
+    return calls
+
+
 def test_chat_takes_next_account_after_conflict(monkeypatch, tmp_path):
     """409 по первому аккаунту — берём следующий."""
     _lease_env(monkeypatch)
-    _account(tmp_path, "acc1", email="one@example.com", karman_id=1)
-    _account(tmp_path, "acc2", email="two@example.com", karman_id=2)
+    # Пула нет: движок сразу идёт за аккаунтом к Карману.
     monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
     monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
     monkeypatch.setattr(
@@ -370,6 +388,8 @@ def test_chat_takes_next_account_after_conflict(monkeypatch, tmp_path):
     monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
 
     offers = [_offer(1, "one@example.com"), _offer(2, "two@example.com")]
+    for offer in offers:
+        offer.access_token = "tok"
     monkeypatch.setattr(km, "take_account", lambda **kw: offers.pop(0))
 
     calls = []
@@ -384,8 +404,42 @@ def test_chat_takes_next_account_after_conflict(monkeypatch, tmp_path):
 
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is True
-    assert result["account"] == "acc2"
+    # Оба аккаунта — в одну рабочую область; в итоге в ней второй.
+    assert result["account"] == "work"
+    assert result["karman_account_id"] == 2
     assert calls == [1, 2]
+
+
+def test_chat_reuses_current_account_without_asking_karman(monkeypatch, tmp_path):
+    """Текущий аккаунт рабочей области мы НЕ берём заново у Кармана.
+
+    Клетка аккаунта — сотни постов, а чанк — пять: брать новый аккаунт на
+    каждый чанк съедало бы пул (и квоту активаций) в считаные минуты.
+    """
+    _lease_env(monkeypatch)
+    _account(tmp_path, "work", email="cur@example.com", karman_id=42)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "run_classification", _ok_call())
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+
+    asked = []
+
+    def _boom(**kw):
+        asked.append(kw)
+        raise AssertionError("Карман не должен зваться, пока текущий аккаунт работает")
+
+    monkeypatch.setattr(km, "take_account", _boom)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is True
+    assert result["account"] == "work"
+    assert result["karman_account_id"] == 42
+    assert asked == []
 
 
 def test_chat_skips_account_without_profile_and_takes_next(monkeypatch, tmp_path):
@@ -397,7 +451,8 @@ def test_chat_skips_account_without_profile_and_takes_next(monkeypatch, tmp_path
     monkeypatch.setattr(
         mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
     )
-    monkeypatch.setattr(mx, "run_classification", _ok_call())
+    # Текущий аккаунт не справился — дальше идём к Карману.
+    _fail_once_with_quota(monkeypatch)
     monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
 
     offers = [_offer(7, "other@example.com"), _offer(42, "good@example.com")]
@@ -413,9 +468,10 @@ def test_chat_skips_account_without_profile_and_takes_next(monkeypatch, tmp_path
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is True
     assert result["account"] == "acc5"
-    # Первый запрос — без исключений; второй — с id неподходящего аккаунта.
-    assert asked[0]["exclude"] == []
-    assert asked[1]["exclude"] == [7]
+    # Первый запрос — с id отработавшего аккаунта (его очки кончились, второй
+    # раз он не нужен); второй — плюс id аккаунта без профиля.
+    assert asked[0]["exclude"] == [42]
+    assert asked[1]["exclude"] == [42, 7]
     # Наши почты по умолчанию НЕ фильтруются: выбор аккаунта — у Кармана.
     assert asked[0]["emails"] == []
     assert asked[1]["emails"] == []
@@ -431,7 +487,7 @@ def test_chat_sends_emails_filter_only_when_enabled(monkeypatch, tmp_path):
     monkeypatch.setattr(
         mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
     )
-    monkeypatch.setattr(mx, "run_classification", _ok_call())
+    _fail_once_with_quota(monkeypatch)
     monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
 
     asked = []
@@ -644,11 +700,12 @@ def test_empty_offer_keeps_karman_reason(monkeypatch, tmp_path):
 
 
 def test_one_account_per_batch_and_next_only_after_failure(monkeypatch, tmp_path):
-    """Один аккаунт на батч: второй не берём, пока первый работает.
+    """Один аккаунт на много батчей: пока он работает — нового не берём.
 
     Модель владельца 14.11: аккаунт нужен на волну, а не «про запас» — взятый
     впрок аккаунт числился бы за нами в журнале Кармана и мог бы не быть
-    израсходован. Новый аккаунт берём только тогда, когда текущий не справился.
+    израсходован. И наоборот: брать новый аккаунт на каждый батч нельзя —
+    клетка аккаунта это сотни постов, а батч — пять.
     """
     _lease_env(monkeypatch)
     monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
@@ -693,9 +750,49 @@ def test_one_account_per_batch_and_next_only_after_failure(monkeypatch, tmp_path
     monkeypatch.setattr(mx, "run_classification", _run)
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is True
-    assert taken == [67, 68]
+    # Текущий аккаунт отработал — взяли один следующий, второй не тронут.
+    assert taken == [67]
     # Батч тот же самый — он не «потерялся», а ушёл на другой аккаунт.
     assert calls[0] == calls[1] == "U"
+
+
+def test_activation_is_reported_once_per_day(monkeypatch, tmp_path):
+    """Один аккаунт — одна отметка в журнале Кармана в сутки.
+
+    Иначе статистика Кармана видела бы нас только в день, когда мы взяли
+    аккаунт, а не в те дни, когда мы в нём работали.
+    """
+    _lease_env(monkeypatch)
+    _account(tmp_path, "work", email="cur@example.com", karman_id=42)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "run_classification", _ok_call())
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+
+    reported = []
+
+    def _report(account_id, **kwargs):
+        reported.append(account_id)
+        return {}
+
+    monkeypatch.setattr(km, "report_activation", _report)
+    monkeypatch.setattr(km, "take_account", lambda **kw: _offer(42, "cur@example.com"))
+
+    assert mx.chat(system="S", user="U", posts=1)["ok"] is True
+    assert mx.chat(system="S", user="U", posts=1)["ok"] is True
+    assert reported == [42]
+
+    # А на следующий день — снова: журнал ведётся по суткам.
+    meta_path = tmp_path / "work" / "profile.json"
+    meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    assert meta["activation_day"] == km.moscow_today()
+    meta["activation_day"] = "2026-01-01"
+    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+    assert mx.chat(system="S", user="U", posts=1)["ok"] is True
+    assert reported == [42, 42]
 
 
 def test_chat_rotates_to_next_account_when_login_expired(monkeypatch, tmp_path):
