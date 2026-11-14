@@ -855,6 +855,27 @@ def test_activation_is_reported_once_per_day(monkeypatch, tmp_path):
     assert reported == [42, 42]
 
 
+def test_refresh_is_skipped_for_placeholder(monkeypatch, tmp_path):
+    """Заглушка refresh — не настоящий токен: обмен не делаем.
+
+    Иначе вендер ответит ``invalid_grant``, а нам это ничего не даёт: refresh
+    Карман не присылает, и после истечения access мы просто берём следующий
+    аккаунт.
+    """
+    account = _account(tmp_path, "work", email="cur@example.com", karman_id=42)
+    store = json.loads(account.auth_path.read_text(encoding="utf-8"))
+    key = next(iter(store["records"]))
+    store["records"][key]["refreshToken"] = mx.REFRESH_PLACEHOLDER
+    store["records"][key]["expiresAtMs"] = 1
+    account.auth_path.write_text(json.dumps(store), encoding="utf-8")
+
+    called = []
+    monkeypatch.setattr(mx, "_http_json", lambda *a, **k: called.append(a) or (400, {}))
+
+    assert account.refresh() is False
+    assert called == [], "обмен по заглушке отправлять нельзя"
+
+
 def test_classify_failure_recognizes_rejected_credential_record():
     """Рантайм отверг саму запись токен-стора — это отказ аккаунта, а не движка.
 

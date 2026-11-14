@@ -284,6 +284,11 @@ class MinimaxAccount:
         refresh_token = record.get("refreshToken")
         if not refresh_token:
             return False
+        if refresh_token == REFRESH_PLACEHOLDER:
+            # Настоящего refresh нет (Карман его не присылает) — обмен бессмыслен:
+            # вендер ответит invalid_grant, а после истечения access мы просто
+            # берём у Кармана следующий аккаунт.
+            return False
         body = urlencode(
             {
                 "grant_type": "refresh_token",
