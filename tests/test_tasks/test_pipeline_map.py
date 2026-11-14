@@ -193,6 +193,16 @@ def test_task_and_map_use_the_same_region_selector(monkeypatch):
 
             return _R()
 
+        def apply_async(self, args=None, countdown=None, expires=None, **kwargs):
+            # Волна раскладывает регионы по слотам (apply_async с countdown).
+            region_code, theme = args
+            dispatched.append((region_code, theme))
+
+            class _R:
+                id = f"task-{region_code}"
+
+            return _R()
+
     monkeypatch.setattr("modules.wave_targets.select_regions", fake_select)
     monkeypatch.setattr(parsing_scheduler_tasks, "parse_and_publish_theme", _FakeDelay())
 
