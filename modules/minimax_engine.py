@@ -129,6 +129,11 @@ DEFAULT_MAX_LEASES = 5
 #: не примет. Это НЕ предохранитель движка: волна уходит в платный DeepSeek.
 ENV_KARMAN_DOWN_TTL = "MINIMAX_KARMAN_DOWN_TTL"
 DEFAULT_KARMAN_DOWN_TTL = 60
+#: Пауза после пустой выдачи Кармана (нет аккаунта с готовым входом). Без неё
+#: волна на 40 батчей спросила бы Кармана 40 раз подряд и словила его 429
+#: («слишком много запросов») — а отвечает он всё равно тем же.
+ENV_KARMAN_EMPTY_TTL = "MINIMAX_KARMAN_EMPTY_TTL"
+DEFAULT_KARMAN_EMPTY_TTL = 60
 #: Ограничить выдачу Кармана нашими почтами (``?emails=``). По умолчанию
 #: **выключено**: аккаунтами пула занимается Карман, он сам решает, какой дать,
 #: и отдаёт токен — ограничивать его выбор нашими локальными профилями нельзя.
@@ -1011,14 +1016,34 @@ def _work_area_account(accounts: List[MinimaxAccount]) -> Optional[MinimaxAccoun
     Это наш текущий вход: пока в нём есть очки, мы работаем в нём и не просим
     у Кармана новый (модель владельца 14.11: в рабочей области меняем аккаунт,
     когда бонус исчерпан).
+
+    Аккаунт, у которого сегодня кончились очки, пропускается: иначе каждый
+    батч волны тратил бы вызов впустую и спрашивал бы Кармана заново.
     """
     if not accounts:
         return None
     area = (os.getenv(ENV_WORK_AREA) or DEFAULT_WORK_AREA).strip() or DEFAULT_WORK_AREA
+    today = karman_minimax.moscow_today()
     for account in accounts:
-        if account.name == area:
-            return account
+        if account.name != area:
+            continue
+        meta = _read_profile_meta(account.root)
+        if str(meta.get("exhausted_day") or "") == today:
+            return None
+        return account
     return accounts[0]
+
+
+def _remember_exhausted(account: MinimaxAccount) -> None:
+    """Пометить: очки этого аккаунта сегодня кончились."""
+    meta = _read_profile_meta(account.root)
+    meta["exhausted_day"] = karman_minimax.moscow_today()
+    try:
+        (account.root / PROFILE_META_NAME).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
 
 
 def _activation_reported_today(account: MinimaxAccount) -> bool:
@@ -1173,6 +1198,10 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                 # может выдать его снова.
                 if current.karman_id is not None:
                     excluded.append(current.karman_id)
+                if last_reason == "quota_exhausted":
+                    # Очки кончились сегодня — до завтра этот аккаунт не трогаем
+                    # (и не тратим на него вызовы).
+                    _remember_exhausted(current)
                 logger.warning(
                     "minimax: аккаунт %s больше не работает (%s: %s) — берём следующий",
                     current.name,
@@ -1210,6 +1239,14 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                 offer.soon,
                 ("; причина: " + str(offer.reason)) if offer.reason else "",
             )
+            # Пауза: следующие батчи не должны долбить Кармана впустую.
+            try:
+                empty_ttl = max(
+                    5.0, float(os.getenv(ENV_KARMAN_EMPTY_TTL) or DEFAULT_KARMAN_EMPTY_TTL)
+                )
+            except ValueError:
+                empty_ttl = DEFAULT_KARMAN_EMPTY_TTL
+            _karman_down_until = time.monotonic() + empty_ttl
             break
         if offer.why:
             logger.info(

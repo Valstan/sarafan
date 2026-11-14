@@ -756,6 +756,48 @@ def test_one_account_per_batch_and_next_only_after_failure(monkeypatch, tmp_path
     assert calls[0] == calls[1] == "U"
 
 
+def test_exhausted_account_is_not_tried_again_today(monkeypatch, tmp_path):
+    """Кончились очки — до завтра этот аккаунт не трогаем.
+
+    Иначе каждый батч волны тратил бы вызов впустую и заново спрашивал бы
+    Кармана (а он на серию вопросов отвечает 429).
+    """
+    _lease_env(monkeypatch)
+    _account(tmp_path, "work", email="cur@example.com", karman_id=42)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+
+    # Текущий аккаунт отказал по очкам → следующий батч идёт сразу к Карману.
+    _fail_once_with_quota(monkeypatch)
+    offered = []
+
+    def _next(**kw):
+        offered.append(kw)
+        return km.PoolOffer(account=None, reason="no_tokens_ready", free=70, soon=1)
+
+    monkeypatch.setattr(km, "take_account", _next)
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is False
+    assert result["reason"] == "accounts_exhausted"
+    assert len(offered) == 1
+
+    meta = json.loads((tmp_path / "work" / "profile.json").read_text(encoding="utf-8"))
+    assert meta["exhausted_day"] == km.moscow_today()
+
+    # Второй батч: текущий аккаунт уже помечен исчерпанным — вызов к нему не
+    # идёт, а к Карману мы за паузой после пустой выдачи не идём тоже.
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is False
+    assert result["reason"] == "karman_unavailable"
+    assert len(offered) == 1
+
+
 def test_activation_is_reported_once_per_day(monkeypatch, tmp_path):
     """Один аккаунт — одна отметка в журнале Кармана в сутки.
 
