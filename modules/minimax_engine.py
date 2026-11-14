@@ -1005,6 +1005,61 @@ def _chat_local(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any]
     }
 
 
+def _work_area_account(accounts: List[MinimaxAccount]) -> Optional[MinimaxAccount]:
+    """Аккаунт, который сейчас в рабочей области.
+
+    Это наш текущий вход: пока в нём есть очки, мы работаем в нём и не просим
+    у Кармана новый (модель владельца 14.11: в рабочей области меняем аккаунт,
+    когда бонус исчерпан).
+    """
+    if not accounts:
+        return None
+    area = (os.getenv(ENV_WORK_AREA) or DEFAULT_WORK_AREA).strip() or DEFAULT_WORK_AREA
+    for account in accounts:
+        if account.name == area:
+            return account
+    return accounts[0]
+
+
+def _activation_reported_today(account: MinimaxAccount) -> bool:
+    """Отмечали ли мы этот аккаунт у Кармана сегодня."""
+    meta = _read_profile_meta(account.root)
+    return str(meta.get("activation_day") or "") == karman_minimax.moscow_today()
+
+
+def _remember_activation_day(account: MinimaxAccount) -> None:
+    """Запомнить: этот аккаунт отмечен у Кармана сегодня."""
+    meta = _read_profile_meta(account.root)
+    meta["activation_day"] = karman_minimax.moscow_today()
+    try:
+        (account.root / PROFILE_META_NAME).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def _report_activation_once(account: MinimaxAccount) -> None:
+    """Отметить активацию у Кармана — раз в сутки на аккаунт.
+
+    Иначе статистика Кармана видела бы нас только в тот день, когда мы взяли
+    аккаунт, а не в те дни, когда мы в нём работали. Отказ не роняет волну:
+    тогда аккаунт просто не переиспользуется (см. ``_activation_reported_today``).
+    """
+    if account.karman_id is None or _activation_reported_today(account):
+        return
+    try:
+        karman_minimax.report_activation(
+            account.karman_id,
+            email=account.email or None,
+            points=account.claimed_points or None,
+            activation_index=account.activation_index,
+        )
+        _remember_activation_day(account)
+    except RuntimeError as exc:
+        logger.warning("minimax: не отметили активацию аккаунта %s (%s)", account.name, exc)
+
+
 def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any]:
     """Работа по аккаунтам, которые выдаёт Карман.
 
@@ -1012,6 +1067,14 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
     израсходовано. Мы получаем аккаунт, активируем его у себя (забираем очки
     чекина — это и есть активация), отмечаем активацию в его журнале и работаем,
     пока очки не кончатся; потом — снова за аккаунтом.
+
+    **Один аккаунт — на много чанков** (модель владельца 14.11: «рабочая
+    область — одна, в ней мы меняем аккаунт, когда бонус исчерпан»). Дневная
+    клетка аккаунта — 400–1000 очков, а это сотни постов; брать у Кармана
+    новый аккаунт на каждый чанк значило бы съедать пул (и квоту активаций) в
+    считаные минуты. Поэтому: текущий аккаунт рабочей области мы используем,
+    пока он работает, а за следующим идём только когда очки кончились
+    (``quota_exhausted``) или вход протух (``auth_expired``).
     """
     global _karman_down_until
 
@@ -1048,7 +1111,77 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
     last_reason = "accounts_exhausted"
     last_detail = ""
 
-    for _ in range(max_leases):
+    # Текущий аккаунт: тот, что уже в рабочей области. Он наш — его мы у
+    # Кармана заново не просим.
+    current = _work_area_account(accounts)
+
+    for _attempt in range(max_leases + 1):
+        if current is not None:
+            # ── 1. Работаем на текущем аккаунте ──
+            if not _ensure_points(current):
+                last_reason = "accounts_exhausted"
+                last_detail = "у аккаунта %s сегодня нет очков" % current.name
+                current = None
+            else:
+                # Активация в журнале Кармана — раз в сутки на аккаунт: иначе
+                # его статистика видела бы нас только в тот день, когда мы его
+                # взяли, а не в те дни, когда мы в нём работали.
+                _report_activation_once(current)
+                tried.append(current.name)
+                ok, content, details = run_classification(
+                    current,
+                    system=system,
+                    user=user,
+                    timeout=kwargs.get("timeout"),
+                )
+                if ok:
+                    record_usage(
+                        current,
+                        ok=True,
+                        points=int(details.get("points") or 0),
+                        posts=int(kwargs.get("posts") or 0),
+                        usage=details.get("usage"),
+                    )
+                    return {
+                        "ok": True,
+                        "content": content,
+                        "model": details.get("model") or os.getenv(ENV_MODEL) or DEFAULT_MODEL,
+                        "usage": details.get("usage") or {},
+                        "account": current.name,
+                        "leased": True,
+                        "karman_account_id": current.karman_id,
+                    }
+                last_reason = str(details.get("reason") or "engine_failed")
+                last_detail = str(details.get("detail") or "")
+                record_usage(
+                    current,
+                    ok=False,
+                    reason=last_reason,
+                    points=int(details.get("points") or 0),
+                    posts=int(kwargs.get("posts") or 0),
+                    usage=details.get("usage"),
+                )
+                if last_reason not in ("quota_exhausted", "auth_expired"):
+                    return {
+                        "ok": False,
+                        "reason": last_reason,
+                        "detail": last_detail,
+                        "tried_accounts": tried,
+                    }
+                # Очки кончились — или протух вход: за следующим аккаунтом.
+                # Истёкший исключаем явно: Карман о нём ничего не знает и
+                # может выдать его снова.
+                if current.karman_id is not None:
+                    excluded.append(current.karman_id)
+                logger.warning(
+                    "minimax: аккаунт %s больше не работает (%s: %s) — берём следующий",
+                    current.name,
+                    last_reason,
+                    last_detail[:120],
+                )
+                current = None
+
+        # ── 2. Следующий аккаунт — у Кармана ──
         try:
             offer = karman_minimax.take_account(exclude=excluded, emails=known_emails)
         except RuntimeError as exc:
@@ -1122,63 +1255,14 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                 points=account.claimed_points or None,
                 activation_index=account.activation_index,
             )
+            _remember_activation_day(account)
         except RuntimeError as exc:
             # 409: аккаунт уже записан за другим проектом или занят окном.
             last_reason = "account_conflict"
             last_detail = str(exc)[:200]
             logger.warning("minimax: аккаунт %s занят (%s) — берём другой", account.name, exc)
             continue
-        ok, content, details = run_classification(
-            account,
-            system=system,
-            user=user,
-            timeout=kwargs.get("timeout"),
-        )
-        if ok:
-            record_usage(
-                account,
-                ok=True,
-                points=int(details.get("points") or 0),
-                posts=int(kwargs.get("posts") or 0),
-                usage=details.get("usage"),
-            )
-            return {
-                "ok": True,
-                "content": content,
-                "model": details.get("model") or os.getenv(ENV_MODEL) or DEFAULT_MODEL,
-                "usage": details.get("usage") or {},
-                "account": account.name,
-                "leased": True,
-                "karman_account_id": account_id,
-            }
-        last_reason = str(details.get("reason") or "engine_failed")
-        last_detail = str(details.get("detail") or "")
-        record_usage(
-            account,
-            ok=False,
-            reason=last_reason,
-            points=int(details.get("points") or 0),
-            posts=int(kwargs.get("posts") or 0),
-            usage=details.get("usage"),
-        )
-        if last_reason not in ("quota_exhausted", "auth_expired"):
-            return {
-                "ok": False,
-                "reason": last_reason,
-                "detail": last_detail,
-                "tried_accounts": tried,
-            }
-        # Очки кончились — или протух вход: активация уже записана, дальше
-        # следующий аккаунт. Протухший аккаунт исключаем явно: Карман о нём
-        # ничего не знает и может выдать его снова.
-        if last_reason == "auth_expired":
-            if account_id is not None:
-                excluded.append(account_id)
-            logger.warning(
-                "minimax: вход в аккаунт %s протух (%s) — просим следующего",
-                account.name,
-                last_detail[:120],
-            )
+        current = account
 
     return {
         "ok": False,
