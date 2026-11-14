@@ -71,6 +71,7 @@ import tempfile
 import time
 import urllib.error
 import urllib.request
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -559,6 +560,19 @@ def token_store_key(auth_home: Path) -> str:
     return "%s\0%s" % (TOKEN_KEY_PREFIX, suffix)
 
 
+def _read_store_record(store_path: Path, key: str) -> Dict[str, Any]:
+    """Прежняя запись токен-стора по ключу (пусто — если записи нет)."""
+    try:
+        data = json.loads(store_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    records = data.get("records") if isinstance(data, dict) else None
+    if not isinstance(records, dict):
+        return {}
+    record = records.get(key)
+    return record if isinstance(record, dict) else {}
+
+
 def materialize_leased_profile(
     account_id: Any, offer: Any, accounts_dir: Optional[str] = None
 ) -> Optional[MinimaxAccount]:
@@ -587,6 +601,12 @@ def materialize_leased_profile(
     auth_home = root / "data" / "auth"
     store_path = auth_home / "prod" / "en" / TOKEN_CLIENT_ID / "auth.json"
     expires_at_ms = getattr(offer, "expires_at_ms", None)
+    # Поля ``generation`` и ``loginEpoch`` — обязательные для рантайма MiniMax
+    # Code: без них CLI отвергает запись («stored OAuth credential record is
+    # invalid», замерено 14.11 на боксе). ``loginEpoch`` — метка входа: новый
+    # токен = новый вход, поэтому epoch всегда свежий; ``generation`` наследуем
+    # из прежней записи.
+    previous = _read_store_record(store_path, token_store_key(auth_home.resolve()))
     record = {
         "schemaVersion": 1,
         "accessToken": access_token,
@@ -595,6 +615,8 @@ def materialize_leased_profile(
         "scopes": ["agent.default"],
         "audience": "agent-backend",
         "expiresAtMs": int(expires_at_ms or (time.time() * 1000 + DEFAULT_TOKEN_TTL_MS)),
+        "generation": int(previous.get("generation") or 1),
+        "loginEpoch": str(uuid.uuid4()),
     }
     if refresh_token:
         record["refreshToken"] = refresh_token

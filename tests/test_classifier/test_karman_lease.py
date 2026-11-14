@@ -525,6 +525,46 @@ def test_token_state_reports_what_karman_sent():
     assert km.token_state(without)["usable"] is False
 
 
+def test_materialized_record_has_fields_runtime_requires(tmp_path, monkeypatch):
+    """CLI отвергает запись без ``generation`` и ``loginEpoch`` (замерено 14.11)."""
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    offer = km.PoolOffer(
+        account={"id": 67, "email": "a@example.com"},
+        access_token="tok-abc",
+        refresh_token="ref-abc",
+    )
+    account = mx.materialize_leased_profile(67, offer)
+    assert account is not None
+    store = json.loads(account.auth_path.read_text(encoding="utf-8"))
+    record = list(store["records"].values())[0]
+    assert record["generation"] == 1
+    assert record["loginEpoch"]
+    assert record["clientId"] == "mcode-public"
+    assert record["scopes"] == ["agent.default"]
+    assert record["audience"] == "agent-backend"
+
+
+def test_materialized_record_keeps_generation_of_previous_login(tmp_path, monkeypatch):
+    """Смена аккаунта не обнуляет ``generation``, но epoch — новый вход."""
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    first = km.PoolOffer(account={"id": 67, "email": "a@example.com"}, access_token="tok-1")
+    second = km.PoolOffer(account={"id": 68, "email": "b@example.com"}, access_token="tok-2")
+    acc1 = mx.materialize_leased_profile(67, first)
+    assert acc1 is not None
+    store = json.loads(acc1.auth_path.read_text(encoding="utf-8"))
+    key = next(iter(store["records"]))
+    first_epoch = store["records"][key]["loginEpoch"]
+    store["records"][key]["generation"] = 3
+    acc1.auth_path.write_text(json.dumps(store), encoding="utf-8")
+
+    acc2 = mx.materialize_leased_profile(68, second)
+    assert acc2 is not None
+    store2 = json.loads(acc2.auth_path.read_text(encoding="utf-8"))
+    record2 = list(store2["records"].values())[0]
+    assert record2["generation"] == 3
+    assert record2["loginEpoch"] != first_epoch
+
+
 def test_materialize_leased_profile_works_with_access_token_only(tmp_path, monkeypatch):
     """Refresh-токен — страховка, а не условие работы: входа достаточно."""
     monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
