@@ -643,6 +643,61 @@ def test_empty_offer_keeps_karman_reason(monkeypatch, tmp_path):
     assert "73" in result["detail"]
 
 
+def test_one_account_per_batch_and_next_only_after_failure(monkeypatch, tmp_path):
+    """Один аккаунт на батч: второй не берём, пока первый работает.
+
+    Модель владельца 14.11: аккаунт нужен на волну, а не «про запас» — взятый
+    впрок аккаунт числился бы за нами в журнале Кармана и мог бы не быть
+    израсходован. Новый аккаунт берём только тогда, когда текущий не справился.
+    """
+    _lease_env(monkeypatch)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+
+    offers = [_offer(67, "a@example.com"), _offer(68, "b@example.com")]
+    for offer in offers:
+        offer.access_token = "tok"
+    taken = []
+
+    def _take(**kw):
+        offer = offers.pop(0)
+        taken.append(offer.account["id"])
+        return offer
+
+    monkeypatch.setattr(km, "take_account", _take)
+    monkeypatch.setattr(mx, "run_classification", _ok_call())
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is True
+    # Взяли ровно один аккаунт — второй остался нетронутым.
+    assert taken == [67]
+
+    # А вот при отказе по очкам — следующий аккаунт, и тот же самый батч.
+    offers = [_offer(67, "a@example.com"), _offer(68, "b@example.com")]
+    for offer in offers:
+        offer.access_token = "tok"
+    taken.clear()
+    calls = []
+
+    def _run(account, **kwargs):
+        calls.append(kwargs.get("user"))
+        if len(calls) == 1:
+            return False, "", {"reason": "quota_exhausted", "detail": "insufficient balance"}
+        return True, '{"verdicts": []}', {"model": "MiniMax-M3.1-Flash", "usage": {"total": 1}}
+
+    monkeypatch.setattr(mx, "run_classification", _run)
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is True
+    assert taken == [67, 68]
+    # Батч тот же самый — он не «потерялся», а ушёл на другой аккаунт.
+    assert calls[0] == calls[1] == "U"
+
+
 def test_chat_rotates_to_next_account_when_login_expired(monkeypatch, tmp_path):
     """Протух вход — тот же класс, что кончились очки: идём к Карману за другим."""
     _lease_env(monkeypatch)
