@@ -199,6 +199,11 @@ _AUTH_MARKERS = (
     "expired_token",
     "invalid_grant",
     "authentication error",
+    # Рантайм отверг саму запись токен-стора (например, refreshToken пуст):
+    # аккаунт нерабочий — надо взять следующий, а не биться в ту же запись.
+    "stored oauth credential record is invalid",
+    "credential record is invalid",
+    "credentialrecordcorrupt",
 )
 
 #: Сколько живёт кэш панели чекина (сек). Панель внутри суток стабильна, а
