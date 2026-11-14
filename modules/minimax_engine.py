@@ -134,6 +134,13 @@ DEFAULT_KARMAN_DOWN_TTL = 60
 #: Флаг нужен только для режима «работаем на своих профилях» (без токенов).
 ENV_EMAILS_FILTER = "MINIMAX_EMAILS_FILTER"
 DEFAULT_EMAILS_FILTER = "0"
+#: Рабочая область MiniMax на боксе — **одна** (заказ владельца 14.11): в ней
+#: вершатся посты, и мы меняем только аккаунт внутри, когда бонус исчерпан, —
+#: чтобы не терять контекст и не плодить области. Токен нового аккаунта
+#: перезаписывает токен-стор этой области; путь области постоянен, значит и
+#: ключ записи токена (он выводится из пути) остаётся верным.
+ENV_WORK_AREA = "MINIMAX_WORK_AREA"
+DEFAULT_WORK_AREA = "work"
 _karman_down_until = 0.0
 #: Файл с метаданными профиля рядом с ``auth.json``: почта аккаунта и его id
 #: в Кармане. По почве аккаунт, выданный Карманом, узнаётся у нас.
@@ -157,6 +164,19 @@ _QUOTA_MARKERS = (
     "usage limit",
     "credits exhausted",
     "free usage limit",
+)
+
+#: Признаки «вход протух» — аккаунт больше не годится, нужен другой.
+#: Для аренды это тот же класс события, что и кончившиеся очки: выходим из
+#: аккаунта и идём к Карману за следующим (заказ владельца 14.11).
+_AUTH_MARKERS = (
+    "sign in to minimax",
+    "unauthorized",
+    "401",
+    "invalid token",
+    "token expired",
+    "invalid_grant",
+    "authentication error",
 )
 
 #: Сколько живёт кэш панели чекина (сек). Панель внутри суток стабильна, а
@@ -521,6 +541,10 @@ def _report_activation(account_id: Any, account: MinimaxAccount, *, email: str =
 #: для профиля, собранного на лету, ключ надо посчитать заранее.
 TOKEN_KEY_PREFIX = "com.minimax.mcode.oauth.prod.en"
 TOKEN_CLIENT_ID = "mcode-public"
+#: Запасной срок жизни access-токена, если Карман не прислал ``expires_at_ms``.
+#: Замерено 14.11 на реальном входе: access живёт ≈ 9 ч. Ставим меньше, чтобы
+#: рантайм не считал токен вечным.
+DEFAULT_TOKEN_TTL_MS = 8 * 60 * 60 * 1000
 
 
 def accounts_root(accounts_dir: Optional[str] = None) -> Path:
@@ -538,32 +562,42 @@ def token_store_key(auth_home: Path) -> str:
 def materialize_leased_profile(
     account_id: Any, offer: Any, accounts_dir: Optional[str] = None
 ) -> Optional[MinimaxAccount]:
-    """Собрать профиль из токена, который отдал Карман.
+    """Положить токен выданного аккаунта в рабочую область.
 
-    Это снимает ручной труд: если у Кармана по аккаунту сохранён вход
-    (владелец входил), он отдаёт токен — и мы пишем его в стор профиля по
-    ключу, выведенному из пути. Копировать профили на бокс вручную больше
-    не нужно, и сопоставление «почта → профиль» тоже не нужно: токен пришёл
-    вместе с аккаунтом.
+    Рабочая область **одна** (заказ владельца 14.11): в ней мы вершим посты и
+    меняем только аккаунт, когда бонус исчерпан, — контекст и настройки CLI
+    остаются теми же. Поэтому токен **перезаписывает** токен-стор области, а
+    не создаёт новый профиль: путь области постоянен, значит и ключ записи
+    токена (он выводится из пути) остаётся верным.
+
+    Копировать профили вручную и сопоставлять «почта → профиль» больше не
+    нужно: токен приходит вместе с аккаунтом.
+
+    Обязателен только ``access_token`` — это и есть «вход в аккаунт».
+    ``refresh_token`` — страховка: он продлевает **тот же** вход, когда access
+    истёк (замерено 14.11: жизнь access-токена ≈ 9 ч). Без него работа не
+    останавливается — просто по истечении токена придётся взять вход заново.
     """
     access_token = str(getattr(offer, "access_token", "") or "")
     refresh_token = str(getattr(offer, "refresh_token", "") or "")
-    if not access_token or not refresh_token:
+    if not access_token:
         return None
-    root = accounts_root(accounts_dir) / ("leased-%s" % account_id)
+    area_name = (os.getenv(ENV_WORK_AREA) or DEFAULT_WORK_AREA).strip() or DEFAULT_WORK_AREA
+    root = accounts_root(accounts_dir) / area_name
     auth_home = root / "data" / "auth"
     store_path = auth_home / "prod" / "en" / TOKEN_CLIENT_ID / "auth.json"
     expires_at_ms = getattr(offer, "expires_at_ms", None)
     record = {
         "schemaVersion": 1,
         "accessToken": access_token,
-        "refreshToken": refresh_token,
         "tokenType": "Bearer",
         "clientId": TOKEN_CLIENT_ID,
         "scopes": ["agent.default"],
         "audience": "agent-backend",
-        "expiresAtMs": int(expires_at_ms or 0),
+        "expiresAtMs": int(expires_at_ms or (time.time() * 1000 + DEFAULT_TOKEN_TTL_MS)),
     }
+    if refresh_token:
+        record["refreshToken"] = refresh_token
     store = {
         "schemaVersion": 1,
         "records": {token_store_key(auth_home.resolve()): record},
@@ -573,10 +607,41 @@ def materialize_leased_profile(
         (root / "config").mkdir(parents=True, exist_ok=True)
         store_path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
     except OSError as exc:
-        logger.warning("minimax: профиль из токена не записан (%s)", exc)
+        logger.warning("minimax: токен в рабочую область не записан (%s)", exc)
         return None
-    logger.info("minimax: профиль %s собран из токена Кармана", root.name)
-    return MinimaxAccount(name=root.name, root=root)
+    # Кто сейчас в области — для проб и для владельца.
+    try:
+        meta = {
+            "karman_account_id": account_id,
+            "email": str((getattr(offer, "account", None) or {}).get("email") or ""),
+            "updated_at_ms": int(time.time() * 1000),
+        }
+        (root / "profile.json").write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+    if not refresh_token:
+        logger.info(
+            "minimax: Карман отдал только access-токен — вход рабочий, "
+            "но продлить его автоматически нечем"
+        )
+    logger.info("minimax: рабочая область %s переведена на новый аккаунт", root.name)
+    # Данные аккаунта — из выдачи Кармана: они нужны журналу активаций
+    # (клетка серии, почта, id) и не должны теряться при переезде токена.
+    offered = getattr(offer, "account", None) or {}
+    cell = offered.get("activation_index")
+    try:
+        return MinimaxAccount(
+            name=root.name,
+            root=root,
+            email=str(offered.get("email") or ""),
+            karman_id=account_id,
+            claimed_points=int(offered.get("points_next") or 0),
+            activation_index=int(cell) if cell is not None else None,
+        )
+    except (TypeError, ValueError):
+        return MinimaxAccount(name=root.name, root=root, karman_id=account_id)
 
 
 def _read_profile_meta(root: Path) -> Dict[str, Any]:
@@ -636,6 +701,23 @@ def _match_lease_account(
 def _is_quota_error(detail: str) -> bool:
     low = (detail or "").lower()
     return any(marker in low for marker in _QUOTA_MARKERS)
+
+
+def _is_auth_error(detail: str) -> bool:
+    """Протух ли вход в аккаунт (нужен другой аккаунт, а не ремонт этого)."""
+    low = (detail or "").lower()
+    if not low:
+        return False
+    return any(marker in low for marker in _AUTH_MARKERS)
+
+
+def _classify_failure(detail: str, default: str = "engine_failed") -> str:
+    """Разобрать отказ CLI: кончились очки, протух вход или что-то ещё."""
+    if _is_quota_error(detail):
+        return "quota_exhausted"
+    if _is_auth_error(detail):
+        return "auth_expired"
+    return default
 
 
 def run_classification(
@@ -764,13 +846,13 @@ def run_classification(
                 return True, answer, details
             error = payload.get("error") or {}
             message = str(error.get("message") or "")
-            reason = "quota_exhausted" if _is_quota_error(message) else "engine_failed"
+            reason = _classify_failure(message)
             details["error"] = message
             return False, "", dict(details, reason=reason, detail=message)
 
         details["stderr"] = stderr[-400:]
         details["stdout"] = stdout[-400:]
-        reason = "quota_exhausted" if _is_quota_error(stderr) else "exec_failed"
+        reason = _classify_failure(stderr, default="exec_failed")
         return False, "", dict(details, reason=reason, detail=stderr[-400:])
     except subprocess.TimeoutExpired:
         return False, "", {"reason": "timeout", "detail": "%ds" % int(limit)}
@@ -995,7 +1077,7 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
             if not offer.has_tokens:
                 logger.warning(
                     "minimax: Карман не отдал токен — работать пока не на чем "
-                    "(ждём выдачу access_token/refresh_token в ответе)"
+                    "(ждём выдачу access_token в ответе)"
                 )
             continue
         if not _ensure_points(account):
@@ -1053,14 +1135,24 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
             posts=int(kwargs.get("posts") or 0),
             usage=details.get("usage"),
         )
-        if last_reason != "quota_exhausted":
+        if last_reason not in ("quota_exhausted", "auth_expired"):
             return {
                 "ok": False,
                 "reason": last_reason,
                 "detail": last_detail,
                 "tried_accounts": tried,
             }
-        # Очки кончились: активация уже записана, дальше — следующий аккаунт.
+        # Очки кончились — или протух вход: активация уже записана, дальше
+        # следующий аккаунт. Протухший аккаунт исключаем явно: Карман о нём
+        # ничего не знает и может выдать его снова.
+        if last_reason == "auth_expired":
+            if account_id is not None:
+                excluded.append(account_id)
+            logger.warning(
+                "minimax: вход в аккаунт %s протух (%s) — просим следующего",
+                account.name,
+                last_detail[:120],
+            )
 
     return {
         "ok": False,

@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import json
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any, Dict
 
@@ -54,8 +55,13 @@ def _lease_probe(accounts) -> Dict[str, Any]:
 
     Только чтение: аккаунт не активируется, очки не забираются — проба
     показывает, сойдётся ли выдача Кармана с нашим пулом.
+
+    Если Карман отдал токен — дополнительно проверяем, что профиль собирается
+    на лету. Сборка идёт во **временный** каталог: живая рабочая область не
+    трогается (одноразовый refresh-токен нельзя тратить впустую).
     """
     from modules import karman_minimax
+    from modules.minimax_engine import materialize_leased_profile
 
     if not karman_minimax.enabled():
         return {
@@ -74,11 +80,21 @@ def _lease_probe(accounts) -> Dict[str, Any]:
             % (offer.free, offer.soon),
         }
     matched = _match_lease_account(accounts, offer.account or {})
+    account_id = (offer.account or {}).get("id")
+    token_state = karman_minimax.token_state(offer)
+    if offer.access_token:
+        with tempfile.TemporaryDirectory(prefix="minimax-lease-") as tmp:
+            built = materialize_leased_profile(account_id, offer, accounts_dir=tmp)
+            token_state["profile_built"] = built is not None
+            if built is not None:
+                token_state["work_area"] = built.name
+    else:
+        token_state["profile_built"] = False
     return {
         "enabled": True,
         "ok": True,
         "account": {
-            "id": (offer.account or {}).get("id"),
+            "id": account_id,
             "email": (offer.account or {}).get("email"),
             "title": (offer.account or {}).get("title"),
             "activation_index": (offer.account or {}).get("activation_index"),
@@ -90,6 +106,7 @@ def _lease_probe(accounts) -> Dict[str, Any]:
         "project": offer.project,
         "provisioned": matched is not None,
         "profile": matched.name if matched else None,
+        "token": token_state,
     }
 
 
@@ -230,6 +247,15 @@ async def main() -> int:
             print(
                 "  профиль на этой машине: %s"
                 % (lease.get("profile") if lease.get("provisioned") else "НЕТ (не заведён)")
+            )
+            token = lease.get("token") or {}
+            print(
+                "  токен: access=%s refresh=%s, профиль на лету собран=%s"
+                % (
+                    "есть" if token.get("access") else "НЕТ",
+                    "есть" if token.get("refresh") else "нет",
+                    "да" if token.get("profile_built") else "нет",
+                )
             )
     if "verdict" in report:
         print("=== вердикт ===")

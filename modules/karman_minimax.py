@@ -142,13 +142,36 @@ class PoolOffer:
 
     @property
     def has_tokens(self) -> bool:
-        """Карман отдал готовый вход — профиль собирается на лету."""
-        return bool(self.access_token and self.refresh_token)
+        """Карман отдал готовый вход — профиль собирается на лету.
+
+        Обязателен только ``access_token``: он нужен, чтобы войти в аккаунт и
+        работать. ``refresh_token`` — страховка (продление того же входа, когда
+        access истёк), и его отсутствие работу не блокирует.
+        """
+        return bool(self.access_token)
+
+    @property
+    def has_refresh(self) -> bool:
+        """Есть ли у Кармана refresh-токен (продление входа без владельца)."""
+        return bool(self.refresh_token)
 
     @property
     def empty(self) -> bool:
         """Сегодня брать нечего — честная пустота, а не поломка."""
         return self.account is None
+
+
+def token_state(offer: PoolOffer) -> Dict[str, Any]:
+    """Что по токенам в выдаче Кармана — для проб и отчётов.
+
+    ``usable`` — хватает ли того, что пришло, чтобы войти в аккаунт: нужен
+    только ``access_token``. ``refresh`` — страховка на истечение access.
+    """
+    return {
+        "access": bool(offer.access_token),
+        "refresh": bool(offer.refresh_token),
+        "usable": bool(offer.has_tokens),
+    }
 
 
 def _call(

@@ -487,6 +487,82 @@ def test_materialize_leased_profile_writes_token_store(tmp_path, monkeypatch):
     assert store["records"][key]["refreshToken"] == "ref-abc"
 
 
+def test_materialize_leased_profile_keeps_one_working_area(tmp_path, monkeypatch):
+    """Второй аккаунт перезаписывает ту же область — профили не копятся."""
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    first = km.PoolOffer(
+        account={"id": 67, "email": "a@example.com"},
+        access_token="tok-1",
+        refresh_token="ref-1",
+    )
+    second = km.PoolOffer(
+        account={"id": 68, "email": "b@example.com"},
+        access_token="tok-2",
+        refresh_token="ref-2",
+    )
+    acc1 = mx.materialize_leased_profile(67, first)
+    acc2 = mx.materialize_leased_profile(68, second)
+    assert acc1.root == acc2.root
+    store = json.loads(acc2.auth_path.read_text(encoding="utf-8"))
+    record = list(store["records"].values())[0]
+    assert record["accessToken"] == "tok-2"
+    meta = json.loads((acc2.root / "profile.json").read_text(encoding="utf-8"))
+    assert meta["karman_account_id"] == 68
+    assert meta["email"] == "b@example.com"
+
+
+def test_token_state_reports_what_karman_sent():
+    """Проба должна честно сказать: access есть, refresh — нет, вход рабочий."""
+    only_access = km.PoolOffer(account={"id": 1}, access_token="tok")
+    assert km.token_state(only_access) == {
+        "access": True,
+        "refresh": False,
+        "usable": True,
+    }
+    both = km.PoolOffer(account={"id": 1}, access_token="tok", refresh_token="ref")
+    assert km.token_state(both)["refresh"] is True
+    without = km.PoolOffer(account={"id": 1})
+    assert km.token_state(without)["usable"] is False
+
+
+def test_materialize_leased_profile_works_with_access_token_only(tmp_path, monkeypatch):
+    """Refresh-токен — страховка, а не условие работы: входа достаточно."""
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    offer = km.PoolOffer(
+        account={
+            "id": 67,
+            "email": "a@example.com",
+            "activation_index": 7,
+            "points_next": 1000,
+        },
+        access_token="tok-only",
+    )
+    assert offer.has_tokens is True
+    assert offer.has_refresh is False
+
+    account = mx.materialize_leased_profile(67, offer)
+    assert account is not None
+    # Данные аккаунта из выдачи — они нужны журналу активаций.
+    assert account.email == "a@example.com"
+    assert account.karman_id == 67
+    assert account.activation_index == 7
+    assert account.claimed_points == 1000
+    store = json.loads(account.auth_path.read_text(encoding="utf-8"))
+    record = list(store["records"].values())[0]
+    assert record["accessToken"] == "tok-only"
+    assert "refreshToken" not in record
+    # Без expires_at_ms рантайм не должен считать токен вечным.
+    assert record["expiresAtMs"] > 0
+
+
+def test_offer_without_access_token_is_not_a_login(tmp_path, monkeypatch):
+    """Нет access-токена — входа нет, профиль не собирается."""
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    offer = km.PoolOffer(account={"id": 67, "email": "a@example.com"}, refresh_token="ref-abc")
+    assert offer.has_tokens is False
+    assert mx.materialize_leased_profile(67, offer) is None
+
+
 def test_chat_works_on_token_from_karman(monkeypatch, tmp_path):
     """Карман отдал токен — работаем на нём, без локального профиля."""
     _lease_env(monkeypatch)
@@ -506,7 +582,49 @@ def test_chat_works_on_token_from_karman(monkeypatch, tmp_path):
 
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is True
-    assert result["account"] == "leased-67"
+    # Рабочая область одна: токен нового аккаунта перезаписывает её, а не
+    # плодит новые профили (контекст CLI не теряется).
+    assert result["account"] == "work"
+
+
+def test_chat_rotates_to_next_account_when_login_expired(monkeypatch, tmp_path):
+    """Протух вход — тот же класс, что кончились очки: идём к Карману за другим."""
+    _lease_env(monkeypatch)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+
+    first = _offer(67, "a@example.com")
+    first.access_token = "tok-1"
+    second = _offer(68, "b@example.com")
+    second.access_token = "tok-2"
+    offers = [first, second]
+    seen_excludes = []
+
+    def _take(**kw):
+        seen_excludes.append(list(kw.get("exclude") or []))
+        return offers.pop(0)
+
+    calls = []
+
+    def _run(account, **kwargs):
+        calls.append(account.name)
+        if len(calls) == 1:
+            return False, "", {"reason": "auth_expired", "detail": "Sign in to MiniMax"}
+        return True, '{"verdicts": []}', {"model": "MiniMax-M3.1-Flash", "usage": {"total": 1}}
+
+    monkeypatch.setattr(km, "take_account", _take)
+    monkeypatch.setattr(mx, "run_classification", _run)
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is True
+    assert result["karman_account_id"] == 68
+    # Протухший аккаунт исключён: Карман о нём не знает и мог бы выдать снова.
+    assert 67 in seen_excludes[-1]
 
 
 def test_chat_does_not_fall_back_to_local_pool_when_karman_is_down(monkeypatch, tmp_path):
