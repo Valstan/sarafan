@@ -166,6 +166,19 @@ _QUOTA_MARKERS = (
     "free usage limit",
 )
 
+#: Признаки «вход протух» — аккаунт больше не годится, нужен другой.
+#: Для аренды это тот же класс события, что и кончившиеся очки: выходим из
+#: аккаунта и идём к Карману за следующим (заказ владельца 14.11).
+_AUTH_MARKERS = (
+    "sign in to minimax",
+    "unauthorized",
+    "401",
+    "invalid token",
+    "token expired",
+    "invalid_grant",
+    "authentication error",
+)
+
 #: Сколько живёт кэш панели чекина (сек). Панель внутри суток стабильна, а
 #: HTTP-запрос на каждый аккаунт на каждый чанк — это сеть вхолостую.
 PANEL_TTL = 600
@@ -676,6 +689,23 @@ def _is_quota_error(detail: str) -> bool:
     return any(marker in low for marker in _QUOTA_MARKERS)
 
 
+def _is_auth_error(detail: str) -> bool:
+    """Протух ли вход в аккаунт (нужен другой аккаунт, а не ремонт этого)."""
+    low = (detail or "").lower()
+    if not low:
+        return False
+    return any(marker in low for marker in _AUTH_MARKERS)
+
+
+def _classify_failure(detail: str, default: str = "engine_failed") -> str:
+    """Разобрать отказ CLI: кончились очки, протух вход или что-то ещё."""
+    if _is_quota_error(detail):
+        return "quota_exhausted"
+    if _is_auth_error(detail):
+        return "auth_expired"
+    return default
+
+
 def run_classification(
     account: MinimaxAccount,
     *,
@@ -802,13 +832,13 @@ def run_classification(
                 return True, answer, details
             error = payload.get("error") or {}
             message = str(error.get("message") or "")
-            reason = "quota_exhausted" if _is_quota_error(message) else "engine_failed"
+            reason = _classify_failure(message)
             details["error"] = message
             return False, "", dict(details, reason=reason, detail=message)
 
         details["stderr"] = stderr[-400:]
         details["stdout"] = stdout[-400:]
-        reason = "quota_exhausted" if _is_quota_error(stderr) else "exec_failed"
+        reason = _classify_failure(stderr, default="exec_failed")
         return False, "", dict(details, reason=reason, detail=stderr[-400:])
     except subprocess.TimeoutExpired:
         return False, "", {"reason": "timeout", "detail": "%ds" % int(limit)}
@@ -1091,14 +1121,24 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
             posts=int(kwargs.get("posts") or 0),
             usage=details.get("usage"),
         )
-        if last_reason != "quota_exhausted":
+        if last_reason not in ("quota_exhausted", "auth_expired"):
             return {
                 "ok": False,
                 "reason": last_reason,
                 "detail": last_detail,
                 "tried_accounts": tried,
             }
-        # Очки кончились: активация уже записана, дальше — следующий аккаунт.
+        # Очки кончились — или протух вход: активация уже записана, дальше
+        # следующий аккаунт. Протухший аккаунт исключаем явно: Карман о нём
+        # ничего не знает и может выдать его снова.
+        if last_reason == "auth_expired":
+            if account_id is not None:
+                excluded.append(account_id)
+            logger.warning(
+                "minimax: вход в аккаунт %s протух (%s) — просим следующего",
+                account.name,
+                last_detail[:120],
+            )
 
     return {
         "ok": False,

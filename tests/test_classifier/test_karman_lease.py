@@ -577,6 +577,46 @@ def test_chat_works_on_token_from_karman(monkeypatch, tmp_path):
     assert result["account"] == "work"
 
 
+def test_chat_rotates_to_next_account_when_login_expired(monkeypatch, tmp_path):
+    """Протух вход — тот же класс, что кончились очки: идём к Карману за другим."""
+    _lease_env(monkeypatch)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+
+    first = _offer(67, "a@example.com")
+    first.access_token = "tok-1"
+    second = _offer(68, "b@example.com")
+    second.access_token = "tok-2"
+    offers = [first, second]
+    seen_excludes = []
+
+    def _take(**kw):
+        seen_excludes.append(list(kw.get("exclude") or []))
+        return offers.pop(0)
+
+    calls = []
+
+    def _run(account, **kwargs):
+        calls.append(account.name)
+        if len(calls) == 1:
+            return False, "", {"reason": "auth_expired", "detail": "Sign in to MiniMax"}
+        return True, '{"verdicts": []}', {"model": "MiniMax-M3.1-Flash", "usage": {"total": 1}}
+
+    monkeypatch.setattr(km, "take_account", _take)
+    monkeypatch.setattr(mx, "run_classification", _run)
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is True
+    assert result["karman_account_id"] == 68
+    # Протухший аккаунт исключён: Карман о нём не знает и мог бы выдать снова.
+    assert 67 in seen_excludes[-1]
+
+
 def test_chat_does_not_fall_back_to_local_pool_when_karman_is_down(monkeypatch, tmp_path):
     """Карман недоступен — это не повод работать на аккаунте, который он держит."""
     _lease_env(monkeypatch)
