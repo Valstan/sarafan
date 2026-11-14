@@ -161,6 +161,19 @@ class PoolOffer:
         return self.account is None
 
 
+def token_state(offer: PoolOffer) -> Dict[str, Any]:
+    """Что по токенам в выдаче Кармана — для проб и отчётов.
+
+    ``usable`` — хватает ли того, что пришло, чтобы войти в аккаунт: нужен
+    только ``access_token``. ``refresh`` — страховка на истечение access.
+    """
+    return {
+        "access": bool(offer.access_token),
+        "refresh": bool(offer.refresh_token),
+        "usable": bool(offer.has_tokens),
+    }
+
+
 def _call(
     method: str,
     url: str,

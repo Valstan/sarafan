@@ -511,6 +511,20 @@ def test_materialize_leased_profile_keeps_one_working_area(tmp_path, monkeypatch
     assert meta["email"] == "b@example.com"
 
 
+def test_token_state_reports_what_karman_sent():
+    """Проба должна честно сказать: access есть, refresh — нет, вход рабочий."""
+    only_access = km.PoolOffer(account={"id": 1}, access_token="tok")
+    assert km.token_state(only_access) == {
+        "access": True,
+        "refresh": False,
+        "usable": True,
+    }
+    both = km.PoolOffer(account={"id": 1}, access_token="tok", refresh_token="ref")
+    assert km.token_state(both)["refresh"] is True
+    without = km.PoolOffer(account={"id": 1})
+    assert km.token_state(without)["usable"] is False
+
+
 def test_materialize_leased_profile_works_with_access_token_only(tmp_path, monkeypatch):
     """Refresh-токен — страховка, а не условие работы: входа достаточно."""
     monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
