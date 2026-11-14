@@ -467,7 +467,7 @@ def _ensure_points(account: MinimaxAccount) -> bool:
     return bool(account.claimed_today)
 
 
-def _report_activation(account_id: Any, account: MinimaxAccount) -> bool:
+def _report_activation(account_id: Any, account: MinimaxAccount, *, email: str = "") -> bool:
     """Отметить активацию в журнале Кармана.
 
     Отмечаем **все** активации Сарафана, а не только арендованные: иначе
@@ -478,15 +478,23 @@ def _report_activation(account_id: Any, account: MinimaxAccount) -> bool:
     ``activation_index`` — клетка, которую мы увидели на панели MiniMax: у
     Кармана это истина, а расхождение с их предсказанием помечается флагом
     ``mismatch`` (их правило клетки от чужого показания не меняется).
+
+    **Идентификатор — почта** (Карман принимает email вместо внутреннего id с
+    14.11): нам не нужно знать их номера, и учёт не рвётся в день, когда
+    аккаунт уже отмечен и ручка его не выдаёт.
     """
     if not karman_minimax.enabled():
         return False
-    if account_id is None:
-        logger.warning("minimax: у профиля %s нет id Кармана — активация не отмечена", account.name)
+    if account_id is None and not (email or account.email):
+        logger.warning(
+            "minimax: у профиля %s нет ни id, ни почты Кармана — активация не отмечена",
+            account.name,
+        )
         return False
     try:
         record = karman_minimax.report_activation(
             account_id,
+            email=email or account.email or None,
             points=account.claimed_points or None,
             activation_index=account.activation_index,
         )
@@ -984,6 +992,7 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
         try:
             karman_minimax.report_activation(
                 account_id,
+                email=str((offer.account or {}).get("email") or "") or None,
                 points=account.claimed_points or None,
                 activation_index=account.activation_index,
             )

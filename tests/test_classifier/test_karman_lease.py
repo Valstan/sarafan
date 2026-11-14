@@ -190,6 +190,30 @@ def test_take_account_reads_why(monkeypatch):
     assert offer.why == "клетка 5 — сегодня 400 очков"
 
 
+def test_report_activation_sends_email_not_internal_id(monkeypatch):
+    """Карман с 14.11 принимает email — внутренние id нам знать не нужно."""
+    monkeypatch.setenv(km.ENV_API_URL, "https://karman.invalid/api/minimax")
+    monkeypatch.setenv(km.ENV_TOKEN, "room-token")
+    calls, call = _call_recorder([(200, {"account_id": 45})])
+    record = km.report_activation(
+        None, email="4@id45d.myjino.ru", activation_index=7, points=1000, call=call
+    )
+    assert record["account_id"] == 45
+    assert calls[0]["body"] == {
+        "email": "4@id45d.myjino.ru",
+        "points": 1000,
+        "activation_index": 7,
+    }
+
+
+def test_report_activation_falls_back_to_account_id(monkeypatch):
+    monkeypatch.setenv(km.ENV_API_URL, "https://karman.invalid/api/minimax")
+    monkeypatch.setenv(km.ENV_TOKEN, "room-token")
+    calls, call = _call_recorder([(200, {"account_id": 45})])
+    km.report_activation(45, call=call)
+    assert calls[0]["body"] == {"account_id": 45}
+
+
 def test_report_activation_sends_only_known_fields(monkeypatch):
     """Проект и дату определяет сервер по токену — клиент их не присылает."""
     monkeypatch.setenv(km.ENV_API_URL, "https://karman.invalid/api/minimax")
