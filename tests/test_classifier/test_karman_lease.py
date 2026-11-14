@@ -862,9 +862,12 @@ def test_classify_failure_recognizes_rejected_credential_record():
     (живой факт 14.11: 37 отказов подряд, пока ротация не вывела на другой
     аккаунт).
     """
-    assert mx._classify_failure(
-        "mcode exec failed: The run failed: The stored OAuth credential record is invalid."
-    ) == "auth_expired"
+    assert (
+        mx._classify_failure(
+            "mcode exec failed: The run failed: The stored OAuth credential record is invalid."
+        )
+        == "auth_expired"
+    )
     assert mx._classify_failure("insufficient balance") == "quota_exhausted"
     assert mx._classify_failure("Sign in to MiniMax") == "auth_expired"
     assert mx._classify_failure("что-то другое", default="exec_failed") == "exec_failed"
