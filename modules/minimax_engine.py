@@ -186,10 +186,17 @@ _QUOTA_MARKERS = (
 #: аккаунта и идём к Карману за следующим (заказ владельца 14.11).
 _AUTH_MARKERS = (
     "sign in to minimax",
+    "sign in",
+    "please log in",
+    "not logged in",
+    "session has expired",
+    "session expired",
     "unauthorized",
     "401",
     "invalid token",
     "token expired",
+    "token has expired",
+    "expired_token",
     "invalid_grant",
     "authentication error",
 )
@@ -556,6 +563,11 @@ def _report_activation(account_id: Any, account: MinimaxAccount, *, email: str =
 #: для профиля, собранного на лету, ключ надо посчитать заранее.
 TOKEN_KEY_PREFIX = "com.minimax.mcode.oauth.prod.en"
 TOKEN_CLIENT_ID = "mcode-public"
+#: Заглушка ``refreshToken``, когда Карман refresh не присылает. Рантайм MiniMax
+#: Code требует это поле непустым (иначе запись считается битой и CLI отказывается
+#: работать вовсе), а реального refresh у нас может не быть. Продлить вход
+#: заглушкой нельзя — после истечения access мы берём следующий аккаунт.
+REFRESH_PLACEHOLDER = "mmoat_placeholder_refresh_not_provided"
 #: Запасной срок жизни access-токена, если Карман не прислал ``expires_at_ms``.
 #: Замерено 14.11 на реальном входе: access живёт ≈ 9 ч. Ставим меньше, чтобы
 #: рантайм не считал токен вечным.
@@ -603,8 +615,15 @@ def materialize_leased_profile(
 
     Обязателен только ``access_token`` — это и есть «вход в аккаунт».
     ``refresh_token`` — страховка: он продлевает **тот же** вход, когда access
-    истёк (замерено 14.11: жизнь access-токена ≈ 9 ч). Без него работа не
-    останавливается — просто по истечении токена придётся взять вход заново.
+    истёк (замерено 14.11: жизнь access-токена ≈ 9 ч).
+
+    ⚠️ Но поле ``refreshToken`` в записи токен-стора рантайм MiniMax Code
+    требует **обязательно** (проверено по коду CLI 14.11: `CREDENTIAL_RECORD_
+    CORRUPT`, «The stored OAuth credential record is invalid», если строки нет
+    или она пустая). Поэтому, когда Карман refresh не присылает (он перестал
+    его давать 14.11), мы пишем заглушку: access-токен при этом работает
+    как обычно, а попытка продлить его (после истечения access) честно
+    провалится — тогда мы просто берём следующий аккаунт.
     """
     access_token = str(getattr(offer, "access_token", "") or "")
     refresh_token = str(getattr(offer, "refresh_token", "") or "")
@@ -634,6 +653,12 @@ def materialize_leased_profile(
     }
     if refresh_token:
         record["refreshToken"] = refresh_token
+    else:
+        # Поле обязательно по контракту рантайма (см. докстринг выше): без
+        # непустой строки CLI считает запись битой и отказывается работать.
+        # Заглушка честно помечена: продлить вход ею нельзя — после истечения
+        # access мы просто берём у Кармана следующий аккаунт.
+        record["refreshToken"] = REFRESH_PLACEHOLDER
     store = {
         "schemaVersion": 1,
         "records": {token_store_key(auth_home.resolve()): record},
