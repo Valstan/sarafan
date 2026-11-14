@@ -142,8 +142,18 @@ class PoolOffer:
 
     @property
     def has_tokens(self) -> bool:
-        """Карман отдал готовый вход — профиль собирается на лету."""
-        return bool(self.access_token and self.refresh_token)
+        """Карман отдал готовый вход — профиль собирается на лету.
+
+        Обязателен только ``access_token``: он нужен, чтобы войти в аккаунт и
+        работать. ``refresh_token`` — страховка (продление того же входа, когда
+        access истёк), и его отсутствие работу не блокирует.
+        """
+        return bool(self.access_token)
+
+    @property
+    def has_refresh(self) -> bool:
+        """Есть ли у Кармана refresh-токен (продление входа без владельца)."""
+        return bool(self.refresh_token)
 
     @property
     def empty(self) -> bool:

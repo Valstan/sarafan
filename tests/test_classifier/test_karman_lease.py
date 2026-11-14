@@ -487,6 +487,58 @@ def test_materialize_leased_profile_writes_token_store(tmp_path, monkeypatch):
     assert store["records"][key]["refreshToken"] == "ref-abc"
 
 
+def test_materialize_leased_profile_keeps_one_working_area(tmp_path, monkeypatch):
+    """Второй аккаунт перезаписывает ту же область — профили не копятся."""
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    first = km.PoolOffer(
+        account={"id": 67, "email": "a@example.com"},
+        access_token="tok-1",
+        refresh_token="ref-1",
+    )
+    second = km.PoolOffer(
+        account={"id": 68, "email": "b@example.com"},
+        access_token="tok-2",
+        refresh_token="ref-2",
+    )
+    acc1 = mx.materialize_leased_profile(67, first)
+    acc2 = mx.materialize_leased_profile(68, second)
+    assert acc1.root == acc2.root
+    store = json.loads(acc2.auth_path.read_text(encoding="utf-8"))
+    record = list(store["records"].values())[0]
+    assert record["accessToken"] == "tok-2"
+    meta = json.loads((acc2.root / "profile.json").read_text(encoding="utf-8"))
+    assert meta["karman_account_id"] == 68
+    assert meta["email"] == "b@example.com"
+
+
+def test_materialize_leased_profile_works_with_access_token_only(tmp_path, monkeypatch):
+    """Refresh-токен — страховка, а не условие работы: входа достаточно."""
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    offer = km.PoolOffer(
+        account={"id": 67, "email": "a@example.com"},
+        access_token="tok-only",
+    )
+    assert offer.has_tokens is True
+    assert offer.has_refresh is False
+
+    account = mx.materialize_leased_profile(67, offer)
+    assert account is not None
+    store = json.loads(account.auth_path.read_text(encoding="utf-8"))
+    record = list(store["records"].values())[0]
+    assert record["accessToken"] == "tok-only"
+    assert "refreshToken" not in record
+    # Без expires_at_ms рантайм не должен считать токен вечным.
+    assert record["expiresAtMs"] > 0
+
+
+def test_offer_without_access_token_is_not_a_login(tmp_path, monkeypatch):
+    """Нет access-токена — входа нет, профиль не собирается."""
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    offer = km.PoolOffer(account={"id": 67, "email": "a@example.com"}, refresh_token="ref-abc")
+    assert offer.has_tokens is False
+    assert mx.materialize_leased_profile(67, offer) is None
+
+
 def test_chat_works_on_token_from_karman(monkeypatch, tmp_path):
     """Карман отдал токен — работаем на нём, без локального профиля."""
     _lease_env(monkeypatch)
@@ -506,7 +558,9 @@ def test_chat_works_on_token_from_karman(monkeypatch, tmp_path):
 
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is True
-    assert result["account"] == "leased-67"
+    # Рабочая область одна: токен нового аккаунта перезаписывает её, а не
+    # плодит новые профили (контекст CLI не теряется).
+    assert result["account"] == "work"
 
 
 def test_chat_does_not_fall_back_to_local_pool_when_karman_is_down(monkeypatch, tmp_path):
