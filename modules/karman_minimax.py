@@ -241,13 +241,20 @@ def take_account(
 
 
 def report_activation(
-    account_id: Any,
+    account_id: Any = None,
     *,
+    email: Optional[str] = None,
     points: Optional[int] = None,
     activation_index: Optional[int] = None,
     call=_call,
 ) -> Dict[str, Any]:
     """Отметить активацию в журнале Кармана.
+
+    **Идентификатор — почта, а не внутренний id** (так сделал Карман 14.11 по
+    нашей просьбе): проекту не нужно знать внутренние номера аккаунтов, и учёт
+    не рвётся в тот день, когда аккаунт уже отмечен — тогда ручка ``available``
+    его не выдаёт и узнать id неоткуда. Если прислать и id, и email — они
+    должны указывать на один аккаунт, иначе 400.
 
     ``activation_index`` — клетка, которую **мы увидели на панели** MiniMax: у
     Кармана это истина (номер, названный проектом), а расхождение с их
@@ -261,7 +268,13 @@ def report_activation(
     token_value = token()
     if not base or not token_value:
         raise RuntimeError("ручки пула не настроены (адрес или токен не задан)")
-    body: Dict[str, Any] = {"account_id": int(account_id)}
+    body: Dict[str, Any] = {}
+    if email:
+        body["email"] = str(email)
+    elif account_id is not None:
+        body["account_id"] = int(account_id)
+    else:
+        raise RuntimeError("нечего отмечать: ни email, ни id аккаунта")
     if points is not None:
         body["points"] = int(points)
     if activation_index is not None:
