@@ -660,7 +660,9 @@ def test_materialize_leased_profile_works_with_access_token_only(tmp_path, monke
     store = json.loads(account.auth_path.read_text(encoding="utf-8"))
     record = list(store["records"].values())[0]
     assert record["accessToken"] == "tok-only"
-    assert "refreshToken" not in record
+    # Поле refreshToken рантайм требует непустым — иначе запись считается битой
+    # и CLI отказывается работать. Без настоящего refresh кладём заглушку.
+    assert record["refreshToken"] == mx.REFRESH_PLACEHOLDER
     # Без expires_at_ms рантайм не должен считать токен вечным.
     assert record["expiresAtMs"] > 0
 
