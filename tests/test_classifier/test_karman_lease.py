@@ -123,8 +123,10 @@ def test_moscow_today_is_utc_plus_three():
 def _call_recorder(responses):
     calls = []
 
-    def _call(method, url, token, *, body=None):
-        calls.append({"method": method, "url": url, "token": token, "body": body})
+    def _call(method, url, token, *, body=None, headers=None):
+        calls.append(
+            {"method": method, "url": url, "token": token, "body": body, "headers": headers or {}}
+        )
         return responses.pop(0)
 
     return calls, _call
@@ -963,6 +965,75 @@ def test_pool_is_not_burned_when_fresh_accounts_have_no_points(monkeypatch, tmp_
         return fresh
 
     monkeypatch.setattr(km, "take_account", _take)
+
+    # Наш текущий аккаунт отработал смену и кончился (токены потрачены — это не
+    # «пул без очков»), а свежий выданный умирает сразу, не потратив ни токена.
+    state = {"n": 0}
+
+    def _run(account, **kwargs):
+        state["n"] += 1
+        if state["n"] == 1:
+            return (
+                False,
+                "",
+                {
+                    "reason": "quota_exhausted",
+                    "detail": "insufficient balance (1008)",
+                    "usage": {"totalTokens": 12000},
+                },
+            )
+        return False, "", {"reason": "quota_exhausted", "detail": "insufficient balance (1008)"}
+
+    monkeypatch.setattr(mx, "run_classification", _run)
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is False
+    assert result["reason"] == "quota_exhausted"
+    assert "ручк" in result["detail"]
+    # Взяли ровно один свежий аккаунт — и остановились.
+    assert len(taken) == 1
+    # Про этот аккаунт мы ничего не запоминаем: учёт — зона Кармана.
+    meta = json.loads((tmp_path / "work" / "profile.json").read_text(encoding="utf-8"))
+    assert "empty_accounts" not in meta
+
+    # Следующий батч: пауза — к Карману не идём вовсе. Пауза ОБЩАЯ: она лежит
+    # в файле рабочей области, поэтому её видят и другие процессы воркера
+    # (живой факт 15.11: пауза в памяти процесса не сработала ни разу).
+    taken.clear()
+    mx._karman_down_until = 0.0  # состояние процесса обнулено — общая пауза должна удержать
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is False
+    assert result["reason"] == "karman_unavailable"
+    assert taken == []
+
+
+def test_dry_failure_of_held_account_stops_the_pool(monkeypatch, tmp_path):
+    """Аккаунт, умерший без токенов, — тоже «пул без очков».
+
+    Живой факт 15.11: Карман отдавал аккаунты, которые умирали сразу
+    («insufficient balance»). Часть таких отказов приходила на аккаунт, взятый
+    ПРЕДЫДУЩИМ вызовом (лежащий в рабочей области) — счётчик жил внутри вызова
+    и их не видел. Теперь сухой отказ считается всегда, а пауза общая.
+    """
+    _lease_env(monkeypatch)
+    _account(tmp_path, "work", email="cur@example.com", karman_id=67)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+    monkeypatch.setattr(mx, "_fresh_fail_limit", lambda: 1)
+    monkeypatch.setattr(mx, "_no_points_ttl", lambda: 1800.0)
+
+    taken = []
+
+    def _take(**kw):
+        taken.append(dict(kw))
+        return _offer(68, "b@example.com")
+
+    monkeypatch.setattr(km, "take_account", _take)
     monkeypatch.setattr(
         mx,
         "run_classification",
@@ -976,19 +1047,82 @@ def test_pool_is_not_burned_when_fresh_accounts_have_no_points(monkeypatch, tmp_
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is False
     assert result["reason"] == "quota_exhausted"
-    assert "ручк" in result["detail"]
-    # Взяли ровно один свежий аккаунт — и остановились.
-    assert len(taken) == 1
-    # Про этот аккаунт мы ничего не запоминаем: учёт — зона Кармана.
-    meta = json.loads((tmp_path / "work" / "profile.json").read_text(encoding="utf-8"))
-    assert "empty_accounts" not in meta
-
-    # Следующий батч: пауза — к Карману не идём вовсе.
-    taken.clear()
-    result = mx.chat(system="S", user="U", posts=1)
-    assert result["ok"] is False
-    assert result["reason"] == "karman_unavailable"
+    # Ни одного нового аккаунта у Кармана не взяли: пул сухой — пауза сразу.
     assert taken == []
+    # Пауза лежит в файле рабочей области — её видят все процессы воркера.
+    meta = json.loads((tmp_path / "work" / "profile.json").read_text(encoding="utf-8"))
+    assert int(meta[mx.META_PAUSE_UNTIL]) > 0
+
+
+def test_account_ran_out_of_points_is_not_a_dry_failure(monkeypatch, tmp_path):
+    """Наш аккаунт кончился ПОСЛЕ работы — это не «пул без очков».
+
+    Отказ с потраченными токенами означает, что клетка выбрана честно и
+    израсходована; молча уходим на платную страховку нельзя — за следующим
+    аккаунтом ещё есть смысл сходить.
+    """
+    _lease_env(monkeypatch)
+    _account(tmp_path, "work", email="cur@example.com", karman_id=67)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+    monkeypatch.setattr(mx, "_fresh_fail_limit", lambda: 1)
+    monkeypatch.setattr(mx, "_no_points_ttl", lambda: 1800.0)
+
+    taken = []
+    fresh = _offer(68, "b@example.com")
+    fresh.access_token = "tok-2"
+
+    def _take(**kw):
+        taken.append(dict(kw))
+        return fresh
+
+    monkeypatch.setattr(km, "take_account", _take)
+
+    state = {"n": 0}
+
+    def _run(account, **kwargs):
+        state["n"] += 1
+        if state["n"] == 1:
+            # наш аккаунт отработал смену и кончился: токены потрачены
+            return (
+                False,
+                "",
+                {
+                    "reason": "quota_exhausted",
+                    "detail": "insufficient balance (1008)",
+                    "usage": {"totalTokens": 12000},
+                },
+            )
+        return True, '{"verdicts": []}', {"model": "MiniMax-M3.1-Flash", "usage": {"total": 1}}
+
+    monkeypatch.setattr(mx, "run_classification", _run)
+
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is True
+    # За следующим аккаунтом сходили: сухим был бы отказ без токенов.
+    assert len(taken) == 1
+    meta = json.loads((tmp_path / "work" / "profile.json").read_text(encoding="utf-8"))
+    assert int(meta.get(mx.META_PAUSE_UNTIL) or 0) == 0
+
+
+def test_consumer_headers_mark_audit(monkeypatch):
+    """Разметка потребителя в аудите Кармана (запрос мозга D-220, 15.11)."""
+    monkeypatch.setenv(km.ENV_API_URL, "https://karman.invalid/api/minimax")
+    monkeypatch.setenv(km.ENV_TOKEN, "room-token")
+    calls, call = _call_recorder([(200, OFFER)])
+    km.take_account(call=call)
+    assert calls[0]["headers"]["X-MiniMax-Project"] == "setka"
+    assert calls[0]["headers"]["X-MiniMax-Area"]
+
+    calls, call = _call_recorder([(200, {"account_id": 67})])
+    km.report_activation(67, points=400, activation_index=1, call=call)
+    assert calls[0]["headers"]["X-MiniMax-Project"] == "setka"
+    assert calls[0]["headers"]["X-MiniMax-Area"]
 
 
 def test_chat_does_not_fall_back_to_local_pool_when_karman_is_down(monkeypatch, tmp_path):
