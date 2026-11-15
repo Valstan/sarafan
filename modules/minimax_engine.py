@@ -696,6 +696,10 @@ def materialize_leased_profile(
             "karman_account_id": account_id,
             "email": str((getattr(offer, "account", None) or {}).get("email") or ""),
             "updated_at_ms": int(time.time() * 1000),
+            # День получения токена: отчёт об активации привязан к выдаче,
+            # а не к календарю (вчерашний аккаунт Карман сегодня не выдавал —
+            # его ручка отвечает 404).
+            "leased_day": karman_minimax.moscow_today(),
         }
         # Общее состояние пула (счётчик сухих отказов и общая пауза) переживает
         # смену аккаунта: иначе каждый новый аккаунт обнулял бы счётчик — и
@@ -1184,6 +1188,16 @@ def _activation_reported_today(account: MinimaxAccount) -> bool:
     return str(meta.get("activation_day") or "") == karman_minimax.moscow_today()
 
 
+def _activation_attempted_today(account: MinimaxAccount) -> bool:
+    """Пробовали ли мы сегодня отметить активацию этого аккаунта.
+
+    Отметка не удалась (404/409) — значит, повторять её каждый батч бессмысленно:
+    это ровно «долбить ручку» десятками запросов в минуту.
+    """
+    meta = _read_profile_meta(account.root)
+    return str(meta.get("activation_attempt_day") or "") == karman_minimax.moscow_today()
+
+
 def _remember_activation_day(account: MinimaxAccount) -> None:
     """Запомнить: этот аккаунт отмечен у Кармана сегодня."""
     meta = _read_profile_meta(account.root)
@@ -1196,17 +1210,52 @@ def _remember_activation_day(account: MinimaxAccount) -> None:
         pass
 
 
+def _remember_activation_attempt(account: MinimaxAccount) -> None:
+    """Запомнить: отметку активации сегодня уже пробовали (успех или отказ)."""
+    meta = _read_profile_meta(account.root)
+    meta["activation_attempt_day"] = karman_minimax.moscow_today()
+    try:
+        (account.root / PROFILE_META_NAME).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def _leased_today(account: MinimaxAccount) -> bool:
+    """Получили ли мы этот аккаунт у Кармана **сегодня**.
+
+    Отчёт об активации привязан к факту получения токена (мандат мозга D-220:
+    «сколько очков фактически активировалось на только что полученном токене»).
+    Аккаунт, взятый вчера и продолжающий работать сегодня, Карман сегодня не
+    выдавал — его ручка отвечает 404 («Активация за сегодня не найдена — мы его
+    не выдавали»). Отмечать такой аккаунт бессмысленно: отметка привязана к
+    выдаче, а не к календарю.
+    """
+    meta = _read_profile_meta(account.root)
+    return str(meta.get("leased_day") or "") == karman_minimax.moscow_today()
+
+
 def _report_activation_once(account: MinimaxAccount) -> None:
-    """Отметить активацию у Кармана — раз в сутки на аккаунт.
+    """Отметить активацию у Кармана — раз в сутки на полученный токен.
 
     По контракту 14.11 этого **не делаем**: учёт (гашение, очки, статистику)
     Карман ведёт сам в момент выдачи, а ``POST /api/minimax/activations`` звать
     не надо. Функция осталась на случай возврата к прежней схеме — включается
-    флагом ``MINIMAX_REPORT_ACTIVATION=1``.
+    флагом ``MINIMAX_REPORT_ACTIVATION=1`` (мандат мозга D-220, 15.11: отчёт о
+    фактически активированных очках).
+
+    Отчёт уходит **только для токена, полученного сегодня**, и **не повторяется**,
+    если ручка отказала: иначе каждый батч бьёт в ручку Кармана (живой факт
+    16.11: 404 «мы его не выдавали» каждые ~20 с).
     """
     if not _activation_reporting_enabled():
         return
-    if account.karman_id is None or _activation_reported_today(account):
+    if account.karman_id is None:
+        return
+    if _activation_reported_today(account) or _activation_attempted_today(account):
+        return
+    if not _leased_today(account):
         return
     try:
         karman_minimax.report_activation(
@@ -1217,6 +1266,7 @@ def _report_activation_once(account: MinimaxAccount) -> None:
         )
         _remember_activation_day(account)
     except RuntimeError as exc:
+        _remember_activation_attempt(account)
         logger.warning("minimax: не отметили активацию аккаунта %s (%s)", account.name, exc)
 
 

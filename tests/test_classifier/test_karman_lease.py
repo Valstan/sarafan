@@ -50,7 +50,7 @@ OFFER = {
 }
 
 
-def _account(tmp_path: Path, name: str, *, email: str = "", karman_id=None):
+def _account(tmp_path: Path, name: str, *, email: str = "", karman_id=None, leased_day=None):
     auth = tmp_path / name / "data" / "auth" / "prod" / "en" / "mcode-public" / "auth.json"
     auth.parent.mkdir(parents=True, exist_ok=True)
     (tmp_path / name / "config").mkdir(parents=True, exist_ok=True)
@@ -76,6 +76,8 @@ def _account(tmp_path: Path, name: str, *, email: str = "", karman_id=None):
         meta["email"] = email
     if karman_id is not None:
         meta["karman_account_id"] = karman_id
+    if leased_day is not None:
+        meta["leased_day"] = leased_day
     if meta:
         (tmp_path / name / "profile.json").write_text(
             json.dumps(meta, ensure_ascii=False), encoding="utf-8"
@@ -299,7 +301,13 @@ def test_chat_works_on_account_from_karman(monkeypatch, tmp_path):
     `POST /api/minimax/activations` звать не надо.
     """
     _lease_env(monkeypatch)
-    _account(tmp_path, "acc5", email="54@id45d.myjino.ru", karman_id=67)
+    _account(
+        tmp_path,
+        "acc5",
+        email="54@id45d.myjino.ru",
+        karman_id=67,
+        leased_day=km.moscow_today(),
+    )
     monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
     monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
     monkeypatch.setattr(
@@ -825,7 +833,13 @@ def test_activation_is_reported_once_per_day(monkeypatch, tmp_path):
     """
     _lease_env(monkeypatch)
     monkeypatch.setenv(mx.ENV_REPORT_ACTIVATION, "1")
-    _account(tmp_path, "work", email="cur@example.com", karman_id=42)
+    _account(
+        tmp_path,
+        "work",
+        email="cur@example.com",
+        karman_id=42,
+        leased_day=km.moscow_today(),
+    )
     monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
     monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
     monkeypatch.setattr(
@@ -847,14 +861,84 @@ def test_activation_is_reported_once_per_day(monkeypatch, tmp_path):
     assert mx.chat(system="S", user="U", posts=1)["ok"] is True
     assert reported == [42]
 
-    # А на следующий день — снова: журнал ведётся по суткам.
     meta_path = tmp_path / "work" / "profile.json"
     meta = json.loads(meta_path.read_text(encoding="utf-8"))
     assert meta["activation_day"] == km.moscow_today()
-    meta["activation_day"] = "2026-01-01"
-    meta_path.write_text(json.dumps(meta), encoding="utf-8")
+
+
+def test_activation_not_reported_for_account_leased_yesterday(monkeypatch, tmp_path):
+    """Вчерашний аккаунт мы сегодня не отмечаем: Карман его сегодня не выдавал.
+
+    Живой факт 16.11: ручка отвечала 404 («Активация за сегодня не найдена — мы
+    его не выдавали») каждый батч, и мы так били по ней до ночи. Отметка
+    привязана к выдаче токена (мандат мозга D-220: «на только что полученном
+    токене»), а не к календарному дню.
+    """
+    _lease_env(monkeypatch)
+    monkeypatch.setenv(mx.ENV_REPORT_ACTIVATION, "1")
+    _account(
+        tmp_path,
+        "work",
+        email="cur@example.com",
+        karman_id=42,
+        leased_day="2026-01-01",
+    )
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "run_classification", _ok_call())
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+
+    reported = []
+    monkeypatch.setattr(
+        km,
+        "report_activation",
+        lambda account_id, **kwargs: reported.append(account_id) or {},
+    )
+    monkeypatch.setattr(km, "take_account", lambda **kw: _offer(42, "cur@example.com"))
+
     assert mx.chat(system="S", user="U", posts=1)["ok"] is True
-    assert reported == [42, 42]
+    assert reported == []
+
+
+def test_failed_activation_report_is_not_retried_every_batch(monkeypatch, tmp_path):
+    """Ручка отказала — не долбим её каждый батч.
+
+    Отметка активации — служебная, а не заработок: если она не прошла, повторять
+    её десятками раз в минуту бессмысленно. Работа при этом продолжается.
+    """
+    _lease_env(monkeypatch)
+    monkeypatch.setenv(mx.ENV_REPORT_ACTIVATION, "1")
+    _account(
+        tmp_path,
+        "work",
+        email="cur@example.com",
+        karman_id=42,
+        leased_day=km.moscow_today(),
+    )
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "run_classification", _ok_call())
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+
+    attempts = []
+
+    def _report(account_id, **kwargs):
+        attempts.append(account_id)
+        raise RuntimeError("Карман не записал активацию: 404 Активация за сегодня не найдена")
+
+    monkeypatch.setattr(km, "report_activation", _report)
+    monkeypatch.setattr(km, "take_account", lambda **kw: _offer(42, "cur@example.com"))
+
+    assert mx.chat(system="S", user="U", posts=1)["ok"] is True
+    assert mx.chat(system="S", user="U", posts=1)["ok"] is True
+    assert mx.chat(system="S", user="U", posts=1)["ok"] is True
+    assert len(attempts) == 1
 
 
 def test_refresh_is_skipped_for_placeholder(monkeypatch, tmp_path):
