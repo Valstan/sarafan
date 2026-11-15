@@ -691,11 +691,18 @@ def materialize_leased_profile(
         return None
     # Кто сейчас в области — для проб и для владельца.
     try:
+        previous_meta = _read_profile_meta(root)
         meta = {
             "karman_account_id": account_id,
             "email": str((getattr(offer, "account", None) or {}).get("email") or ""),
             "updated_at_ms": int(time.time() * 1000),
         }
+        # Общее состояние пула (счётчик сухих отказов и общая пауза) переживает
+        # смену аккаунта: иначе каждый новый аккаунт обнулял бы счётчик — и
+        # пул снова сжигался бы (живой факт 15.11: 15 аккаунтов за 2 минуты).
+        for key in (META_DRY_FAILURES, META_PAUSE_UNTIL):
+            if key in previous_meta:
+                meta[key] = previous_meta[key]
         (root / "profile.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
         )
@@ -1099,6 +1106,56 @@ def _remember_exhausted(account: MinimaxAccount) -> None:
         pass
 
 
+#: Ключи общего состояния «пул без очков» — в профиле рабочей области. Файл
+#: читают и пишут все процессы воркера, поэтому пауза общая, а не «в этом
+#: процессе»: иначе пять параллельных чанков волны сожгли бы по три аккаунта
+#: каждый (живой факт 15.11: 15 аккаунтов за две минуты, пауза не сработала).
+META_DRY_FAILURES = "dry_failures"
+META_PAUSE_UNTIL = "karman_pause_until_ms"
+
+
+def _work_area_root(accounts_dir: Optional[str] = None) -> Path:
+    """Корень рабочей области — там лежит общее состояние пула."""
+    area = (os.getenv(ENV_WORK_AREA) or DEFAULT_WORK_AREA).strip() or DEFAULT_WORK_AREA
+    return accounts_root(accounts_dir) / area
+
+
+def _shared_meta(accounts_dir: Optional[str] = None) -> Dict[str, Any]:
+    """Общее состояние пула из профиля рабочей области."""
+    return _read_profile_meta(_work_area_root(accounts_dir))
+
+
+def _write_shared_meta(values: Dict[str, Any], accounts_dir: Optional[str] = None) -> None:
+    """Записать общее состояние пула (счётчик сухих отказов, паузу)."""
+    root = _work_area_root(accounts_dir)
+    meta = _read_profile_meta(root)
+    meta.update(values)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        (root / PROFILE_META_NAME).write_text(
+            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+    except OSError:
+        pass
+
+
+def _karman_pause_active(meta: Dict[str, Any], now_ms: Optional[int] = None) -> bool:
+    """Пауза после серии аккаунтов без очков — общая для всех воркеров."""
+    until = int(meta.get(META_PAUSE_UNTIL) or 0)
+    return until > int(now_ms if now_ms is not None else time.time() * 1000)
+
+
+def _note_dry_failure(accounts_dir: Optional[str] = None) -> int:
+    """Посчитать аккаунт, умерший без единого токена (пул без очков).
+
+    Счётчик общий: он лежит в профиле рабочей области, поэтому его видят все
+    процессы воркера и пауза после него не обходится каждому процессу отдельно.
+    """
+    count = int(_shared_meta(accounts_dir).get(META_DRY_FAILURES) or 0) + 1
+    _write_shared_meta({META_DRY_FAILURES: count}, accounts_dir)
+    return count
+
+
 #: Потолок серии свежих отказов: столько аккаунтов подряд мы готовы взять, прежде
 #: чем остановиться и подождать. Не «учёт аккаунтов» (им занимается Карман), а
 #: береж к ручке: бить по ней десятками запросов подряд бессмысленно.
@@ -1203,6 +1260,16 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
             "tried_accounts": [],
         }
 
+    if _karman_pause_active(_shared_meta()):
+        # Общая пауза после серии аккаунтов без очков: её видят все процессы
+        # воркера, поэтому пул не сжигается параллельными чанками волны.
+        return {
+            "ok": False,
+            "reason": "karman_unavailable",
+            "detail": "пауза после серии аккаунтов без очков (общая на всех воркеров)",
+            "tried_accounts": [],
+        }
+
     try:
         max_leases = max(1, int(os.getenv(ENV_MAX_LEASES) or DEFAULT_MAX_LEASES))
     except ValueError:
@@ -1225,12 +1292,6 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
     # Текущий аккаунт: тот, что уже в рабочей области. Он наш — его мы у
     # Кармана заново не просим.
     current = _work_area_account(accounts)
-    # Аккаунт только что выдан Карманом (а не лежавший в рабочей области):
-    # если такой откажет сразу — пул сейчас без очков, и крутить ротацию
-    # дальше нельзя.
-    leased_fresh = False
-    # Сколько свежих аккаунтов подряд отказали (пул без очков).
-    fresh_failures = 0
 
     for _attempt in range(max_leases + 1):
         if current is not None:
@@ -1259,6 +1320,8 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                         posts=int(kwargs.get("posts") or 0),
                         usage=details.get("usage"),
                     )
+                    # Пул жив: сухие отказы забываем, общая пауза не нужна.
+                    _write_shared_meta({META_DRY_FAILURES: 0, META_PAUSE_UNTIL: 0})
                     return {
                         "ok": True,
                         "content": content,
@@ -1290,25 +1353,29 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                     # Очки кончились сегодня — до завтра этот аккаунт не трогаем
                     # (и не тратим на него вызовы).
                     _remember_exhausted(current)
-                if leased_fresh:
-                    # Свежий аккаунт от Кармана отказал сразу. Значит, очков у
-                    # него сегодня нет — а это его зона (он обещает отдавать
-                    # аккаунт с незабранной клеткой). Мы ничего о нём не помним и
-                    # ничего про него не знаем: просто не бьём по ручке десятками
-                    # запросов подряд — ставим паузу.
-                    fresh_failures += 1
-                    if fresh_failures >= _fresh_fail_limit():
+                # Аккаунт умер, **не потратив ни токена**: это не «наш аккаунт
+                # кончился» (тогда бы токены потратились), а «пул выдал мёртвый
+                # вход». Такие аккаунты считаем в общем счётчике (файл рабочей
+                # области — его видят все процессы воркера) и после
+                # MINIMAX_KARMAN_FRESH_FAIL_LIMIT подряд ставим общую паузу:
+                # бить по ручке десятками запросов подряд бессмысленно.
+                usage = details.get("usage") or {}
+                dry = last_reason == "quota_exhausted" and not int(usage.get("totalTokens") or 0)
+                if dry:
+                    dry_failures = _note_dry_failure()
+                    if dry_failures >= _fresh_fail_limit():
+                        until_ms = int(time.time() * 1000 + _no_points_ttl() * 1000)
+                        _write_shared_meta({META_DRY_FAILURES: 0, META_PAUSE_UNTIL: until_ms})
                         last_detail = (
                             "%s; %d аккаунтов подряд без очков — пауза, чтобы не долбить ручку"
-                            % (last_detail, fresh_failures)
+                            % (last_detail, dry_failures)
                         )
                         logger.warning(
-                            "minimax: %d аккаунтов подряд без очков — пауза %s с, "
+                            "minimax: %d аккаунтов подряд без очков — общая пауза %s с, "
                             "дальше не долбим Кармана",
-                            fresh_failures,
+                            dry_failures,
                             int(_no_points_ttl()),
                         )
-                        _karman_down_until = time.monotonic() + _no_points_ttl()
                         return {
                             "ok": False,
                             "reason": last_reason,
@@ -1419,7 +1486,6 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                 logger.warning("minimax: аккаунт %s занят (%s) — берём другой", account.name, exc)
                 continue
         current = account
-        leased_fresh = True
 
     return {
         "ok": False,

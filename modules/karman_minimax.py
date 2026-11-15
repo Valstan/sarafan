@@ -180,13 +180,16 @@ def _call(
     token_value: str,
     *,
     body: Optional[Dict[str, Any]] = None,
+    headers: Optional[Dict[str, str]] = None,
 ) -> Tuple[int, Dict[str, Any]]:
     """Один HTTP-вызов → ``(status, json)``; сеть/таймаут → ``(0, {...})``."""
     data = json.dumps(body).encode("utf-8") if body is not None else None
-    headers = {"Authorization": "Bearer " + token_value, "Accept": "application/json"}
+    hdrs = {"Authorization": "Bearer " + token_value, "Accept": "application/json"}
+    if headers:
+        hdrs.update({str(k): str(v) for k, v in headers.items() if v})
     if data is not None:
-        headers["Content-Type"] = "application/json"
-    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+        hdrs["Content-Type"] = "application/json"
+    req = urllib.request.Request(url, data=data, method=method, headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=_TIMEOUT_SEC) as resp:
             raw = resp.read().decode("utf-8", "replace")
@@ -204,6 +207,19 @@ def _call(
         return int(exc.code), parsed
     except Exception as exc:  # noqa: BLE001 — сеть/DNS/таймаут
         return 0, {"error": ("%s: %s" % (type(exc).__name__, exc))[:300]}
+
+
+def consumer_headers() -> Dict[str, str]:
+    """Разметка потребителя для аудита Кармана.
+
+    Карман пишет ``X-MiniMax-Project`` и ``X-MiniMax-Area`` в свой аудит: кто
+    и под что брал. В журнал они не пишутся — журнальный проект всегда
+    комната-потребитель (так расход Сарафана и расход панели программирования
+    не смешиваются). Запросил мозг 15.11 (D-220) — добавляем оба заголовка.
+    """
+    project = (os.getenv("MINIMAX_PROJECT") or "setka").strip() or "setka"
+    area = (os.getenv("MINIMAX_AREA") or os.getenv("MINIMAX_WORK_AREA") or "work").strip() or "work"
+    return {"X-MiniMax-Project": project, "X-MiniMax-Area": area}
 
 
 def take_account(
@@ -241,7 +257,7 @@ def take_account(
     url = "%s/accounts/available" % base
     if query:
         url += "?" + urllib.parse.urlencode(query)
-    status, payload = call("GET", url, token_value)
+    status, payload = call("GET", url, token_value, headers=consumer_headers())
     if status != 200:
         raise RuntimeError(
             "Карман не ответил: %s %s" % (status, str(payload.get("error") or "")[:200])
@@ -302,7 +318,9 @@ def report_activation(
         body["points"] = int(points)
     if activation_index is not None:
         body["activation_index"] = int(activation_index)
-    status, payload = call("POST", "%s/activations" % base, token_value, body=body)
+    status, payload = call(
+        "POST", "%s/activations" % base, token_value, body=body, headers=consumer_headers()
+    )
     if status == 409:
         raise RuntimeError(str(payload.get("error") or "аккаунт занят"))
     if status != 200:
