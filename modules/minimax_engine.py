@@ -1099,61 +1099,10 @@ def _remember_exhausted(account: MinimaxAccount) -> None:
         pass
 
 
-#: Потолок памяти «пустых» аккаунтов в рабочей области. За день их может
-#: набраться много (живой факт 15.11: 15 аккаунтов подряд за две минуты), но
-#: держать больше сотни смысла нет — список только растёт, а аккаунты у
-#: Кармана живут сутки.
-EMPTY_ACCOUNTS_MAX = 100
-
-
-def _known_empty_accounts(accounts: List[MinimaxAccount]) -> List[int]:
-    """Id аккаунтов, которые сегодня отказали (очков не было) — их не просим.
-
-    Помним это рядом с рабочей областью: у нас одна область на всех, и без
-    памяти мы брали бы у Кармана тот же аккаунт снова и снова.
-    """
-    for account in accounts:
-        meta = _read_profile_meta(account.root)
-        raw = meta.get("empty_accounts")
-        if not isinstance(raw, list):
-            continue
-        if str(meta.get("empty_day") or "") != karman_minimax.moscow_today():
-            continue
-        out: List[int] = []
-        for item in raw:
-            try:
-                out.append(int(item))
-            except (TypeError, ValueError):
-                continue
-        return out
-    return []
-
-
-def _remember_empty_account(account: MinimaxAccount) -> None:
-    """Запомнить: этот аккаунт сегодня отказал (очков не было)."""
-    if account.karman_id is None:
-        return
-    meta = _read_profile_meta(account.root)
-    today = karman_minimax.moscow_today()
-    raw = meta.get("empty_accounts")
-    known = []
-    if str(meta.get("empty_day") or "") == today and isinstance(raw, list):
-        for item in raw:
-            try:
-                known.append(int(item))
-            except (TypeError, ValueError):
-                continue
-    if account.karman_id not in known:
-        known.append(int(account.karman_id))
-    known = known[-EMPTY_ACCOUNTS_MAX:]
-    meta["empty_accounts"] = known
-    meta["empty_day"] = today
-    try:
-        (account.root / PROFILE_META_NAME).write_text(
-            json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-    except OSError:
-        pass
+#: Потолок серии свежих отказов: столько аккаунтов подряд мы готовы взять, прежде
+#: чем остановиться и подождать. Не «учёт аккаунтов» (им занимается Карман), а
+#: береж к ручке: бить по ней десятками запросов подряд бессмысленно.
+DEFAULT_FRESH_FAIL_LIMIT = 3
 
 
 def _no_points_ttl() -> float:
@@ -1223,18 +1172,21 @@ def _activation_reporting_enabled() -> bool:
 def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any]:
     """Работа по аккаунтам, которые выдаёт Карман.
 
-    Кто выбирает аккаунт — Карман: он же ведёт журнал и знает, что уже
-    израсходовано. Мы получаем аккаунт, активируем его у себя (забираем очки
-    чекина — это и есть активация), отмечаем активацию в его журнале и работаем,
-    пока очки не кончатся; потом — снова за аккаунтом.
+    **Модель владельца (14.11):** мы не занимаемся пулом. Наша работа с
+    токенами ровно одна — **спросить у Кармана любой свободный аккаунт и
+    получить его**. Какой именно он даст — мы не знаем и знать не должны: учётом,
+    ротацией и выбором занимается он. Дальше: заходим под выданным токеном,
+    активируем очки и работаем, пока MiniMax не откажет; тогда — снова за
+    аккаунтом.
 
-    **Один аккаунт — на много чанков** (модель владельца 14.11: «рабочая
-    область — одна, в ней мы меняем аккаунт, когда бонус исчерпан»). Дневная
-    клетка аккаунта — 400–1000 очков, а это сотни постов; брать у Кармана
-    новый аккаунт на каждый чанк значило бы съедать пул (и квоту активаций) в
-    считаные минуты. Поэтому: текущий аккаунт рабочей области мы используем,
-    пока он работает, а за следующим идём только когда очки кончились
-    (``quota_exhausted``) или вход протух (``auth_expired``).
+    **Единственное, что мы сообщаем Карману, — факт активации:** сколько очков
+    активировалось в этот раз и какая клетка бонуса сработала. Это нужно ему
+    для статистики и для точного предсказания, кому он сможет предлагать
+    аккаунты дальше.
+
+    **Один аккаунт — на много батчей:** дневная клетка аккаунта — 400–1000
+    очков, а это сотни постов, поэтому новый аккаунт берём не на каждый батч,
+    а когда текущий перестал работать.
     """
     global _karman_down_until
 
@@ -1257,11 +1209,6 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
         max_leases = DEFAULT_MAX_LEASES
 
     tried: List[str] = []
-    # Аккаунты, которые сегодня уже отдали отказ (очки кончились или клетка
-    # забрата не нами): их больше не просим — ручка Кармана их не отдаёт заново,
-    # а мы их исключаем, чтобы не жечь пул (живой факт 15.11: без этого за две
-    # минуты сгорело 15 аккаунтов).
-    excluded: List[Any] = list(_known_empty_accounts(accounts))
     # Фильтр «только эти аккаунты» — по умолчанию выключен: аккаунтами пула
     # занимается Карман, он сам выбирает, какой отдать, и отдаёт токен.
     known_emails: List[str] = []
@@ -1339,25 +1286,20 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                         "tried_accounts": tried,
                     }
                 # Очки кончились — или протух вход: за следующим аккаунтом.
-                # Истёкший исключаем явно: Карман о нём ничего не знает и
-                # может выдать его снова.
-                if current.karman_id is not None:
-                    excluded.append(current.karman_id)
                 if last_reason == "quota_exhausted":
                     # Очки кончились сегодня — до завтра этот аккаунт не трогаем
                     # (и не тратим на него вызовы).
                     _remember_exhausted(current)
                 if leased_fresh:
-                    # Свежий аккаунт от Кармана отказал сразу. Запоминаем его
-                    # (больше не попросим) и считаем серию: когда отказали
-                    # несколько подряд — у пула сегодня нет очков, и крутить
-                    # ротацию дальше бессмысленно: это жжёт пул (живой факт
-                    # 15.11 — 15 аккаунтов за две минуты). Ставим паузу.
-                    _remember_empty_account(current)
+                    # Свежий аккаунт от Кармана отказал сразу. Значит, очков у
+                    # него сегодня нет — а это его зона (он обещает отдавать
+                    # аккаунт с незабранной клеткой). Мы ничего о нём не помним и
+                    # ничего про него не знаем: просто не бьём по ручке десятками
+                    # запросов подряд — ставим паузу.
                     fresh_failures += 1
                     if fresh_failures >= _fresh_fail_limit():
                         last_detail = (
-                            "%s; %d аккаунтов подряд без очков — пауза, чтобы не жечь пул"
+                            "%s; %d аккаунтов подряд без очков — пауза, чтобы не долбить ручку"
                             % (last_detail, fresh_failures)
                         )
                         logger.warning(
@@ -1382,8 +1324,10 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                 current = None
 
         # ── 2. Следующий аккаунт — у Кармана ──
+        # Просим «любой свободный, не активированный сегодня»: конкретные
+        # аккаунты мы не заказываем и о них не знаем (их учёт — его зона).
         try:
-            offer = karman_minimax.take_account(exclude=excluded, emails=known_emails)
+            offer = karman_minimax.take_account(emails=known_emails)
         except RuntimeError as exc:
             logger.warning("minimax: Карман не ответил (%s)", exc)
             try:
@@ -1434,8 +1378,8 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
         if account is None:
             # Аккаунт от Кармана, а нашего профиля под него нет: вход в этот
             # аккаунт ещё не сделан (device-flow — только браузер владельца).
-            # Просим Кармана пропустить его (exclude) и взять следующего.
-            excluded.append((offer.account or {}).get("id"))
+            # Следующего попросим просто ещё раз — конкретные аккаунты мы не
+            # заказываем.
             last_reason = "account_not_authorized"
             last_detail = "аккаунт %s не авторизован на этой машине (нужен вход владельца)" % (
                 karman_minimax.account_identity(offer.account),
@@ -1454,10 +1398,11 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
         tried.append(account.name)
         if account_id is None:
             account_id = account.karman_id
-        # Активация в журнале Кармана — по контракту 14.11 мы её **не шлём**:
-        # учёт (гашение, очки, статистику) Карман ведёт сам в момент выдачи,
-        # а `POST /api/minimax/activations` звать не надо. Флаг
-        # `MINIMAX_REPORT_ACTIVATION=1` возвращает прежнее поведение.
+        # Отчёт о факте активации: сколько очков активировалось в этот раз и
+        # какая клетка бонуса сработала. Это нужно Карману для его статистики и
+        # для точного предсказания, кому он сможет предлагать аккаунты дальше
+        # (запрос 15.11). Никакого управления пулом: конкретные аккаунты мы не
+        # заказываем и о них не помним.
         if _activation_reporting_enabled():
             try:
                 karman_minimax.report_activation(
