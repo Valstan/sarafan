@@ -482,10 +482,10 @@ def test_chat_skips_account_without_profile_and_takes_next(monkeypatch, tmp_path
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is True
     assert result["account"] == "acc5"
-    # Первый запрос — с id отработавшего аккаунта (его очки кончились, второй
-    # раз он не нужен); второй — плюс id аккаунта без профиля.
-    assert asked[0]["exclude"] == [42]
-    assert asked[1]["exclude"] == [42, 7]
+    # Конкретные аккаунты мы не заказываем: ни exclude, ни id в запросе —
+    # только «дай любой свободный, не активированный сегодня».
+    assert asked[0]["exclude"] == []
+    assert asked[1]["exclude"] == []
     # Наши почты по умолчанию НЕ фильтруются: выбор аккаунта — у Кармана.
     assert asked[0]["emails"] == []
     assert asked[1]["emails"] == []
@@ -913,7 +913,7 @@ def test_chat_rotates_to_next_account_when_login_expired(monkeypatch, tmp_path):
     seen_excludes = []
 
     def _take(**kw):
-        seen_excludes.append(list(kw.get("exclude") or []))
+        seen_excludes.append(dict(kw))
         return offers.pop(0)
 
     calls = []
@@ -930,15 +930,17 @@ def test_chat_rotates_to_next_account_when_login_expired(monkeypatch, tmp_path):
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is True
     assert result["karman_account_id"] == 68
-    # Протухший аккаунт исключён: Карман о нём не знает и мог бы выдать снова.
-    assert 67 in seen_excludes[-1]
+    # Конкретные аккаунты мы не заказываем: ни exclude, ни каких-либо id
+    # в запросе — только «дай любой свободный».
+    assert all("exclude" not in kwargs for kwargs in seen_excludes)
 
 
 def test_pool_is_not_burned_when_fresh_accounts_have_no_points(monkeypatch, tmp_path):
-    """Свежий аккаунт без очков — запомнили, второй раз не просим, пауза.
+    """Свежий аккаунт без очков — не бьём по ручке десятками запросов.
 
     Живой факт 15.11: в полночь волна взяла 15 аккаунтов подряд, каждый отказал
-    сразу («insufficient balance»), и пул Кармана ушёл впустую.
+    сразу («insufficient balance»). Мы ничего про эти аккаунты не помним и
+    знать не должны (учёт — зона Кармана) — просто остановимся и подождём.
     """
     _lease_env(monkeypatch)
     _account(tmp_path, "work", email="cur@example.com", karman_id=67)
@@ -957,7 +959,7 @@ def test_pool_is_not_burned_when_fresh_accounts_have_no_points(monkeypatch, tmp_
     taken = []
 
     def _take(**kw):
-        taken.append(list(kw.get("exclude") or []))
+        taken.append(dict(kw))
         return fresh
 
     monkeypatch.setattr(km, "take_account", _take)
@@ -974,12 +976,12 @@ def test_pool_is_not_burned_when_fresh_accounts_have_no_points(monkeypatch, tmp_
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is False
     assert result["reason"] == "quota_exhausted"
-    assert "пул" in result["detail"]
+    assert "ручк" in result["detail"]
     # Взяли ровно один свежий аккаунт — и остановились.
     assert len(taken) == 1
-    # Аккаунт без очков запомнен: в следующий раз мы его не попросим.
+    # Про этот аккаунт мы ничего не запоминаем: учёт — зона Кармана.
     meta = json.loads((tmp_path / "work" / "profile.json").read_text(encoding="utf-8"))
-    assert 68 in meta["empty_accounts"]
+    assert "empty_accounts" not in meta
 
     # Следующий батч: пауза — к Карману не идём вовсе.
     taken.clear()
