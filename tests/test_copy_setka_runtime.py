@@ -284,6 +284,48 @@ async def test_copy_setka_partial_then_retries_tail_next_tick(monkeypatch):
     assert pub2.publish_bulletin.await_count == 1
 
 
+async def test_copy_setka_spreads_regions_over_ticks(monkeypatch):
+    """Веер разнесён по тикам: за тик — не больше потолка регионов.
+
+    Без потолка один пост уходил во все активные регионы разом — 25–102
+    публикации в одну минуту (замер 15.11). Хвост не теряется: его добирает
+    следующий тик, и это НЕ считается неудачной попыткой.
+    """
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock, patch
+
+    from modules.copy_setka_network import execute_copy_setka_network
+
+    post = {"owner_id": -167381590, "id": 777, "date": 999_990, "text": "новость"}
+    wt = _WorkTable()
+    UR, MI, OR = -168170215, -158787639, -158787640
+
+    pub = AsyncMock()
+    pub.publish_bulletin.side_effect = _bulletin_side_effect(set())
+    with ExitStack() as stack:
+        _patch_copy_setka_deps(
+            stack,
+            parse_tokens={"VALSTAN": "TOK_MEMBER"},
+            wall_by_token={"TOK_MEMBER": [post]},
+            publisher=pub,
+        )
+        stack.enter_context(
+            patch("config.runtime.get_copy_setka_max_regions_per_tick", return_value=2)
+        )
+        out = await execute_copy_setka_network(
+            _FakeSession([[wt], [_Region("ur", UR), _Region("mi", MI), _Region("or", OR)]])
+        )
+
+    assert out["posts_published"] == 2  # потолок, а не все три
+    assert out["complete"] is False
+    assert len(out["missing"]) == 1
+    # Отложенное — не сбой: счётчик попыток не растёт.
+    assert isinstance(wt.hash, dict)
+    assert wt.hash["tries"] == 0
+    assert len(wt.hash["done"]) == 2
+    assert wt.lip == []  # пост ещё не помечен разосланным
+
+
 async def test_copy_setka_gives_up_after_max_tries(monkeypatch):
     """Если хвост не добирается за PENDING_MAX_TRIES — пост закрывается, не застревает."""
     from contextlib import ExitStack

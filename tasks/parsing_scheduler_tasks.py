@@ -1237,6 +1237,12 @@ def run_all_regions_theme(theme: str, strict: bool = False):
     Отбор регионов живёт в ``modules.wave_targets``: его же зовёт карта
     конвейера (``/pipeline``), и вторая копия гейта означала бы карту, которая
     показывает не то, что поедет.
+
+    **Регионы разнесены по минутам** (``CLASSIFIER_WAVE_REGION_SPREAD_SECONDS``,
+    по умолчанию 3000 с ≈ 50 мин). Раньше все регионы темы стартовали в одну
+    минуту: сорок bulletins подряд — всплеск в ленте и пачка заданий движка.
+    Теперь у каждого региона свой слот внутри окна, поэтому выход идёт
+    равномерно, а движок получает работу порциями.
     """
     from database.connection import AsyncSessionLocal
     from modules.wave_targets import select_regions
@@ -1246,11 +1252,40 @@ def run_all_regions_theme(theme: str, strict: bool = False):
             return await select_regions(session, theme=theme, strict=strict)
 
     regions = run_coro(_get_regions())
+    # Порядок регионов фиксируем по коду: слоты тогда не прыгают день ото дня.
+    regions = sorted(regions)
+    spread = _wave_region_spread_seconds()
     results = []
-    for rc in regions:
-        r = parse_and_publish_theme.delay(rc, theme)
-        results.append(r)
+    total = len(regions)
+    for index, rc in enumerate(regions):
+        countdown = 0
+        if spread > 0 and total > 1:
+            countdown = int(round(index * spread / float(total - 1)))
+        results.append(
+            parse_and_publish_theme.apply_async(
+                args=[rc, theme],
+                countdown=countdown,
+                # Задача не должна протухнуть, пока ждёт свой слот.
+                expires=countdown + 3600,
+            )
+        )
+    logger.info(
+        "волна %s: регионов=%d, окно разведения=%s с, первый слот сразу",
+        theme,
+        total,
+        int(spread),
+    )
     return {"theme": theme, "regions": regions, "tasks": [r.id for r in results]}
+
+
+def _wave_region_spread_seconds() -> float:
+    """Окно разведения регионов волны по минутам (0 = без разведения)."""
+    try:
+        from config.runtime import get_wave_region_spread_seconds
+
+        return get_wave_region_spread_seconds()
+    except Exception:  # noqa: BLE001 — настройка не должна ронять волну
+        return 0.0
 
 
 @shared_task(bind=True, max_retries=2)
