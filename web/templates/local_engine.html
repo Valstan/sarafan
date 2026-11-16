@@ -26,30 +26,31 @@
       <p class="mb-2">
         Пост разбирает <b>тот, кто забрал его первым</b>: у поста один ключ
         (<code>lip</code>), и второй движок его уже не трогает. Поэтому «волна»
-        и «демон» не делят посты — они забирают разное.
+        и «приём по API» не делят посты — они забирают разное.
       </p>
       <ul class="mb-2">
         <li>
-          <b>Волна на сервере</b> — часовая волна на боксе, разбирает основную
-          массу постов. Какая модель отвечает, решает переключатель
-          <code>CLASSIFIER_ENGINE</code>: <b>Дипсик</b> (платно, по нашему ключу)
-          или <b>Опенкод</b> (бесплатный тир).
+          <b>Волна на боксе</b> — часовая волна, разбирает основную массу постов.
+          Движок выбирает переключатель <code>CLASSIFIER_ENGINE</code>:
+          <b>Минимакс</b> (аккаунты Кармана, оплата очками за чекин) — основной,
+          <b>Дипсик</b> (платно, по нашему ключу) — страховка, если Минимакс
+          молчит.
         </li>
         <li>
-          <b>Демон Опенкода</b> — отдельный крон раз в 5 минут: забирает посты,
-          которые <b>остались без вердикта</b>, и считает их бесплатными моделями
-          Опенкода. Обычно это 2 поста за тик (по одному на район) — остальное к
-          этому моменту уже разобрала волна.
+          <b>Приём готовых вердиктов</b> — <code>POST /api/classifier/verdicts</code>:
+          вердикты извне (рутина, другой контур).
         </li>
         <li>
-          <b>Старая рутина</b> — облачная рутина на Клоде. Удалена 11.11, денег
-          не тратит и посты больше не разбирает; её вердикты в корпусе — только
-          до 06.11.
+          <b>Сайты (конвейер)</b> — отдельный контур: посты, вошедшие в
+          опубликованные сводки района, уходят на сайты кластера
+          (вМалмыже.РФ, Культура, Казанская, Сабантуй) — там их рубрикует и
+          подправляет лёгкий вызов.
         </li>
       </ul>
       <p class="mb-0 text-muted">
-        Своей нейросети на компьютере владельца больше нет: бесплатные модели
-        крутит Опенкод на боксе, платный Дипсик отвечает по ключу API.
+        Снятые контуры: <b>демон Опенкода</b> (14.11 — юнит и крон; в коде
+        остался как откат) и <b>старая рутина на Клоде</b> (11.11). Их
+        вердикты в корпусе — только за прошлые дни.
       </p>
     </div>
   </div>
@@ -71,9 +72,9 @@
       <div class="text-muted small" id="c-v-24h-split">—</div>
     </div></div></div>
     <div class="col-6 col-md-3"><div class="card h-100"><div class="card-body py-2">
-      <div class="text-muted small">Демон Опенкода за сутки</div>
-      <div class="h4 mb-0" id="c-daemon">—</div>
-      <div class="text-muted small" id="c-daemon-sub">—</div>
+      <div class="text-muted small">Минимакс за сутки</div>
+      <div class="h4 mb-0" id="c-minimax">—</div>
+      <div class="text-muted small" id="c-minimax-sub">—</div>
     </div></div></div>
     <div class="col-6 col-md-3"><div class="card h-100"><div class="card-body py-2">
       <div class="text-muted small">Последний вердикт</div>
@@ -92,7 +93,7 @@
     </div>
     <div class="col-12 col-lg-6">
       <div class="card h-100">
-        <div class="card-header py-2">Кто отвечал по календарным дням (UTC, 30 дней)</div>
+        <div class="card-header py-2">Кто отвечал по календарным дням (UTC)</div>
         <div class="card-body" id="engine-days-box"><span class="text-muted">загрузка…</span></div>
       </div>
     </div>
@@ -104,18 +105,21 @@
     <div class="card-body" id="sources-box"><span class="text-muted">загрузка…</span></div>
   </div>
 
-  <!-- ───────── Демон ───────── -->
-  <h6 class="text-uppercase text-muted small mb-2">Демон Опенкода: последние прогоны</h6>
+  <!-- ───────── Минимакс ───────── -->
+  <h6 class="text-uppercase text-muted small mb-2">Минимакс: последние прогоны</h6>
+  <div class="text-muted small mb-2">
+    Живой журнал движка на боксе: каждый вызов к модели, его исход и причина
+    отказа. Здесь видно, что именно съедает аккаунты Кармана.
+  </div>
   <div class="card mb-3">
     <div class="table-responsive">
       <table class="table table-sm mb-0 align-middle">
         <thead><tr>
-          <th>Время (UTC)</th><th>Чем ответил</th><th class="text-end">Постов</th>
-          <th class="text-end">Вердиктов</th><th class="text-end">Записано</th>
-          <th class="text-end">Пропущено дубликатов</th><th class="text-end">Время, мс</th>
-          <th>Районы</th><th>Ошибка</th>
+          <th>Время (UTC)</th><th>Исход</th><th>Причина</th>
+          <th class="text-end">Токенов</th><th class="text-end">Входных</th>
+          <th class="text-end">Выходных</th><th class="text-end">Из кэша</th>
         </tr></thead>
-        <tbody id="runs-body"><tr><td colspan="9" class="text-muted">загрузка…</td></tr></tbody>
+        <tbody id="minimax-runs-body"><tr><td colspan="7" class="text-muted">загрузка…</td></tr></tbody>
       </table>
     </div>
   </div>
@@ -124,13 +128,15 @@
   <h6 class="text-uppercase text-muted small mb-2">Качество (согласие оператора)</h6>
   <div class="text-muted small mb-2">
     Считается по правкам оператора в ленте: «согласен» — значит вердикт верный,
-    «исправлен» — оператор поправил. Сравнивается отдельно по путям доставки
-    (см. блок выше): у каждого пути своя доля согласия.
+    «исправлен» — оператор поправил. Доля согласия = согласено ÷ (согласено +
+    исправлено). Считается <b>по движку</b> (Дипсик, Минимакс), а не по пути
+    доставки: одна и та же волна считает и платным Дипсиком, и Минимаксом, и
+    «по облаку» врёт.
   </div>
   <div class="row g-3 mb-3">
     <div class="col-12 col-lg-6">
       <div class="card h-100">
-        <div class="card-header py-2">Согласие по пути доставки</div>
+        <div class="card-header py-2">Согласие по движку</div>
         <div class="card-body" id="quality-box"><span class="text-muted">загрузка…</span></div>
       </div>
     </div>
@@ -144,19 +150,68 @@
 
   <!-- ───────── Обучение ───────── -->
   <h6 class="text-uppercase text-muted small mb-2">Обучение</h6>
-  <div class="row g-3">
-    <div class="col-12 col-lg-6">
+  <div class="text-muted small mb-2">
+    Поток такой: оператор правит вердикт в ленте → рутина предлагает правило →
+    оператор утверждает → правило подмешивается в постулаты и работает со
+    следующей волны. Оценивать надо по двум датам: <b>когда была последняя
+    правка</b> (есть ли вообще поток) и <b>когда правило в последний раз
+    вступило в силу</b> (доезжает ли оно до движка).
+  </div>
+  <div class="row g-3 mb-3">
+    <div class="col-12 col-lg-5">
       <div class="card h-100">
-        <div class="card-header py-2">Правила: предложено / утверждено / в отказе</div>
+        <div class="card-header py-2">Воронка обучения</div>
         <div class="card-body" id="rules-box"><span class="text-muted">загрузка…</span></div>
       </div>
     </div>
-    <div class="col-12 col-lg-6">
+    <div class="col-12 col-lg-7">
       <div class="card h-100">
-        <div class="card-header py-2">Правки оператора по неделям</div>
-        <div class="card-body" id="corr-box"><span class="text-muted">загрузка…</span></div>
+        <div class="card-header py-2">Последние правила</div>
+        <div class="card-body" id="rules-list-box"><span class="text-muted">загрузка…</span></div>
       </div>
     </div>
+  </div>
+
+  <!-- ───────── Волны ───────── -->
+  <h6 class="text-uppercase text-muted small mb-2">Волны: сколько прошло, сколько пропущено</h6>
+  <div class="text-muted small mb-2">
+    Прогон — это разбор одного региона и одной темы за волну. «Пропущен» —
+    публиковать нечего (всё отсеяно фильтрами) либо прогон упал.
+  </div>
+  <div class="row g-3 mb-3">
+    <div class="col-12 col-lg-6">
+      <div class="card h-100">
+        <div class="card-header py-2">Волны за 7 дней</div>
+        <div class="card-body" id="waves-box"><span class="text-muted">загрузка…</span></div>
+      </div>
+    </div>
+    <div class="col-12 col-lg-6">
+      <div class="card h-100">
+        <div class="card-header py-2">Волны по дням и по темам</div>
+        <div class="card-body" id="waves-day-box"><span class="text-muted">загрузка…</span></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ───────── Публикации и сайты ───────── -->
+  <h6 class="text-uppercase text-muted small mb-2">Что вышло в ленты и на сайты</h6>
+  <div class="row g-3 mb-3">
+    <div class="col-12 col-lg-6">
+      <div class="card h-100">
+        <div class="card-header py-2">Опубликовано по регионам (7 дней)</div>
+        <div class="card-body" id="published-box"><span class="text-muted">загрузка…</span></div>
+      </div>
+    </div>
+    <div class="col-12 col-lg-6">
+      <div class="card h-100">
+        <div class="card-header py-2">Посты на сайты, которые мы обслуживаем</div>
+        <div class="card-body" id="sites-box"><span class="text-muted">загрузка…</span></div>
+      </div>
+    </div>
+  </div>
+  <div class="card mb-3">
+    <div class="card-header py-2">Откуда инфа для сайтов</div>
+    <div class="card-body" id="collected-box"><span class="text-muted">загрузка…</span></div>
   </div>
 
 </div>

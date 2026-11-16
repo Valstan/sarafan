@@ -1,9 +1,8 @@
 """Веб-панель локального движка: что сделал, какое качество, работает ли обучение.
 
-Роутер отдаёт одну сводку (:func:`modules.classifier.local_engine.stats`):
-прогоны локального демона, согласие оператора отдельно по облаку и по локальной
-модели, динамика качества по неделям («растёт ли фильтрация») и поток обучения
-(коррекции → черновики правил → утверждённые правила).
+Роутер отдаёт одну сводку: :func:`modules.classifier.local_engine.stats` (движок,
+качество, обучение) плюс :func:`modules.classifier.engine_panel.stats` (волны,
+публикации, сайты, источники, живой журнал MiniMax).
 """
 
 from __future__ import annotations
@@ -14,7 +13,7 @@ from typing import Any, Dict
 from fastapi import APIRouter, Request
 
 from database.connection import AsyncSessionLocal
-from modules.classifier import local_engine
+from modules.classifier import engine_panel, local_engine
 
 logger = logging.getLogger(__name__)
 
@@ -26,4 +25,5 @@ async def stats(request: Request) -> Dict[str, Any]:
     """Сводка по локальному движку, качеству и обучению."""
     async with AsyncSessionLocal() as session:
         data = await local_engine.stats(session)
-    return {"ok": True, **data}
+        panel = await engine_panel.stats(session)
+    return {"ok": True, **data, **panel}

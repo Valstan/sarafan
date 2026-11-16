@@ -1,11 +1,14 @@
-/* Панель движка классификации: кто разбирает посты, чем ответили, сколько стоит.
+/* Панель движка классификации: кто разбирает посты, чем ответили, сколько стоит,
+ * что ушло в ленты и на сайты, какое качество и работает ли обучение.
  *
- * Данные — один запрос /api/local-engine/stats (web/api/local_engine.py),
- * отдаёт modules/classifier/local_engine.stats().
+ * Данные — один запрос /api/local-engine/stats (web/api/local_engine.py):
+ *   • modules/classifier/local_engine.stats()  — движок, качество, обучение;
+ *   • modules/classifier/engine_panel.stats() — волны, публикации, сайты,
+ *     источники и живой журнал вызовов Минимакса.
  *
  * Два разных среза, и их нельзя мешать:
  *   • путь доставки (`source` в базе): кто принёс вердикт — волна, демон, рутина;
- *   • движок (`model` в базе): кто ответил — платный Дипсик или бесплатный Опенкод.
+ *   • движок (`model` в базе): кто ответил — Дипсик, Минимакс или Опенкод.
  * Одна и та же волна умеет считать и тем, и другим, поэтому «облако» ≠ «Дипсик».
  *
  * Файл отдельный, а не inline в шаблоне: так его проверяет node --check
@@ -28,7 +31,7 @@ function num(v) {
 // (`routine`/`api`/`headless`/`local`), а читать должен человек.
 const SOURCE_FALLBACK = {
   headless: "Волна на сервере",
-  local: "Демон Опенкода",
+  local: "Демон Опенкода (снят 14.11)",
   routine: "Старая рутина (удалена)",
   api: "Приём готовых вердиктов",
 };
@@ -91,6 +94,22 @@ function ago(iso) {
   return Math.round(hours / 24) + " дн назад";
 }
 
+// Дата-время из ISO — коротко, без «T».
+function dtShort(iso) {
+  if (!iso) return "—";
+  var s = String(iso);
+  return s.slice(5, 16).replace("T", " ");
+}
+
+function tbl(head, body, cls) {
+  return '<table class="table table-sm mb-0 ' + (cls || "") + '"><thead><tr>' + head +
+         '</tr></thead><tbody>' + body + '</tbody></table>';
+}
+
+function td(v, cls) {
+  return '<td' + (cls ? ' class="' + cls + '"' : "") + '>' + v + '</td>';
+}
+
 async function load() {
   var box = document.getElementById("alert-box");
   try {
@@ -118,62 +137,79 @@ async function load() {
     });
     document.getElementById("c-v-24h-split").textContent = splitParts.join(" · ");
 
-    var daemon = d.daemon || {};
-    var d24 = daemon.runs_24h || {};
-    document.getElementById("c-daemon").textContent = num(d24.recorded || 0);
-    document.getElementById("c-daemon-sub").textContent = daemon.decommissioned
-      ? (daemon.note || "контур снят")
-      : ("прогонов: " + num(d24.runs || 0) +
-         " · последний " + ago(daemon.last_run_ts) +
-         (d24.errors ? " · с ошибкой: " + num(d24.errors) : ""));
+    var mm = d.minimax || {};
+    var m24 = mm.summary_24h || {};
+    document.getElementById("c-minimax").textContent = num(m24.calls || 0) + " вызовов";
+    document.getElementById("c-minimax-sub").textContent = m24.calls
+      ? ("успешных " + num(m24.ok || 0) + " (" + pct(m24.ok_pct) + ")" +
+         " · отказов " + num(m24.failed || 0) +
+         " · токенов " + num(m24.tokens || 0))
+      : "движок ещё не звали";
 
     document.getElementById("c-last").textContent = ago(d.last_verdict_at);
     document.getElementById("c-last-sub").textContent = d.last_verdict_at || "вердиктов ещё нет";
+
     // ── Кем отвечено (30 дней) ──
     var models = d.models_30d || [];
+    var total30 = 0;
+    models.forEach(function (m) { total30 += Number(m.n || 0); });
     var mh = "";
     if (!models.length) {
       mh = '<span class="text-muted">нет данных</span>';
     } else {
-      mh = '<table class="table table-sm mb-0"><thead><tr><th>Чем ответил</th>' +
-           '<th>Движок</th><th class="text-end">Вердиктов</th></tr></thead><tbody>';
+      var mbody = "";
       for (var i = 0; i < models.length; i++) {
         var m = models[i];
-        mh += '<tr><td>' + esc(m.label) + '</td>' +
-              '<td class="small text-muted">' + esc(engineLabel(m.engine, engineLabels)) + '</td>' +
-              '<td class="text-end">' + num(m.n) + '</td></tr>';
+        var share = total30 ? (100 * m.n / total30).toFixed(1) + "%" : "—";
+        mbody += "<tr>" +
+          td(esc(m.label)) +
+          td(esc(engineLabel(m.engine, engineLabels)), "small text-muted") +
+          td(num(m.n), "text-end") +
+          td(share, "text-end") +
+          "</tr>";
       }
-      mh += "</tbody></table>";
+      mh = tbl("<th>Чем ответил</th><th>Движок</th>" +
+               '<th class="text-end">Вердиктов</th><th class="text-end">Доля</th>', mbody);
     }
     document.getElementById("models-box").innerHTML = mh;
 
-    // ── Кто отвечал по дням ──
+    // ── Кто отвечал по дням: 10 последних + спойлер ──
     var days = d.engine_by_day || [];
     var dh = "";
     if (!days.length) {
       dh = '<span class="text-muted">нет данных</span>';
     } else {
-      // Колонки — по тем движкам, что реально встречаются в ответе.
       var dayKeys = [];
       days.forEach(function (r) {
         Object.keys(r).forEach(function (k) {
           if (k !== "day" && dayKeys.indexOf(k) < 0) dayKeys.push(k);
         });
       });
-      dh = '<table class="table table-sm mb-0"><thead><tr><th>День</th>';
+      var head = "<th>День</th>";
       dayKeys.forEach(function (k) {
-        dh += '<th class="text-end">' + esc(engineShort(k)) + '</th>';
+        head += '<th class="text-end">' + esc(engineShort(k)) + "</th>";
       });
-      dh += "</tr></thead><tbody>";
-      for (var j = 0; j < days.length; j++) {
-        var r = days[j];
-        dh += '<tr><td>' + esc(r.day) + '</td>';
-        dayKeys.forEach(function (k) {
-          dh += '<td class="text-end">' + num(r[k] || 0) + '</td>';
-        });
-        dh += "</tr>";
+      function dayRows(list) {
+        var out = "";
+        for (var j = 0; j < list.length; j++) {
+          var r = list[j];
+          out += "<tr>" + td(esc(r.day));
+          dayKeys.forEach(function (k) {
+            out += td(num(r[k] || 0), "text-end");
+          });
+          out += "</tr>";
+        }
+        return out;
       }
-      dh += "</tbody></table>";
+      var recent = days.slice(0, 10);
+      var older = days.slice(10);
+      dh = tbl(head, dayRows(recent));
+      if (older.length) {
+        dh += "<details class='mt-2'><summary class='small text-muted'>" +
+              "Ещё " + older.length + " дн. (" + esc(older[older.length - 1].day) +
+              " — " + esc(older[0].day) + ")</summary>" +
+              tbl(head, dayRows(older)) + "</details>";
+      }
     }
     document.getElementById("engine-days-box").innerHTML = dh;
 
@@ -181,129 +217,326 @@ async function load() {
     var meta = d.source_meta || {};
     var bySource = d.verdicts_by_source || {};
     var bySource24 = d.verdicts_by_source_24h || {};
+    var engBySource = d.engine_by_source || {};
     var keys = Object.keys(meta);
+    var aliveKeys = keys.filter(function (k) { return (meta[k] || {}).alive !== false; });
+    var deadKeys = keys.filter(function (k) { return (meta[k] || {}).alive === false; });
     var sh = "";
-    if (!keys.length) {
+    if (!aliveKeys.length) {
       sh = '<span class="text-muted">нет данных</span>';
     } else {
-      sh = '<table class="table table-sm mb-0"><thead><tr><th>Путь</th><th>Состояние</th>' +
-           '<th class="text-end">За 30 дней</th><th class="text-end">За сутки</th>' +
-           '<th>Что это</th></tr></thead><tbody>';
-      for (var s = 0; s < keys.length; s++) {
-        var key = keys[s];
+      var sbody = "";
+      for (var s = 0; s < aliveKeys.length; s++) {
+        var key = aliveKeys[s];
         var info = meta[key] || {};
-        var alive = info.alive !== false;
-        sh += '<tr' + (alive ? "" : ' class="text-muted"') + '>' +
-              '<td>' + esc(info.label || sourceLabel(key, labels)) + '</td>' +
-              '<td>' + (alive
-                  ? '<span class="badge text-bg-success">работает</span>'
-                  : '<span class="badge text-bg-secondary">не работает</span>') + '</td>' +
-              '<td class="text-end">' + num(bySource[key] || 0) + '</td>' +
-              '<td class="text-end">' + num(bySource24[key] || 0) + '</td>' +
-              '<td class="small">' + esc(info.note || "") + '</td></tr>';
+        var engs = engBySource[key] || {};
+        var engTxt = Object.keys(engs)
+          .filter(function (k) { return engs[k]; })
+          .sort(function (a, b) { return engs[b] - engs[a]; })
+          .map(function (k) { return engineShort(k) + " " + num(engs[k]); })
+          .join(" · ");
+        sbody += "<tr>" +
+          td(esc(info.label || sourceLabel(key, labels))) +
+          td('<span class="badge text-bg-success">работает</span>') +
+          td(num(bySource[key] || 0), "text-end") +
+          td(num(bySource24[key] || 0), "text-end") +
+          td(esc(engTxt || "—"), "small") +
+          td(esc(info.note || ""), "small text-muted") +
+          "</tr>";
       }
-      sh += "</tbody></table>";
+      sh = tbl("<th>Путь</th><th>Состояние</th><th class='text-end'>За 30 дней</th>" +
+               "<th class='text-end'>За сутки</th><th>Чем отвечает</th><th>Что это</th>", sbody);
+      if (deadKeys.length) {
+        var deadTxt = deadKeys.map(function (k) {
+          return esc(sourceLabel(k, labels)) + " — " + num(bySource[k] || 0) + " вердиктов в корпусе (контур снят)";
+        }).join(" · ");
+        sh += '<div class="small text-muted mt-2">Снятые контуры: ' + deadTxt + "</div>";
+      }
     }
     document.getElementById("sources-box").innerHTML = sh;
 
-    // ── Прогоны демона ──
-    var tb = document.getElementById("runs-body");
-    var runs = d.runs || [];
+    // ── Минимакс: последние прогоны ──
+    var mb = document.getElementById("minimax-runs-body");
+    var runs = mm.runs || [];
     if (!runs.length) {
-      tb.innerHTML = '<tr><td colspan="9" class="text-muted">прогонов пока нет — демон не запускался</td></tr>';
+      mb.innerHTML = '<tr><td colspan="7" class="text-muted">движок ещё не звали — журнала нет</td></tr>';
     } else {
-      tb.innerHTML = runs.slice().reverse().map(function (r) {
-        return '<tr class="' + (r.ok ? "" : "table-warning") + '">' +
-          '<td class="text-nowrap">' + esc((r.ts||"").slice(5,19).replace("T"," ")) + '</td>' +
-          '<td>' + esc(modelLabel(r.model || r.stage, modelLabels)) + '</td>' +
-          '<td class="text-end">' + (r.posts ?? r.verdicts_sent ?? "—") + '</td>' +
-          '<td class="text-end">' + (r.verdicts_sent ?? "—") + '</td>' +
-          '<td class="text-end">' + (r.recorded ?? "—") + '</td>' +
-          '<td class="text-end">' + (r.skipped_existing ?? "—") + '</td>' +
-          '<td class="text-end">' + (r.duration_ms ?? "—") + '</td>' +
-          '<td class="small">' + esc((r.regions || []).join(", ")) + '</td>' +
-          '<td class="small">' + esc(r.error || "") + '</td>' +
-        '</tr>';
+      mb.innerHTML = runs.map(function (r) {
+        var why = r.ok ? "—" : esc(r.reason || "без причины");
+        return '<tr' + (r.ok ? "" : ' class="table-warning"') + ">" +
+          td(esc(dtShort(r.ts)), "text-nowrap") +
+          td(r.ok ? '<span class="badge text-bg-success">ок</span>'
+                  : '<span class="badge text-bg-danger">отказ</span>') +
+          td(why, "small") +
+          td(num(r.tokens), "text-end") +
+          td(num(r.input), "text-end") +
+          td(num(r.output), "text-end") +
+          td(num(r.cache), "text-end") +
+          "</tr>";
       }).join("");
     }
 
-    // ── Качество по пути доставки ──
-    var q = d.quality_by_source || {};
+    // ── Качество по движку ──
+    var q = (d.quality_by_engine || {}).by_engine || {};
     var qkeys = Object.keys(q);
     var qh = "";
     if (!qkeys.length) {
       qh = '<span class="text-muted">правок оператора ещё нет</span>';
     } else {
-      qh = '<table class="table table-sm mb-0"><thead><tr><th>Путь</th>' +
-           '<th class="text-end">Действие</th><th class="text-end">Тема</th>' +
-           '<th class="text-end">Слияние</th>' +
-           '<th class="text-end">Правок</th></tr></thead><tbody>';
+      var qbody = "";
       for (var t = 0; t < qkeys.length; t++) {
-        var src = qkeys[t];
-        var a = q[src].action || {}, th = q[src].theme || {}, mg = q[src].merge || {};
-        var rights = (a.agree||0) + (a.correct||0) + (th.agree||0) + (th.correct||0) +
-                     (mg.agree||0) + (mg.correct||0);
-        qh += '<tr><td>' + esc(sourceLabel(src, labels)) + '</td>' +
-              '<td class="text-end">' + pct(a.agree_pct) + ' <span class="text-muted small">(' +
-                (a.agree||0) + '/' + ((a.agree||0)+(a.correct||0)) + ')</span></td>' +
-              '<td class="text-end">' + pct(th.agree_pct) + ' <span class="text-muted small">(' +
-                (th.agree||0) + '/' + ((th.agree||0)+(th.correct||0)) + ')</span></td>' +
-              '<td class="text-end">' + pct(mg.agree_pct) + ' <span class="text-muted small">(' +
-                (mg.agree||0) + '/' + ((mg.agree||0)+(mg.correct||0)) + ')</span></td>' +
-              '<td class="text-end">' + num(rights) + '</td></tr>';
+        var eng = qkeys[t];
+        var v = q[eng] || {};
+        qbody += "<tr>" +
+          td(esc(engineLabel(eng, engineLabels))) +
+          td(num(v.agree || 0), "text-end") +
+          td(num(v.correct || 0), "text-end") +
+          td(num(v.total || 0), "text-end") +
+          td(pct(v.agree_pct), "text-end") +
+          "</tr>";
       }
-      qh += "</tbody></table>";
+      qh = tbl("<th>Движок</th><th class='text-end'>Согласено</th>" +
+               "<th class='text-end'>Исправлено</th><th class='text-end'>Всего правок</th>" +
+               "<th class='text-end'>Согласие</th>", qbody);
+      var lastC = (d.quality_by_engine || {}).last_correction_at;
+      qh += '<div class="small text-muted mt-2">Последняя правка оператора: ' +
+            (lastC ? esc(dtShort(lastC)) + " (" + ago(lastC) + ")" : "правок не было") +
+            ". Пока оператор правит, доля согласия не растёт: правок нет — нечего улучшать.</div>";
     }
     document.getElementById("quality-box").innerHTML = qh;
 
-    // ── Недельная динамика ──
-    var w = d.weekly_quality || {};
-    var weeks = Object.keys(w).sort();
+    // ── Недельная динамика по движкам ──
+    var w = d.weekly_quality_by_engine || [];
     var wh = "";
-    if (!weeks.length) {
+    if (!w.length) {
       wh = '<span class="text-muted">недостаточно данных</span>';
     } else {
-      wh = '<table class="table table-sm mb-0"><thead><tr><th>Неделя</th>';
-      var srcs = new Set();
-      weeks.forEach(function (wk) { Object.keys(w[wk]).forEach(function (s) { srcs.add(s); }); });
-      srcs.forEach(function (s) {
-        wh += '<th class="text-end">' + esc(sourceLabel(s, labels)) + '</th>';
+      var engs2 = new Set();
+      w.forEach(function (wk) {
+        Object.keys(wk).forEach(function (k) { if (k !== "week") engs2.add(k); });
       });
-      wh += "</tr></thead><tbody>";
-      weeks.slice().reverse().forEach(function (wk) {
-        wh += '<tr><td>' + esc(wk) + '</td>';
-        srcs.forEach(function (s) {
-          var v = (w[wk][s] || {});
-          var tot = (v.agree||0) + (v.correct||0);
-          var p = tot ? (100*v.agree/tot).toFixed(1) + "%" : "—";
-          wh += '<td class="text-end">' + p + ' <span class="text-muted small">(' +
-                (v.agree||0) + '/' + tot + ')</span></td>';
+      var head2 = "<th>Неделя</th>";
+      engs2.forEach(function (s2) {
+        head2 += '<th class="text-end">' + esc(engineShort(s2)) + "</th>";
+      });
+      var wbody = "";
+      for (var wi = w.length - 1; wi >= 0; wi--) {
+        var wk = w[wi];
+        wbody += "<tr>" + td(esc(wk.week));
+        engs2.forEach(function (s2) {
+          var v2 = (wk[s2] || {});
+          var tot2 = (v2.agree || 0) + (v2.correct || 0);
+          var p2 = tot2 ? (100 * (v2.agree || 0) / tot2).toFixed(1) + "%" : "—";
+          wbody += td(p2 + ' <span class="text-muted small">(' + (v2.agree || 0) + "/" + tot2 + ")</span>",
+                      "text-end");
         });
-        wh += "</tr>";
-      });
-      wh += "</tbody></table>";
+        wbody += "</tr>";
+      }
+      wh = tbl(head2, wbody);
     }
     document.getElementById("weekly-box").innerHTML = wh;
 
-    // ── Обучение ──
-    var rs = d.rules_by_status || {};
-    document.getElementById("rules-box").innerHTML =
-      '<table class="table table-sm mb-0"><tbody>' +
-      [["proposed","предложено"],["approved","утверждено"],["rejected","отклонено"],["retired","выведено"]]
-        .map(function (pair) {
-          return '<tr><td>' + pair[1] + '</td><td class="text-end"><b>' + num(rs[pair[0]] || 0) +
-                 '</b></td></tr>';
-        }).join("") +
-      "</tbody></table>";
+    // ── Обучение: воронка ──
+    var rl = d.rules || {};
+    var rs = rl.by_status || {};
+    var rb = rl.by_source || {};
+    var corr = d.corrections_by_week || [];
+    var corrTotal = corr.reduce(function (a, r) { return a + Number(r.n || 0); }, 0);
+    var lastCorr = (d.quality_by_engine || {}).last_correction_at;
+    var rh = "";
+    var steps = [
+      ["Правок оператора", corrTotal, lastCorr ? dtShort(lastCorr) + " (" + ago(lastCorr) + ")" : "правок не было"],
+      ["Предложено правил (черновики)", Number(rs.proposed || 0), "ждут утверждения оператора"],
+      ["Утверждено", Number(rs.approved || 0), "работают со следующей волны"],
+      ["Отклонено", Number(rs.rejected || 0), "не подошли"],
+      ["Выведено из работы", Number(rs.retired || 0), "заменили новым"],
+    ];
+    var rbody = "";
+    steps.forEach(function (st) {
+      rbody += "<tr>" +
+        td(esc(st[0])) +
+        td(num(st[1]), "text-end") +
+        td(esc(st[2]), "small text-muted") +
+        "</tr>";
+    });
+    rh = tbl("<th>Шаг</th><th class='text-end'>Сколько</th><th>Когда / что это</th>", rbody);
+    rh += '<div class="small text-muted mt-2">Источники правил: ' +
+          Object.keys(rb).map(function (k) {
+            return esc(k === "operator" ? "оператор" : (k === "routine" ? "рутина" : k)) +
+                   " — " + num(rb[k]);
+          }).join(" · ") +
+          ". Правило действует, если его <code>last_effective_at</code> свежий: последнее вступило в силу " +
+          (rl.last_effective_at ? esc(dtShort(rl.last_effective_at)) : "—") + ".</div>";
+    document.getElementById("rules-box").innerHTML = rh;
 
-    var cw = d.corrections_by_week || [];
-    document.getElementById("corr-box").innerHTML = cw.length
-      ? '<table class="table table-sm mb-0"><thead><tr><th>Неделя</th><th class="text-end">Правок</th></tr></thead><tbody>' +
-        cw.slice().reverse().map(function (r) {
-          return '<tr><td>' + esc(r.week) + '</td><td class="text-end">' + num(r.n) + '</td></tr>';
-        }).join("") +
-        "</tbody></table>"
-      : '<span class="text-muted">правок пока нет</span>';
+    // ── Обучение: последние правила ──
+    var latest = rl.latest || [];
+    var lb = "";
+    if (!latest.length) {
+      lb = '<span class="text-muted">правил пока нет</span>';
+    } else {
+      var lbody = "";
+      for (var li = 0; li < latest.length; li++) {
+        var r2 = latest[li];
+        var badge = r2.status === "approved" ? "text-bg-success"
+                  : (r2.status === "proposed" ? "text-bg-warning" : "text-bg-secondary");
+        lbody += "<tr>" +
+          td('<span class="badge ' + badge + '">' + esc(r2.status) + "</span>") +
+          td(esc(r2.text), "small") +
+          td(esc(r2.source === "operator" ? "оператор" : (r2.source === "routine" ? "рутина" : r2.source)), "small") +
+          td(esc(dtShort(r2.created_at)), "small text-nowrap") +
+          td(esc(dtShort(r2.last_effective_at)), "small text-nowrap") +
+          "</tr>";
+      }
+      lb = tbl("<th>Статус</th><th>Правило</th><th>Кто</th><th>Создано</th><th>В силе</th>", lbody);
+    }
+    document.getElementById("rules-list-box").innerHTML = lb;
+
+    // ── Волны ──
+    var wv = d.waves || {};
+    var wvb = "";
+    if (!wv.runs) {
+      wvb = '<span class="text-muted">нет данных</span>';
+    } else {
+      var wvbody = "";
+      [["Прогонов", wv.runs], ["С публикацией", wv.published],
+       ["Пропущено (нечего публиковать)", wv.skipped], ["Упало с ошибкой", wv.failed],
+       ["Постов просмотрено", wv.scanned], ["Постов дошло до публикации", wv.final]
+      ].forEach(function (pair) {
+        wvb += "<tr>" + td(esc(pair[0])) + td(num(pair[1]), "text-end") + "</tr>";
+      });
+      wvb = tbl("<th>Показатель (7 дней)</th><th class='text-end'>Значение</th>", wvb);
+      if ((wv.errors || []).length) {
+        var errBody = "";
+        wv.errors.forEach(function (e) {
+          errBody += "<tr>" + td(esc(e.reason || "(пусто)"), "small") + td(num(e.n), "text-end") + "</tr>";
+        });
+        wvb += '<div class="small text-muted mt-2 mb-1">Почему прогоны падали:</div>' +
+               tbl("<th>Ошибка</th><th class='text-end'>Сколько</th>", errBody);
+      }
+    }
+    document.getElementById("waves-box").innerHTML = wvb;
+
+    // ── Волны по дням и по темам ──
+    var wbd = d.waves_by_day || [];
+    var wbdb = "";
+    if (!wbd.length) {
+      wbdb = '<span class="text-muted">нет данных</span>';
+    } else {
+      var dayBody = "";
+      for (var di = wbd.length - 1; di >= 0; di--) {
+        var dr = wbd[di];
+        dayBody += "<tr>" +
+          td(esc(dr.day)) +
+          td(num(dr.runs), "text-end") +
+          td(num(dr.published), "text-end") +
+          td(num(dr.failed), "text-end") +
+          "</tr>";
+      }
+      wbdb = tbl("<th>День</th><th class='text-end'>Прогонов</th>" +
+                 "<th class='text-end'>С публикацией</th><th class='text-end'>Упало</th>", dayBody);
+      var themes = wv.by_theme || [];
+      if (themes.length) {
+        var thBody = "";
+        themes.slice(0, 10).forEach(function (t) {
+          thBody += "<tr>" +
+            td(esc(t.theme)) +
+            td(num(t.runs), "text-end") +
+            td(num(t.published), "text-end") +
+            td(num(t.scanned), "text-end") +
+            "</tr>";
+        });
+        wbdb += '<div class="small text-muted mt-2 mb-1">По темам:</div>' +
+                tbl("<th>Тема</th><th class='text-end'>Прогонов</th>" +
+                    "<th class='text-end'>С публикацией</th><th class='text-end'>Постов просмотрено</th>", thBody);
+      }
+    }
+    document.getElementById("waves-day-box").innerHTML = wbdb;
+
+    // ── Опубликовано по регионам ──
+    var pub = d.published || {};
+    var pubb = "";
+    if (!pub.total) {
+      pubb = '<span class="text-muted">за 7 дней публикаций нет</span>';
+    } else {
+      var pbody = "";
+      (pub.regions || []).forEach(function (r) {
+        pbody += "<tr>" + td(esc(r.region)) + td(num(r.n), "text-end") + "</tr>";
+      });
+      pubb = tbl("<th>Регион</th><th class='text-end'>Постов</th>", pbody);
+      pubb = '<div class="small text-muted mb-1">Всего ' + num(pub.total) +
+             " постов в " + num(pub.regions_total || 0) + " регионах за 7 дней.</div>" + pubb;
+      var themes2 = pub.themes || [];
+      if (themes2.length) {
+        var tp = "";
+        themes2.forEach(function (t) {
+          tp += "<tr>" + td(esc(t.theme)) + td(num(t.n), "text-end") + "</tr>";
+        });
+        pubb += '<div class="small text-muted mt-2 mb-1">По темам волн:</div>' +
+                tbl("<th>Тема</th><th class='text-end'>Постов</th>", tp);
+      }
+    }
+    document.getElementById("published-box").innerHTML = pubb;
+
+    // ── Сайты ──
+    var st = d.sites || {};
+    var stb = "";
+    if (!(st.sites || []).length) {
+      stb = '<span class="text-muted">доставок нет</span>';
+    } else {
+      var stbody = "";
+      st.sites.forEach(function (s3) {
+        var sts = s3.statuses || {};
+        stbody += "<tr>" +
+          td("<b>" + esc(s3.title || s3.site) + "</b>" +
+             (s3.active ? "" : ' <span class="badge text-bg-secondary">не активен</span>'), "small") +
+          td(esc(s3.source_region || "—"), "small text-muted") +
+          td(num(sts.delivered || 0), "text-end") +
+          td(num(sts.rejected || 0), "text-end") +
+          td(num(sts.held || 0), "text-end") +
+          td(num(sts.failed || 0), "text-end") +
+          td(num(s3.total || 0), "text-end") +
+          td(esc(dtShort(s3.last_at)), "small text-nowrap") +
+          "</tr>";
+      });
+      stb = tbl("<th>Сайт</th><th>Источник</th><th class='text-end'>Доставлено</th>" +
+                "<th class='text-end'>Отклонено</th><th class='text-end'>Придержано</th>" +
+                "<th class='text-end'>Ошибка</th><th class='text-end'>Всего</th>" +
+                "<th>Последняя активность</th>", stbody);
+      var reasons = [];
+      st.sites.forEach(function (s4) {
+        (s4.reasons || []).slice(0, 3).forEach(function (r) {
+          reasons.push(esc(s4.site) + ": " + esc(r.reason) + " — " + num(r.n));
+        });
+      });
+      if (reasons.length) {
+        stb += '<div class="small text-muted mt-2">Почему отклоняли: ' + reasons.join(" · ") + "</div>";
+      }
+      stb += '<div class="small text-muted mt-1">Активные сайты (CONVEYOR_SITES): ' +
+             esc((st.active || []).join(", ") || "—") + " · окно " + num(st.days) + " дн.</div>";
+    }
+    document.getElementById("sites-box").innerHTML = stb;
+
+    // ── Откуда инфа для сайтов ──
+    var col = d.collected || {};
+    var colb = "";
+    if (!(col.themes || []).length) {
+      colb = '<span class="text-muted">нет данных</span>';
+    } else {
+      var cbody = "";
+      col.themes.forEach(function (t) {
+        cbody += "<tr>" +
+          td(esc(t.theme)) +
+          td(num(t.regions || 0), "text-end") +
+          td(num(t.lips || 0), "text-end") +
+          "</tr>";
+      });
+      colb = '<div class="small text-muted mb-1">Сайт получает посты из <b>опубликованных сводок района</b> — ' +
+             "то есть из этого потока. За " + num(col.days) + " дн. собрано " + num(col.lips) +
+             " постов.</div>" +
+             tbl("<th>Тема</th><th class='text-end'>Регионов</th><th class='text-end'>Постов</th>", cbody);
+    }
+    document.getElementById("collected-box").innerHTML = colb;
 
     box.innerHTML = "";
   } catch (e) {
