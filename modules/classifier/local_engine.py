@@ -62,7 +62,7 @@ SOURCE_LOCAL = "local"
 #: :func:`engine_of_model`).
 SOURCE_LABELS: Dict[str, str] = {
     "headless": "Волна на сервере",
-    "local": "Демон Опенкода",
+    "local": "Демон Опенкода (снят 14.11)",
     "routine": "Старая рутина (удалена)",
     "api": "Приём готовых вердиктов",
 }
@@ -73,7 +73,7 @@ SOURCE_LABELS: Dict[str, str] = {
 #: обрабатывает посты».
 SOURCE_ALIVE: Dict[str, bool] = {
     "headless": True,
-    "local": True,
+    "local": False,
     "routine": False,
     "api": True,
 }
@@ -81,9 +81,10 @@ SOURCE_ALIVE: Dict[str, bool] = {
 #: По одной строке на путь: что это и откуда взялось.
 SOURCE_NOTES: Dict[str, str] = {
     "headless": "часовая волна на боксе. Движок выбирает переключатель "
-    "CLASSIFIER_ENGINE: Дипсик (платно) или Опенкод (бесплатно).",
-    "local": "Демон Опенкода на боксе: раз в 5 минут забирает посты, которые "
-    "остались без вердикта, и считает их бесплатными моделями.",
+    "CLASSIFIER_ENGINE: Минимакс (аккаунты Кармана, оплата очками за чекин); "
+    "Дипсик — платная страховка, если Минимакс молчит.",
+    "local": "Демон Опенкода на боксе. Снят с прода 14.11 (юнит и крон); "
+    "в коде остался как откат.",
     "routine": "Облачная рутина на Клоде. Удалена владельцем 11.11, денег не "
     "тратит, вердикты в корпусе — только до 06.11.",
     "api": "Приём готовых вердиктов по POST /api/classifier/verdicts.",
@@ -454,6 +455,19 @@ def _source_counts_query(days: int):
     )
 
 
+def _engine_by_source_query(days: int):
+    """Вердикты по пути доставки и по движку — «чем отвечали внутри пути»."""
+    return (
+        select(
+            ContentClassification.source,
+            ContentClassification.model,
+            func.count().label("n"),
+        )
+        .where(ContentClassification.created_at >= datetime.utcnow() - timedelta(days=days))
+        .group_by(ContentClassification.source, ContentClassification.model)
+    )
+
+
 async def stats(session) -> Dict[str, Any]:
     """Статистика для панели: движок, качество, обучение.
 
@@ -601,6 +615,15 @@ async def stats(session) -> Dict[str, Any]:
         for s, n in (await session.execute(_source_counts_query(1))).all()
     }
 
+    # Какой движок отвечал внутри каждого пути: путь — это «кто разбирал пост»,
+    # движок — «на чём считали». Без этого «Волна на сервере» читается как
+    # «облако», а в облаке за месяц было 23 897 вердиктов бесплатного Опенкода.
+    engine_by_source: Dict[str, Dict[str, int]] = {}
+    for s, m, n in (await session.execute(_engine_by_source_query(30))).all():
+        bucket = engine_by_source.setdefault(str(s or "?"), {})
+        engine = engine_of_model(str(m or ""))
+        bucket[engine] = bucket.get(engine, 0) + int(n or 0)
+
     # ── Сейчас: на каком движке считает волна ──
     mode = (os.getenv("CLASSIFIER_ENGINE") or "").strip().lower() or "deepseek"
     engine_now = {
@@ -681,6 +704,7 @@ async def stats(session) -> Dict[str, Any]:
         },
         "verdicts_by_source": verdicts_by_source,
         "verdicts_by_source_24h": src_24h,
+        "engine_by_source": engine_by_source,
         "daily_by_source": daily,
         "quality_by_source": quality,
         "weekly_quality": weekly,

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -386,15 +386,14 @@ def test_source_labels_are_human_readable():
     """
     labels = local_engine.SOURCE_LABELS
     assert labels["headless"] == "Волна на сервере"
-    assert labels["local"] == "Демон Опенкода"
+    assert labels["local"] == "Демон Опенкода (снят 14.11)"
     assert labels["routine"] == "Старая рутина (удалена)"
     assert labels["api"] == "Приём готовых вердиктов"
     for key, label in labels.items():
         assert label and label != key, "ключ %s должен называться по-русски" % key
 
     js = (REPO_ROOT / "web" / "static" / "js" / "local_engine.js").read_text(encoding="utf-8")
-    for key in labels:
-        assert "sourceLabel(s, labels)" in js
+    assert "sourceLabel(" in js
     assert "source_labels" in js
 
 
@@ -405,10 +404,13 @@ def test_dead_source_is_marked_as_not_working():
     больше не разбирает посты. Пока она в панели светилась как «ещё один
     источник», человек читал «рутина обрабатывает посты» — а она не
     обрабатывает ничего с 06.11.
+
+    Демон Опенкода снят с прода 14.11 (юнит и крон) — он тоже больше не
+    разбирает посты, поэтому в списке путей он не «работает».
     """
     assert local_engine.SOURCE_ALIVE["routine"] is False
     assert local_engine.SOURCE_ALIVE["headless"] is True
-    assert local_engine.SOURCE_ALIVE["local"] is True
+    assert local_engine.SOURCE_ALIVE["local"] is False
     for key in local_engine.SOURCE_ALIVE:
         assert key in local_engine.SOURCE_LABELS
         assert local_engine.SOURCE_NOTES.get(key), "у пути %s должно быть пояснение" % key
@@ -540,16 +542,41 @@ def test_panel_shows_who_answered_and_what_is_alive():
     html = (TEMPLATES_DIR / "local_engine.html").read_text(encoding="utf-8")
     js = (REPO_ROOT / "web" / "static" / "js" / "local_engine.js").read_text(encoding="utf-8")
 
-    for token in ("engine_windows", "engine_by_day", "models_30d", "source_meta"):
+    for token in (
+        "engine_windows",
+        "engine_by_day",
+        "models_30d",
+        "source_meta",
+        "engine_by_source",
+        "quality_by_engine",
+        "weekly_quality_by_engine",
+        "waves",
+        "waves_by_day",
+        "published",
+        "sites",
+        "collected",
+        "rules",
+        "minimax",
+    ):
         assert token in js, "JS панели должен рисовать %s" % token
     for block_id in (
         "c-engine-now",
         "c-v-24h",
-        "c-daemon",
+        "c-minimax",
         "c-last",
         "models-box",
         "engine-days-box",
         "sources-box",
+        "minimax-runs-body",
+        "quality-box",
+        "weekly-box",
+        "rules-box",
+        "rules-list-box",
+        "waves-box",
+        "waves-day-box",
+        "published-box",
+        "sites-box",
+        "collected-box",
     ):
         assert block_id in html, "в шаблоне панели нет блока %s" % block_id
         assert block_id in js, "JS панели не рисует блок %s" % block_id
@@ -574,3 +601,125 @@ def test_panel_js_parses():
 
     proc = subprocess.run([node, "--check", str(js)], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
+
+
+# --- панель: целиком (волны, публикации, сайты, источники, Минимакс) --------
+
+
+def test_days_table_shows_ten_days_and_hides_the_rest():
+    """По календарным дням — 10 последних открыто, остальное под спойлером.
+
+    30 дней таблицей — это простыня, в которой не видно ничего; владелец
+    просил коротко, а старые дни пусть лежат под «Ещё N дн.».
+    """
+    js = (REPO_ROOT / "web" / "static" / "js" / "local_engine.js").read_text(encoding="utf-8")
+    assert "days.slice(0, 10)" in js
+    assert "<details" in js
+    assert "Ещё " in js
+
+
+def test_panel_explains_how_quality_is_counted():
+    """Раздел качества должен говорить, что это и по чему считается.
+
+    Владелец спросил, как считается качество: доля согласия = «согласено» ÷
+    («согласено» + «исправлено»), и сравнивать надо по движку, а не по пути.
+    """
+    html = (TEMPLATES_DIR / "local_engine.html").read_text(encoding="utf-8")
+    assert "согласен" in html
+    assert "Доля согласия" in html
+    assert "по движку" in html
+
+
+def test_minimax_summary_counts_success_and_reasons():
+    """Сводка по вызовам Минимакса: успех, отказы с причинами, токены."""
+    from modules.classifier import engine_panel
+
+    now = datetime.now(timezone.utc)
+    rows = [
+        {
+            "ts": (now - timedelta(hours=1)).isoformat(),
+            "ok": True,
+            "reason": "",
+            "usage": {"totalTokens": 100, "inputTokens": 60, "outputTokens": 40},
+        },
+        {
+            "ts": (now - timedelta(hours=2)).isoformat(),
+            "ok": False,
+            "reason": "quota_exhausted",
+            "usage": {},
+        },
+        {
+            "ts": (now - timedelta(hours=3)).isoformat(),
+            "ok": False,
+            "reason": "quota_exhausted",
+            "usage": {},
+        },
+        {
+            "ts": (now - timedelta(days=3)).isoformat(),
+            "ok": True,
+            "reason": "",
+            "usage": {"totalTokens": 999},
+        },
+    ]
+    out = engine_panel.minimax_summary(rows, 24)
+    assert out["calls"] == 3
+    assert out["ok"] == 1
+    assert out["failed"] == 2
+    assert out["ok_pct"] == round(100.0 / 3, 1)
+    assert out["tokens"] == 100
+    assert out["reasons"]["quota_exhausted"] == 2
+
+    wide = engine_panel.minimax_summary(rows, 24 * 7)
+    assert wide["calls"] == 4
+    assert wide["tokens"] == 1099
+
+
+def test_minimax_runs_are_newest_first():
+    """Таблица «последние прогоны» — свежие сверху."""
+    from modules.classifier import engine_panel
+
+    rows = [
+        {"ts": "2026-11-15T10:00:00+00:00", "ok": True, "usage": {"totalTokens": 5}},
+        {"ts": "2026-11-15T11:00:00+00:00", "ok": False, "reason": "engine_failed", "usage": {}},
+    ]
+    out = engine_panel.minimax_runs(rows)
+    assert out[0]["ts"].startswith("2026-11-15T11:00:00")
+    assert out[0]["ok"] is False
+    assert out[0]["reason"] == "engine_failed"
+    assert out[1]["tokens"] == 5
+
+
+def test_minimax_journal_is_read_from_disk(tmp_path, monkeypatch):
+    """Журнал движка читается с бокса; битые строки не роняют панель."""
+    from modules.classifier import engine_panel
+
+    log = tmp_path / "minimax_usage.jsonl"
+    log.write_text(
+        '{"ts": "2026-11-15T10:00:00+00:00", "ok": true, "usage": {}}\n'
+        "битая строка\n"
+        '{"ts": "2026-11-15T10:01:00+00:00", "ok": false, "reason": "quota_exhausted"}\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(engine_panel, "MINIMAX_USAGE_LOG", log)
+    rows = engine_panel.read_minimax_usage()
+    assert len(rows) == 2
+    assert rows[1]["reason"] == "quota_exhausted"
+
+
+def test_panel_shows_whole_pipeline():
+    """Панель должна показывать систему целиком, а не только «кем ответили».
+
+    Владелец попросил видеть: сколько волн прошло и сколько пропущено, сколько
+    постов опубликовано по регионам, куда уходят посты для сайтов и откуда там
+    инфа. Без этих блоков «правильно ли работает фильтрация» по странице не
+    видно.
+    """
+    html = (TEMPLATES_DIR / "local_engine.html").read_text(encoding="utf-8")
+    for phrase in (
+        "Волны: сколько прошло, сколько пропущено",
+        "Опубликовано по регионам",
+        "Посты на сайты, которые мы обслуживаем",
+        "Откуда инфа для сайтов",
+        "Минимакс: последние прогоны",
+    ):
+        assert phrase in html, "в панели нет блока «%s»" % phrase
