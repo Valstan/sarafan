@@ -374,7 +374,7 @@ async def _collected(session, days: int = 7) -> Dict[str, Any]:
 # ───────── Качество по движкам ─────────
 
 
-async def _quality_by_engine(session, days: int = 120) -> Dict[str, Any]:
+async def _quality_by_engine(session, days: int = 365) -> Dict[str, Any]:
     """Согласие оператора по **движку** (Дипсик / Минимакс / Опенкод).
 
     Раньше панель считала согласие «по пути доставки» — а это путь волны, а
@@ -422,7 +422,7 @@ async def _quality_by_engine(session, days: int = 120) -> Dict[str, Any]:
     return {"by_engine": out, "last_correction_at": last_correction, "days": days}
 
 
-async def _weekly_quality_by_engine(session, days: int = 120) -> List[Dict[str, Any]]:
+async def _weekly_quality_by_engine(session, days: int = 180) -> List[Dict[str, Any]]:
     """Согласие по движку по неделям — «растёт ли качество фильтрации»."""
     since = _utcnow_naive() - timedelta(days=days)
     week = _trunc("week", ClassificationCorrection.created_at)

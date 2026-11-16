@@ -299,9 +299,18 @@ async function load() {
                "<th class='text-end'>Исправлено</th><th class='text-end'>Всего правок</th>" +
                "<th class='text-end'>Согласие</th>", qbody);
       var lastC = (d.quality_by_engine || {}).last_correction_at;
+      var stale = false;
+      if (lastC) {
+        var ageDays = (Date.now() - Date.parse(lastC)) / 86400000;
+        stale = ageDays > 7;
+      }
       qh += '<div class="small text-muted mt-2">Последняя правка оператора: ' +
             (lastC ? esc(dtShort(lastC)) + " (" + ago(lastC) + ")" : "правок не было") +
-            ". Пока оператор правит, доля согласия не растёт: правок нет — нечего улучшать.</div>";
+            (stale
+              ? ". <b>Поток правок остановился</b> — пока оператор не правит, доля согласия стоит на месте: "
+                + "растёт она только от новых правок, а не от времени."
+              : ". Пока оператор правит, метрика живёт.") +
+            "</div>";
     }
     document.getElementById("quality-box").innerHTML = qh;
 
@@ -319,20 +328,29 @@ async function load() {
       engs2.forEach(function (s2) {
         head2 += '<th class="text-end">' + esc(engineShort(s2)) + "</th>";
       });
-      var wbody = "";
-      for (var wi = w.length - 1; wi >= 0; wi--) {
-        var wk = w[wi];
-        wbody += "<tr>" + td(esc(wk.week));
-        engs2.forEach(function (s2) {
-          var v2 = (wk[s2] || {});
-          var tot2 = (v2.agree || 0) + (v2.correct || 0);
-          var p2 = tot2 ? (100 * (v2.agree || 0) / tot2).toFixed(1) + "%" : "—";
-          wbody += td(p2 + ' <span class="text-muted small">(' + (v2.agree || 0) + "/" + tot2 + ")</span>",
+      function weekRows(list) {
+        var out = "";
+        for (var wi = list.length - 1; wi >= 0; wi--) {
+          var wk = list[wi];
+          out += "<tr>" + td(esc(wk.week));
+          engs2.forEach(function (s2) {
+            var v2 = (wk[s2] || {});
+            var tot2 = (v2.agree || 0) + (v2.correct || 0);
+            var p2 = tot2 ? (100 * (v2.agree || 0) / tot2).toFixed(1) + "%" : "—";
+            out += td(p2 + ' <span class="text-muted small">(' + (v2.agree || 0) + "/" + tot2 + ")</span>",
                       "text-end");
-        });
-        wbody += "</tr>";
+          });
+          out += "</tr>";
+        }
+        return out;
       }
-      wh = tbl(head2, wbody);
+      var wRecent = w.slice(-12);
+      var wOlder = w.slice(0, Math.max(0, w.length - 12));
+      wh = tbl(head2, weekRows(wRecent));
+      if (wOlder.length) {
+        wh += "<details class='mt-2'><summary class='small text-muted'>Ещё " +
+              wOlder.length + " нед.</summary>" + tbl(head2, weekRows(wOlder)) + "</details>";
+      }
     }
     document.getElementById("weekly-box").innerHTML = wh;
 
