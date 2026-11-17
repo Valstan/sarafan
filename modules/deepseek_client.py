@@ -171,6 +171,7 @@ def call_api(
     base_url: str,
     timeout: float,
     label: str = "deepseek",
+    posts: int = 0,
 ) -> Tuple[int, Dict[str, Any]]:
     """Один вызов ``/chat/completions``. Сетевой сбой → ``(0, {"error": ...})``.
 
@@ -181,6 +182,13 @@ def call_api(
     ``label`` попадает в строку учёта префикс-кэша: потребителей несколько, и
     доля кэша у массового конвейера и у разовой кнопки в UI — разные величины,
     которые нельзя складывать в одно среднее.
+
+    Здесь же — **единственная точка учёта платных вызовов**: все потребители
+    Дипсика идут через эту функцию, поэтому строка в журнале ``neural_usage``
+    получается одна на вызов, с меткой потока и объёмом (токены промпта,
+    кэш, ответ, посты в пачке). Панель «Движок классификации» считает по этому
+    журналу — иначе «куда уходят деньги» приходилось бы собирать по обрывкам
+    лога воркера.
     """
     data = json.dumps(body, ensure_ascii=False).encode("utf-8")
     req = urllib.request.Request(
@@ -192,6 +200,7 @@ def call_api(
             "Authorization": f"Bearer {api_key}",
         },
     )
+    started = time.monotonic()
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             raw = resp.read().decode("utf-8", "replace")
@@ -204,6 +213,14 @@ def call_api(
                     log_cache_usage(label, parsed)
                 except Exception:  # pragma: no cover — учёт не важнее ответа
                     logger.debug("deepseek-usage: не удалось записать метрику", exc_info=True)
+            _record_usage(
+                label=label,
+                body=body,
+                response=parsed if isinstance(parsed, dict) else {},
+                status=int(resp.status),
+                posts=posts,
+                duration_ms=int((time.monotonic() - started) * 1000),
+            )
             return int(resp.status), parsed
     except urllib.error.HTTPError as e:
         detail = ""
@@ -211,12 +228,66 @@ def call_api(
             detail = e.read().decode("utf-8", "replace")[:300]
         except Exception:  # pragma: no cover — тело ошибки не обязано читаться
             pass
+        _record_usage(
+            label=label,
+            body=body,
+            response={},
+            status=int(e.code),
+            posts=posts,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            detail=detail,
+        )
         return int(e.code), {"error": detail}
     except Exception as e:
         # Текст исключения может содержать URL; ключ у нас в заголовке, не в
         # пути (в отличие от Telegram Bot API — инцидент 2026-08-12), но обрезаем
         # всё равно: маскирование логов ловит остальное.
-        return 0, {"error": f"{type(e).__name__}: {e}"[:300]}
+        detail = f"{type(e).__name__}: {e}"[:300]
+        _record_usage(
+            label=label,
+            body=body,
+            response={},
+            status=0,
+            posts=posts,
+            duration_ms=int((time.monotonic() - started) * 1000),
+            detail=detail,
+        )
+        return 0, {"error": detail}
+
+
+def _record_usage(
+    *,
+    label: str,
+    body: Dict[str, Any],
+    response: Dict[str, Any],
+    status: int,
+    posts: int,
+    duration_ms: int,
+    detail: str = "",
+) -> None:
+    """Строка журнала вызовов нейросетей (движок — Дипсик)."""
+    usage = response.get("usage") if isinstance(response.get("usage"), dict) else {}
+    ok = 200 <= status < 300
+    reason = "" if ok else ("http_%s" % status if status else "network")
+    try:
+        from modules import neural_usage
+
+        neural_usage.record(
+            engine="deepseek",
+            label=label,
+            model=str(response.get("model") or body.get("model") or ""),
+            ok=ok,
+            reason=reason,
+            detail=detail,
+            posts=posts,
+            duration_ms=duration_ms,
+            prompt_tokens=usage.get("prompt_tokens"),
+            cache_hit=usage.get("prompt_cache_hit_tokens"),
+            cache_miss=usage.get("prompt_cache_miss_tokens"),
+            completion_tokens=usage.get("completion_tokens"),
+        )
+    except Exception:  # pragma: no cover — учёт не важнее ответа
+        logger.debug("deepseek-usage: строка журнала не записана", exc_info=True)
 
 
 def chat(
@@ -230,6 +301,7 @@ def chat(
     model: Optional[str] = None,
     timeout: Optional[float] = None,
     label: str = "deepseek",
+    posts: int = 0,
 ) -> Dict[str, Any]:
     """Один диалоговый вызов. Возвращает ``{ok, content, model, usage}`` либо
     ``{ok: False, reason, detail?}``.
@@ -248,6 +320,10 @@ def chat(
     ``json_object=True`` включает у DeepSeek режим строгого JSON. Он не
     отменяет разбор на стороне вызывающего: режим гарантирует синтаксис, а не
     схему.
+
+    ``posts`` — сколько постов было в пачке. В тело запроса он **не** идёт
+    (у Дипсика такого параметра нет, лишний ключ сломал бы вызов): это только
+    объём для журнала расхода — «на сколько постов потратили этот вызов».
     """
     global _balance_blocked_until
 
@@ -292,6 +368,7 @@ def chat(
         base_url=get_base_url(),
         timeout=timeout if timeout is not None else get_timeout(),
         label=label,
+        posts=posts,
     )
     if status == 0:
         return {"ok": False, "reason": "network", "detail": response.get("error")}

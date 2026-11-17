@@ -1,14 +1,22 @@
 """Политика выбора движка и фолбэка: MiniMax — основной, Дипсик — страховка.
 
-**Что здесь стережётся.** Решение владельца 16.11: «Дипсику оставалось только те
-кусочки, когда с MiniMax случаются какие-то сбои случайные, которые должны быть
-условно пару раз в неделю, а не половина трафика в течение дня».
+**Что здесь стережётся.** Решение владельца 17.11: «Дипсик вернуть на
+подстраховку, если Минимакс проморгал или не смог — то отдавать пропущенное
+Дипсику». То есть **любой** отказ MiniMax закрывает чанк платным Дипсиком:
+контент не должен теряться из-за того, что у бесплатного движка кончились
+очки или Карман не ответил.
 
-До правки любой отказ MiniMax закрывался Дипсиком, и это стоило половины
-трафика: замер 16.11 — 372 вызова Дипсика на классификацию против ~414
-успешных вызовов MiniMax (ровно 47 % на платном движке). Теперь фолбэк
-включается **только** по решению самого движка (``pool_dead``), а обычный отказ
-оставляет чанк без вердикта (fail-open).
+История этой кнопки — важная, потому что тот же фолбэк уже один раз стоил
+половины трафика: замер 16.11 — 372 вызова Дипсика против ~414 успешных
+вызовов MiniMax (ровно 47 % на платном движке). Тогда причина была не в
+«сбоях», а в паузе на полчаса после трёх подряд пустых аккаунтов. С тех пор
+пауза — 10 с, мёртвые аккаунты уходят в ``exclude=``, пул помечается мёртвым
+после десяти пустых подряд.
+
+Поэтому рядом с фолбэком стоит **потолок платных вызовов на сутки**
+(``CLASSIFIER_PAID_DAILY_CALLS``, по умолчанию выключен) и весь расход виден
+в панели: решение «сколько платить за страховку» — за владельцем, но оно не
+должно быть невидимым.
 """
 
 from __future__ import annotations
@@ -34,19 +42,53 @@ def _install(monkeypatch, *, minimax_result, deepseek_result=None):
     return calls
 
 
-def test_minimax_failure_does_not_fall_back_to_deepseek(monkeypatch):
-    """Обычный отказ движка — чанк без вердикта, платный Дипсик не трогаем."""
+def test_minimax_failure_falls_back_to_deepseek(monkeypatch):
+    """Карман не ответил — пропущенное уходит платному Дипсику, а не теряется."""
     monkeypatch.setenv("CLASSIFIER_ENGINE", "minimax")
+    monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "1")
     calls = _install(
         monkeypatch,
         minimax_result={"ok": False, "reason": "karman_unavailable", "detail": "пауза"},
+        deepseek_result={"ok": True, "content": "{}", "model": "deepseek-flash"},
     )
 
     result = headless.chat(system="S", user="U")
 
-    assert result["ok"] is False
-    assert result["reason"] == "karman_unavailable"
-    assert calls == []
+    assert result["ok"] is True
+    assert result["model"] == "deepseek-flash"
+    assert len(calls) == 1
+
+
+def test_every_minimax_failure_reason_falls_back(monkeypatch):
+    """Причина отказа MiniMax не важна: важно, что вердикта нет.
+
+    Проверяем весь класс отказов движка, а не один счастливый случай: раньше
+    фолбэк срабатывал только на ``pool_dead``, и остальные причины молча
+    оставляли чанк без вердикта (fail-open) — контент уходил в ленту мимо
+    фильтра.
+    """
+    reasons = (
+        "karman_unavailable",
+        "pool_dead",
+        "accounts_exhausted",
+        "quota_exhausted",
+        "engine_failed",
+        "timeout",
+        "exec_failed",
+    )
+    for reason in reasons:
+        monkeypatch.setenv("CLASSIFIER_ENGINE", "minimax")
+        monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "1")
+        calls = _install(
+            monkeypatch,
+            minimax_result={"ok": False, "reason": reason},
+            deepseek_result={"ok": True, "content": "{}", "model": "deepseek-flash"},
+        )
+
+        result = headless.chat(system="S", user="U")
+
+        assert result["ok"] is True, reason
+        assert len(calls) == 1, reason
 
 
 def test_pool_dead_goes_to_deepseek(monkeypatch):
@@ -97,9 +139,14 @@ def test_explicit_engine_override_wins(monkeypatch):
     assert len(calls) == 1
 
 
-def test_posts_argument_does_not_reach_deepseek(monkeypatch):
-    """``posts`` — только для журнала расхода MiniMax; у Дипсика такой
-    сигнатуры нет, и лишний аргумент сломал бы его вызов."""
+def test_posts_argument_reaches_journal_only(monkeypatch):
+    """``posts`` — объём для журнала расхода, а не ключ в теле запроса.
+
+    Раньше аргумент забирался «только для MiniMax», потому что у Дипсика такой
+    сигнатуры не было. Теперь у клиента Дипсика есть ``posts`` — он уходит в
+    журнал («на сколько постов потратили вызов»), но в HTTP-тело не попадает
+    (проверяется в ``tests/test_deepseek/test_client.py``).
+    """
     monkeypatch.setenv("CLASSIFIER_ENGINE", "deepseek")
     calls = _install(
         monkeypatch,
@@ -110,7 +157,65 @@ def test_posts_argument_does_not_reach_deepseek(monkeypatch):
     headless.chat(system="S", user="U", posts=5)
 
     assert len(calls) == 1
-    assert "posts" not in calls[0]
+    assert calls[0]["posts"] == 5
+
+
+def test_paid_budget_is_unlimited_by_default(monkeypatch):
+    """По умолчанию потолка нет: решение владельца 17.11 — страховка без лимита."""
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "minimax")
+    monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "1")
+    monkeypatch.delenv("CLASSIFIER_PAID_DAILY_CALLS", raising=False)
+    calls = _install(
+        monkeypatch,
+        minimax_result={"ok": False, "reason": "engine_failed"},
+        deepseek_result={"ok": True, "content": "{}", "model": "deepseek-flash"},
+    )
+
+    result = headless.chat(system="S", user="U")
+
+    assert result["ok"] is True
+    assert len(calls) == 1
+
+
+def test_paid_budget_stops_paid_calls_when_limit_reached(monkeypatch):
+    """Потолок исчерпан — чанк без вердикта, деньги не текут дальше."""
+    from modules import neural_usage
+
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "minimax")
+    monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "1")
+    monkeypatch.setenv("CLASSIFIER_PAID_DAILY_CALLS", "5")
+    monkeypatch.setattr(neural_usage, "count_paid_calls", lambda **kw: 5)
+    calls = _install(
+        monkeypatch,
+        minimax_result={"ok": False, "reason": "engine_failed"},
+        deepseek_result={"ok": True, "content": "{}", "model": "deepseek-flash"},
+    )
+
+    result = headless.chat(system="S", user="U")
+
+    assert result["ok"] is False
+    assert result["reason"] == "engine_failed"
+    assert calls == []
+
+
+def test_paid_budget_allows_calls_below_limit(monkeypatch):
+    """До потолка страховка работает как обычно."""
+    from modules import neural_usage
+
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "minimax")
+    monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "1")
+    monkeypatch.setenv("CLASSIFIER_PAID_DAILY_CALLS", "5")
+    monkeypatch.setattr(neural_usage, "count_paid_calls", lambda **kw: 4)
+    calls = _install(
+        monkeypatch,
+        minimax_result={"ok": False, "reason": "engine_failed"},
+        deepseek_result={"ok": True, "content": "{}", "model": "deepseek-flash"},
+    )
+
+    result = headless.chat(system="S", user="U")
+
+    assert result["ok"] is True
+    assert len(calls) == 1
 
 
 def test_chunk_size_is_per_engine(monkeypatch):
