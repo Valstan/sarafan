@@ -58,8 +58,11 @@
   <!-- ───────── Сейчас ───────── -->
   <h6 class="text-uppercase text-muted small mb-2">Сейчас</h6>
   <div class="text-muted small mb-2">
-    «За сутки» — скользящее окно последних 24 часов. Таблица по дням ниже —
-    календарные сутки по UTC, поэтому цифры могут расходиться на стыке дня.
+    Все сутки на странице — <b>московские</b> (UTC+3), с полуночи до полуночи.
+    «Сегодня» — с 00:00 МСК, и день ещё не закончен, поэтому счётчик сегодня
+    всегда меньше вчерашнего. Плавающих окон («последние 24 часа») здесь нет:
+    раньше счётчик и таблица по дням считались по разным границам, и на
+    странице одновременно висело «Дипсик 1 460» и «Дипсик 0».
   </div>
   <div class="row g-2 mb-3">
     <div class="col-6 col-md-3"><div class="card h-100"><div class="card-body py-2">
@@ -67,12 +70,12 @@
       <div class="h6 mb-0" id="c-engine-now">—</div>
     </div></div></div>
     <div class="col-6 col-md-3"><div class="card h-100"><div class="card-body py-2">
-      <div class="text-muted small">Вердиктов за сутки</div>
+      <div class="text-muted small">Вердиктов сегодня (МСК)</div>
       <div class="h4 mb-0" id="c-v-24h">—</div>
       <div class="text-muted small" id="c-v-24h-split">—</div>
     </div></div></div>
     <div class="col-6 col-md-3"><div class="card h-100"><div class="card-body py-2">
-      <div class="text-muted small">Минимакс за сутки</div>
+      <div class="text-muted small">Минимакс сегодня (МСК)</div>
       <div class="h4 mb-0" id="c-minimax">—</div>
       <div class="text-muted small" id="c-minimax-sub">—</div>
     </div></div></div>
@@ -87,16 +90,29 @@
   <div class="row g-3 mb-3">
     <div class="col-12 col-lg-6">
       <div class="card h-100">
-        <div class="card-header py-2">Кем отвечено (30 дней)</div>
+        <div class="card-header py-2">Кем отвечено (30 суток)</div>
         <div class="card-body" id="models-box"><span class="text-muted">загрузка…</span></div>
       </div>
     </div>
     <div class="col-12 col-lg-6">
       <div class="card h-100">
-        <div class="card-header py-2">Кто отвечал по календарным дням (UTC)</div>
+        <div class="card-header py-2">Кто отвечал по календарным дням (МСК)</div>
         <div class="card-body" id="engine-days-box"><span class="text-muted">загрузка…</span></div>
       </div>
     </div>
+  </div>
+
+  <!-- ───────── Все потоки через нейросеть ───────── -->
+  <h6 class="text-uppercase text-muted small mb-2">Все потоки через нейросеть</h6>
+  <div class="text-muted small mb-2">
+    Классификация постов — лишь один из потоков. Ещё нейросеть переписывает посты,
+    собирает вечерний выпуск, рубрикует посты для сайтов, черновит уведомления,
+    дистиллирует правила и подбирает сообщества. Здесь — все вызовы по
+    московским суткам: <b>зачем</b> звали (поток), <b>кто</b> отвечал (движок),
+    <b>сколько</b> (вызовы, посты, токены) и чем кончилось.
+  </div>
+  <div class="card mb-3">
+    <div class="card-body" id="flows-box"><span class="text-muted">загрузка…</span></div>
   </div>
 
   <!-- ───────── Пути доставки ───────── -->

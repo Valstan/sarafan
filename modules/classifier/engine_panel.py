@@ -43,6 +43,7 @@ from database.models_extended import (
     WorkTable,
 )
 from modules.classifier.local_engine import ENGINE_DEEPSEEK, ENGINE_MINIMAX, engine_of_model
+from modules.neural_usage import msk_day, msk_today
 
 logger = logging.getLogger(__name__)
 
@@ -101,13 +102,18 @@ def read_minimax_usage(limit: int = MINIMAX_RUNS_LIMIT) -> List[Dict[str, Any]]:
     return rows[-limit:]
 
 
-def minimax_summary(rows: Sequence[Dict[str, Any]], hours: int) -> Dict[str, Any]:
-    """Сводка по вызовам MiniMax за окно в часах.
+def minimax_summary(rows: Sequence[Dict[str, Any]], days: int) -> Dict[str, Any]:
+    """Сводка по вызовам MiniMax за N **московских суток**.
 
     Чистая функция (её проверяет тест): успех, отказы с причинами, токены.
+
+    ⚠️ Раньше здесь было окно в часах (скользящие 24 часа), а рядом — таблица
+    по календарным дням: два счёта одного, посчитанные по разным границам.
+    Теперь граница одна — московская полночь, и «сегодня» значит именно
+    сегодняшние сутки (часть суток ещё не прошла — это видно по подписи).
     """
-    now = _now()
-    cutoff = now - timedelta(hours=hours)
+    today = msk_today()
+    first = msk_day(_now() - timedelta(days=max(1, int(days or 1)) - 1))
     picked: List[Dict[str, Any]] = []
     for row in rows:
         raw = str(row.get("ts") or "")
@@ -117,8 +123,10 @@ def minimax_summary(rows: Sequence[Dict[str, Any]], hours: int) -> Dict[str, Any
             continue
         if ts.tzinfo is None:
             ts = ts.replace(tzinfo=timezone.utc)
-        if ts >= cutoff:
-            picked.append(row)
+        day = msk_day(ts)
+        if day < first or day > today:
+            continue
+        picked.append(row)
     ok = [r for r in picked if r.get("ok")]
     fail = [r for r in picked if not r.get("ok")]
     reasons = Counter(str(r.get("reason") or "без причины") for r in fail)
@@ -133,6 +141,8 @@ def minimax_summary(rows: Sequence[Dict[str, Any]], hours: int) -> Dict[str, Any
         "tokens_failed": spent,
         "reasons": dict(reasons.most_common(6)),
         "last_ts": str(picked[-1].get("ts")) if picked else None,
+        "day": today,
+        "days": int(days),
     }
 
 
@@ -541,8 +551,8 @@ async def stats(session) -> Dict[str, Any]:
         "rules": await _rules(session),
         "minimax": {
             "runs": minimax_runs(usage),
-            "summary_24h": minimax_summary(usage, 24),
-            "summary_7d": minimax_summary(usage, 24 * 7),
+            "summary_today": minimax_summary(usage, 1),
+            "summary_7d": minimax_summary(usage, 7),
             "engine": ENGINE_MINIMAX,
             "fallback": ENGINE_DEEPSEEK,
         },

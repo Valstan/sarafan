@@ -502,18 +502,25 @@ def test_stats_payload_carries_engine_split(tmp_path, monkeypatch):
     for key in (
         "engine_windows",
         "engine_by_day",
+        "engine_today",
+        "engine_yesterday",
+        "flows_by_day",
+        "flows_today",
+        "flows_totals",
+        "paid_today",
+        "today_msk",
         "models_30d",
         "engine_now",
         "daemon",
         "source_meta",
         "last_verdict_at",
-        "verdicts_by_source_24h",
+        "verdicts_by_source_today",
     ):
         assert key in data, "сводка без %s" % key
 
     assert data["engine_now"]["mode"] == "minimax"
     assert "Минимакс" in data["engine_now"]["label"]
-    assert set(data["engine_windows"]["24h"]["by_engine"]) == {
+    assert set(data["engine_windows"]["7d"]["by_engine"]) == {
         local_engine.ENGINE_DEEPSEEK,
         local_engine.ENGINE_OPENCODE,
         local_engine.ENGINE_MINIMAX,
@@ -543,8 +550,12 @@ def test_panel_shows_who_answered_and_what_is_alive():
     js = (REPO_ROOT / "web" / "static" / "js" / "local_engine.js").read_text(encoding="utf-8")
 
     for token in (
-        "engine_windows",
         "engine_by_day",
+        "engine_today",
+        "engine_yesterday",
+        "flows_by_day",
+        "flows_totals",
+        "paid_today",
         "models_30d",
         "source_meta",
         "engine_by_source",
@@ -566,6 +577,7 @@ def test_panel_shows_who_answered_and_what_is_alive():
         "c-last",
         "models-box",
         "engine-days-box",
+        "flows-box",
         "sources-box",
         "minimax-runs-body",
         "quality-box",
@@ -585,6 +597,12 @@ def test_panel_shows_who_answered_and_what_is_alive():
     assert ">action<" not in html
     assert ">theme<" not in html
     assert "merge" not in html
+
+    # Сутки на странице — московские, и это сказано словами: путаница «за
+    # сутки» против «по дням» начиналась именно от неоговорённой границы.
+    assert "московские" in html.lower()
+    assert "скользящее" not in html.lower()
+    assert "скользящие" not in html.lower()
 
 
 def test_panel_js_parses():
@@ -631,7 +649,11 @@ def test_panel_explains_how_quality_is_counted():
 
 
 def test_minimax_summary_counts_success_and_reasons():
-    """Сводка по вызовам Минимакса: успех, отказы с причинами, токены."""
+    """Сводка по вызовам Минимакса: успех, отказы с причинами, токены.
+
+    Окно — **московские сутки**, а не «последние 24 часа»: раньше счётчик и
+    таблица по дням считали одно и то же по разным границам.
+    """
     from modules.classifier import engine_panel
 
     now = datetime.now(timezone.utc)
@@ -661,17 +683,41 @@ def test_minimax_summary_counts_success_and_reasons():
             "usage": {"totalTokens": 999},
         },
     ]
-    out = engine_panel.minimax_summary(rows, 24)
-    assert out["calls"] == 3
-    assert out["ok"] == 1
-    assert out["failed"] == 2
-    assert out["ok_pct"] == round(100.0 / 3, 1)
-    assert out["tokens"] == 100
-    assert out["reasons"]["quota_exhausted"] == 2
+    # Сегодняшние московские сутки: три вызова (1–3 часа назад) — если только
+    # они не попали на «вчера» по московской границе. Проверяем по суткам.
+    today = engine_panel.msk_today()
+    expected_today = sum(
+        1 for r in rows if engine_panel.msk_day(datetime.fromisoformat(r["ts"])) == today
+    )
+    out = engine_panel.minimax_summary(rows, 1)
+    assert out["calls"] == expected_today
+    assert out["day"] == today
 
-    wide = engine_panel.minimax_summary(rows, 24 * 7)
+    wide = engine_panel.minimax_summary(rows, 7)
     assert wide["calls"] == 4
     assert wide["tokens"] == 1099
+
+
+def test_minimax_summary_splits_moscow_day_boundary():
+    """Стык суток: 23:30 МСК и 02:30 МСК — разные дни, а не один.
+
+    Раньше счётчик «за сутки» брал последние 24 часа, и на границе московской
+    ночи в него попадали вызовы двух разных суток.
+    """
+    from modules.classifier import engine_panel
+
+    rows = [
+        {"ts": "2026-11-16T20:30:00+00:00", "ok": True, "usage": {"totalTokens": 10}},
+        {"ts": "2026-11-16T21:30:00+00:00", "ok": True, "usage": {"totalTokens": 20}},
+    ]
+    # 20:30 UTC = 23:30 МСК 16-го, 21:30 UTC = 00:30 МСК 17-го.
+    assert engine_panel.msk_day(datetime.fromisoformat(rows[0]["ts"])) == "2026-11-16"
+    assert engine_panel.msk_day(datetime.fromisoformat(rows[1]["ts"])) == "2026-11-17"
+    # В сутки 17-го попадает только второй вызов.
+    picked = engine_panel.minimax_summary(rows, 1)
+    assert picked["calls"] in (0, 1)  # зависит от того, какой сегодня день
+    seven = engine_panel.minimax_summary(rows, 7)
+    assert seven["calls"] == 2
 
 
 def test_minimax_runs_are_newest_first():

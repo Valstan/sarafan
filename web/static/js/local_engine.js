@@ -120,30 +120,36 @@ async function load() {
     var labels = d.source_labels || {};
     var engineLabels = d.engine_labels || {};
     var modelLabels = d.model_labels || {};
-    var win = d.engine_windows || {};
-    var w24 = win["24h"] || {by_engine: {}, total: 0};
-    var be = w24.by_engine || {};
 
-    // ── Сейчас ──
+    // ── Сейчас: сегодняшние московские сутки (день не закончен) ──
+    // Раньше здесь был «скользящий 24-часовой» счётчик, а рядом — таблица по
+    // календарным дням UTC: два числа об одном и том же, посчитанные по разным
+    // границам, и на странице висело «Дипсик 1 460» рядом с «Дипсик 0».
+    // Теперь граница одна — московская полночь.
+    var today = d.engine_today || {day: d.today_msk, by_engine: {}, total: 0};
+    var yesterday = d.engine_yesterday || {day: "", by_engine: {}, total: 0};
     var now = d.engine_now || {};
     document.getElementById("c-engine-now").textContent = now.label || "—";
-    document.getElementById("c-v-24h").textContent = num(w24.total || 0);
+    document.getElementById("c-v-24h").textContent = num(today.total || 0);
     // Разбивка — по тем движкам, что реально есть в ответе: новый движок
     // (Минимакс) не должен требовать правки этой панели.
     var splitParts = [];
-    Object.keys(be).forEach(function (k) {
-      if (!be[k]) return;
-      splitParts.push(engineShort(k) + ": " + num(be[k]));
+    Object.keys(today.by_engine || {}).forEach(function (k) {
+      if (!today.by_engine[k]) return;
+      splitParts.push(engineShort(k) + ": " + num(today.by_engine[k]));
     });
+    if (yesterday.total) {
+      splitParts.push("вчера: " + num(yesterday.total));
+    }
     document.getElementById("c-v-24h-split").textContent = splitParts.join(" · ");
 
     var mm = d.minimax || {};
-    var m24 = mm.summary_24h || {};
-    document.getElementById("c-minimax").textContent = num(m24.calls || 0) + " вызовов";
-    document.getElementById("c-minimax-sub").textContent = m24.calls
-      ? ("успешных " + num(m24.ok || 0) + " (" + pct(m24.ok_pct) + ")" +
-         " · отказов " + num(m24.failed || 0) +
-         " · токенов " + num(m24.tokens || 0))
+    var mToday = mm.summary_today || {};
+    document.getElementById("c-minimax").textContent = num(mToday.calls || 0) + " вызовов";
+    document.getElementById("c-minimax-sub").textContent = mToday.calls
+      ? ("успешных " + num(mToday.ok || 0) + " (" + pct(mToday.ok_pct) + ")" +
+         " · отказов " + num(mToday.failed || 0) +
+         " · токенов " + num(mToday.tokens || 0))
       : "движок ещё не звали";
 
     document.getElementById("c-last").textContent = ago(d.last_verdict_at);
@@ -175,6 +181,7 @@ async function load() {
 
     // ── Кто отвечал по дням: 10 последних + спойлер ──
     var days = d.engine_by_day || [];
+    var todayDay = d.today_msk || "";
     var dh = "";
     if (!days.length) {
       dh = '<span class="text-muted">нет данных</span>';
@@ -185,18 +192,24 @@ async function load() {
           if (k !== "day" && dayKeys.indexOf(k) < 0) dayKeys.push(k);
         });
       });
-      var head = "<th>День</th>";
+      var head = "<th>День (МСК)</th>";
       dayKeys.forEach(function (k) {
         head += '<th class="text-end">' + esc(engineShort(k)) + "</th>";
       });
+      head += '<th class="text-end">Всего</th>';
       function dayRows(list) {
         var out = "";
         for (var j = 0; j < list.length; j++) {
           var r = list[j];
-          out += "<tr>" + td(esc(r.day));
+          var sum = 0;
+          dayKeys.forEach(function (k) { sum += Number(r[k] || 0); });
+          var mark = (r.day === todayDay)
+            ? ' <span class="badge text-bg-primary">сегодня</span>' : "";
+          out += "<tr>" + td(esc(r.day) + mark);
           dayKeys.forEach(function (k) {
             out += td(num(r[k] || 0), "text-end");
           });
+          out += td("<b>" + num(sum) + "</b>", "text-end");
           out += "</tr>";
         }
         return out;
@@ -210,13 +223,61 @@ async function load() {
               " — " + esc(older[0].day) + ")</summary>" +
               tbl(head, dayRows(older)) + "</details>";
       }
+      dh += '<div class="small text-muted mt-2">Сутки московские: день начинается ' +
+            "в 00:00 МСК. Сегодняшние сутки ещё не закончены.</div>";
     }
     document.getElementById("engine-days-box").innerHTML = dh;
+
+    // ── Все потоки через нейросеть ──
+    var flows = d.flows_by_day || [];
+    var fh = "";
+    if (!flows.length) {
+      fh = '<span class="text-muted">журнала вызовов ещё нет — ' +
+           "панель заработает после первого вызова нейросети</span>";
+    } else {
+      var fhead = "<th>Сутки (МСК)</th><th>Поток (зачем звали)</th><th>Движок</th>" +
+                  '<th class="text-end">Вызовов</th><th class="text-end">Успешно</th>' +
+                  '<th class="text-end">Отказов</th><th class="text-end">Постов</th>' +
+                  '<th class="text-end">Токенов</th><th>Почему отказ</th>';
+      var fbody = "";
+      // Сначала свежие сутки, внутри суток — по объёму: что важнее видно
+      // первым, а не по алфавиту потока.
+      var flowsSorted = flows.slice().sort(function (a, b) {
+        if (a.day !== b.day) return (a.day < b.day) ? 1 : -1;
+        return Number(b.calls || 0) - Number(a.calls || 0);
+      });
+      flowsSorted.forEach(function (r) {
+        var tokens = Number(r.prompt_tokens || 0) + Number(r.completion_tokens || 0);
+        var why = Object.keys(r.reasons || {}).map(function (k) {
+          return esc(k) + " × " + num(r.reasons[k]);
+        }).join(", ");
+        fbody += "<tr>" +
+          td(esc(r.day)) +
+          td(esc(r.flow || r.label)) +
+          td(esc(r.engine_label || engineShort(r.engine)), "small") +
+          td(num(r.calls), "text-end") +
+          td(num(r.ok), "text-end") +
+          td(num(r.failed), "text-end" + (r.failed ? ' class="text-danger"' : "")) +
+          td(num(r.posts), "text-end") +
+          td(num(tokens), "text-end") +
+          td(esc(why || "—"), "small text-muted") +
+          "</tr>";
+      });
+      var tot = d.flows_totals || {};
+      var paid = d.paid_today || {};
+      fh = '<div class="small text-muted mb-2">Сегодня: <b>' + num(tot.calls || 0) +
+           "</b> вызовов · успешных " + num(tot.ok || 0) + " · отказов " +
+           num(tot.failed || 0) + " · постов " + num(tot.posts || 0) +
+           " · платных вызовов Дипсика: <b>" + num(paid.calls || 0) + "</b></div>";
+      fh += '<div style="max-height:460px; overflow:auto">' +
+            tbl(fhead, fbody) + "</div>";
+    }
+    document.getElementById("flows-box").innerHTML = fh;
 
     // ── Пути доставки ──
     var meta = d.source_meta || {};
     var bySource = d.verdicts_by_source || {};
-    var bySource24 = d.verdicts_by_source_24h || {};
+    var bySourceToday = d.verdicts_by_source_today || {};
     var engBySource = d.engine_by_source || {};
     var keys = Object.keys(meta);
     var aliveKeys = keys.filter(function (k) { return (meta[k] || {}).alive !== false; });
@@ -239,13 +300,13 @@ async function load() {
           td(esc(info.label || sourceLabel(key, labels))) +
           td('<span class="badge text-bg-success">работает</span>') +
           td(num(bySource[key] || 0), "text-end") +
-          td(num(bySource24[key] || 0), "text-end") +
+          td(num(bySourceToday[key] || 0), "text-end") +
           td(esc(engTxt || "—"), "small") +
           td(esc(info.note || ""), "small text-muted") +
           "</tr>";
       }
-      sh = tbl("<th>Путь</th><th>Состояние</th><th class='text-end'>За 30 дней</th>" +
-               "<th class='text-end'>За сутки</th><th>Чем отвечает</th><th>Что это</th>", sbody);
+      sh = tbl("<th>Путь</th><th>Состояние</th><th class='text-end'>За 30 суток</th>" +
+               "<th class='text-end'>Сегодня (МСК)</th><th>Чем отвечает</th><th>Что это</th>", sbody);
       if (deadKeys.length) {
         var deadTxt = deadKeys.map(function (k) {
           return esc(sourceLabel(k, labels)) + " — " + num(bySource[k] || 0) + " вердиктов в корпусе (контур снят)";
