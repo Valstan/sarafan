@@ -27,7 +27,7 @@ def _api(status, payload):
     # chat() прокидывает его в call_api, чтобы расход разных потребителей не
     # сливался в одно среднее. Заглушка обязана повторять реальную сигнатуру —
     # иначе она проверяет вызов, которого в проде не существует.
-    def fake(body, *, api_key, base_url, timeout, label="deepseek"):
+    def fake(body, *, api_key, base_url, timeout, label="deepseek", posts=0):
         fake.body = body
         fake.api_key = api_key
         fake.label = label
@@ -147,7 +147,7 @@ def test_402_opens_breaker_and_stops_calling_network(monkeypatch):
     """
     calls = {"n": 0}
 
-    def fake(body, *, api_key, base_url, timeout, label="deepseek"):
+    def fake(body, *, api_key, base_url, timeout, label="deepseek", posts=0):
         calls["n"] += 1
         return 402, {"error": "Insufficient Balance"}
 
@@ -179,7 +179,7 @@ def test_breaker_expires_so_topped_up_account_recovers(monkeypatch):
     statuses = [402, 200]
     calls = {"n": 0}
 
-    def fake(body, *, api_key, base_url, timeout, label="deepseek"):
+    def fake(body, *, api_key, base_url, timeout, label="deepseek", posts=0):
         calls["n"] += 1
         return statuses[min(calls["n"] - 1, 1)], _completion("ок")
 
@@ -327,3 +327,15 @@ def test_budget_eaten_by_reasoning_is_logged_loudly(caplog):
 
     assert "рассуждение" in caplog.text
     assert "480" in caplog.text
+
+
+def test_posts_does_not_reach_request_body(monkeypatch):
+    """``posts`` — объём для журнала расхода; в теле запроса ему не место.
+
+    У Дипсика такого параметра нет, и лишний ключ в теле сломал бы вызов.
+    """
+    monkeypatch.setattr(dc, "call_api", _api(200, _completion("ок")))
+
+    dc.chat(user="вопрос", posts=20)
+
+    assert "posts" not in dc.call_api.body

@@ -61,22 +61,25 @@ logger = logging.getLogger(__name__)
 def chat(*, engine: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
     """Вызов модели: **MiniMax — основной, платный Дипсик — страховка**.
 
-    Решение владельца 16.11: «Дипсику оставалось только те кусочки, когда с
-    MiniMax случаются какие-то сбои случайные, которые должны быть условно пару
-    раз в неделю, а не половина трафика в течение дня».
+    **Решение владельца 17.11: подстраховка возвращена.** «Дипсик вернуть на
+    подстраховку, если Минимакс проморгал или не смог — то отдавать пропущенное
+    Дипсику». То есть **любой** отказ MiniMax (не только ``pool_dead``) закрывает
+    чанк платным Дипсиком: контент не должен теряться из-за того, что у
+    бесплатного движка кончились очки или Карман не ответил.
 
-    ⚠️ **Поэтому фолбэк — не автоматический.** Раньше любой отказ MiniMax
-    закрывался Дипсиком, и это стоило половины трафика: замер 16.11 — 372
-    вызова Дипсика на классификацию против ~414 успешных вызовов MiniMax, то
-    есть ровно 47 % на платном движке. Причина была не в «сбоях», а в паузе на
-    полчаса после трёх подряд пустых аккаунтов.
+    ⚠️ **Чем это платим.** Замер 16.11 показал ровно этот сценарий: автоматический
+    фолбэк на любой отказ стоил **372 вызова Дипсика против ~414 успешных
+    вызовов MiniMax — ровно 47 % трафика на платном движке**. Причина была не в
+    «сбоях», а в паузе на полчаса после трёх подряд пустых аккаунтов: движок
+    молчал час, а волны уходили в платный Дипсик.
 
-    Теперь решение принимает **сам движок** (``modules.minimax_engine``): он
-    знает, жив ли пул. Дипсик включается только когда движок сам признал пул
-    мёртвым (``pool_dead``) — десять пустых аккаунтов подряд или молчание
-    дольше ``MINIMAX_DEAD_AFTER_SEC``. Во всех остальных случаях чанк остаётся
-    **без вердикта** (fail-open: пост уходит по обычным фильтрам, вердикт
-    догонит позже) — платный движок в это время не трогаем.
+    С тех пор пауза сокращена до 10 с, мёртвые аккаунты уходят в ``exclude=``,
+    а пул помечается мёртвым после десяти пустых подряд (ADR-0017). То есть
+    сегодня «проморгал» — это единичные отказы, а не половина суток. Но если
+    MiniMax ляжет целиком, **весь трафик уйдёт в платный Дипсик** — поэтому
+    рядом есть потолок ``CLASSIFIER_PAID_DAILY_CALLS`` (по умолчанию **выключен**:
+    решать включение — владельцу) и весь расход виден в панели «Движок
+    классификации» по журналу вызовов.
 
     ``engine`` — явный переключатель для путей, у которых свой движок
     (переписывание постов: ``REWRITE_ENGINE``). По умолчанию — общий
@@ -86,10 +89,9 @@ def chat(*, engine: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
 
     name = (engine or os.getenv("CLASSIFIER_ENGINE") or "").strip().lower() or "deepseek"
 
-    # Сколько постов в вызове — нужно только журналу расхода MiniMax
-    # (у Дипсика и Опенкода такой сигнатуры нет, и лишний аргумент сломал бы
-    # их вызов). Поэтому он забирается здесь, а дальше уходит только в
-    # MiniMax-ветку.
+    # Сколько постов в вызове — нужно журналу расхода: у Дипсика и Опенкода
+    # такой сигнатуры нет, поэтому он забирается здесь, а в тело запроса не
+    # идёт. В журнал ``neural_usage`` он попадает как объём потока.
     posts = int(kwargs.pop("posts", 0) or 0)
 
     # MiniMax Code — второй контур (ADR-0017). Пул аккаунтов с ежедневными
@@ -105,27 +107,38 @@ def chat(*, engine: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
             engine_guard.note_result(True)
             return result
         reason = str(result.get("reason") or "engine_failed")
+        detail = str(result.get("detail") or "")[:160]
         # ⚠️ ``engine_guard`` — предохранитель **free-тира** (каталог моделей
         # Опенкода), у него своя область отказа. Отказ MiniMax сюда не сдаём:
         # ``quota_exhausted`` открыл бы тот предохранитель на полчаса ради
         # чужого контура. У MiniMax свой предохранитель — общая пауза и счётчик
         # мёртвых аккаунтов внутри ``modules.minimax_engine``.
-        if reason == "pool_dead":
+        if not paid_fallback_enabled():
             logger.warning(
-                "headless: пул MiniMax мёртв (%s) — закрываем чанк платным Дипсиком",
-                str(result.get("detail") or "")[:160],
+                "headless: MiniMax не ответил (%s%s) — платная страховка выключена, "
+                "чанк без вердикта",
+                reason,
+                (", %s" % detail) if detail else "",
             )
-            if not paid_fallback_enabled():
-                return result
-            return _deepseek_chat(**kwargs)
+            return result
+        allowed, limit, spent = _paid_budget()
+        if not allowed:
+            logger.warning(
+                "headless: дневной потолок платных вызовов исчерпан (%d из %d) — "
+                "чанк без вердикта",
+                spent,
+                limit,
+            )
+            return result
         logger.warning(
-            "headless: MiniMax не ответил (%s) — чанк без вердикта, Дипсик не трогаем",
+            "headless: MiniMax не ответил (%s%s) — закрываем чанк платным Дипсиком",
             reason,
+            (", %s" % detail) if detail else "",
         )
-        return result
+        return _deepseek_chat(posts=posts, **kwargs)
 
     if not engine_enabled():
-        result = _deepseek_chat(**kwargs)
+        result = _deepseek_chat(posts=posts, **kwargs)
         engine_guard.note_result(bool(result.get("ok")), _guard_reason(result))
         return result
 
@@ -152,7 +165,43 @@ def chat(*, engine: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
 
     # Страховка. Предохранитель free-тира здесь НЕ трогаем: его успех не
     # должен закрывать его собственный отказ.
-    return _deepseek_chat(**kwargs)
+    return _deepseek_chat(posts=posts, **kwargs)
+
+
+#: Потолок платных вызовов на московские сутки (env ``CLASSIFIER_PAID_DAILY_CALLS``).
+#: 0 — потолка нет (дефолт): решение владельца 17.11 — пропущенное MiniMax уходит
+#: платному Дипсику без ограничения. Ненулевое значение — осознанный ручник:
+#: тогда при лежащем MiniMax платный движок закрывает не больше N вызовов в
+#: сутки, а дальше чанки идут без вердикта (fail-open), и деньги не текут
+#: молча.
+ENV_PAID_DAILY_CALLS = "CLASSIFIER_PAID_DAILY_CALLS"
+DEFAULT_PAID_DAILY_CALLS = 0
+
+
+def _paid_budget() -> Tuple[bool, int, int]:
+    """Хватает ли дневного потолка платных вызовов.
+
+    Возвращает ``(можно, потолок, израсходовано)``. Потолок 0 — «без
+    ограничений», тогда можно всегда.
+
+    Считаем **по журналу вызовов**, а не по своему счётчику: так человек в
+    панели и предохранитель видят одну и ту же величину (принцип «одна
+    память»: две копии одного числа разъезжаются молча).
+    """
+    try:
+        limit = max(0, int(os.getenv(ENV_PAID_DAILY_CALLS, "") or DEFAULT_PAID_DAILY_CALLS))
+    except ValueError:
+        limit = DEFAULT_PAID_DAILY_CALLS
+    if limit <= 0:
+        return True, 0, 0
+    try:
+        from modules import neural_usage
+
+        spent = neural_usage.count_paid_calls(label="headless")
+    except Exception:  # pragma: no cover — журнал недоступен ⇒ не блокируем движок
+        logger.warning("headless: не удалось посчитать платные вызовы — прополок не делаем")
+        return True, limit, 0
+    return spent < limit, limit, spent
 
 
 def _guard_reason(result: Dict[str, Any]) -> str:

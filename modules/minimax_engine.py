@@ -1053,6 +1053,28 @@ def record_usage(
     except OSError as exc:
         logger.warning("minimax: журнал расхода недоступен (%s)", exc)
 
+    # Тот же вызов — в **общий** журнал нейросетей: панель «Движок
+    # классификации» считает по нему все потоки разом (классификация,
+    # переписывание, конвейер), а не только то, что пишет каждый движок в свой
+    # файл. Свой журнал MiniMax остаётся — в нём есть аккаунт и очки.
+    try:
+        from modules import neural_usage
+
+        neural_usage.record(
+            engine="minimax",
+            label=label,
+            model=str(os.getenv(ENV_MODEL) or DEFAULT_MODEL),
+            ok=ok,
+            reason=reason,
+            detail=detail,
+            posts=posts,
+            duration_ms=int(duration_ms or 0),
+            account=account.name,
+            points=int(points or 0),
+        )
+    except Exception:  # pragma: no cover — учёт не важнее ответа
+        logger.debug("minimax: строка общего журнала не записана", exc_info=True)
+
 
 def _chat_local(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any]:
     """Вызов модели через пул аккаунтов MiniMax Code.
@@ -1105,6 +1127,7 @@ def _chat_local(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any]
                 points=int(details.get("points") or 0),
                 posts=int(kwargs.get("posts") or 0),
                 usage=details.get("usage"),
+                label=str(kwargs.get("label") or ""),
             )
             return {
                 "ok": True,
@@ -1122,6 +1145,7 @@ def _chat_local(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any]
             points=int(details.get("points") or 0),
             posts=int(kwargs.get("posts") or 0),
             usage=details.get("usage"),
+            label=str(kwargs.get("label") or ""),
         )
         if last_reason != "quota_exhausted":
             # Не квота (сеть, CLI, протокол) — следующий аккаунт не поможет.
