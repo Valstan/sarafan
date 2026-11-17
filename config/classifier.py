@@ -205,6 +205,36 @@ def get_headless_chunk_size() -> int:
         return 40
 
 
+def get_minimax_chunk_size() -> int:
+    """Постов в одном вызове **MiniMax** (env ``MINIMAX_CHUNK_SIZE``). Границы 1..40.
+
+    Отдель от ``CLASSIFIER_HEADLESS_CHUNK`` не из упрямства: у Дипсика вызов —
+    это HTTP-запрос (дефолт 40 ещё с 26.10, замер: 165 вызовов вместо 194), а у
+    MiniMax вызов — это **запуск агента-CLI**: отдельный процесс, который заново
+    читает правилник и тратит ~16 000 токенов на вызов.
+
+    На проде чанк был опущен до 5 **общим** параметром — и Дипсик, и MiniMax
+    работали по пять постов (замер 16.11: 165 чанков на 609 постов в
+    фоновых прогонах). Минимаксу 20 — потому что на 40 постах агент рвёт JSON
+    (длинный ответ), а деление пачки пополам — это лишний оплаченный вызов.
+    """
+    try:
+        return max(1, min(40, int(os.getenv("MINIMAX_CHUNK_SIZE", "20"))))
+    except ValueError:
+        return 20
+
+
+def get_chunk_size_for_engine() -> int:
+    """Размер чанка под текущий движок (``CLASSIFIER_ENGINE``).
+
+    Одна точка решения: две копии разошлись бы молча (как с фолбэком).
+    """
+    engine = (os.getenv("CLASSIFIER_ENGINE") or "").strip().lower()
+    if engine == "minimax":
+        return get_minimax_chunk_size()
+    return get_headless_chunk_size()
+
+
 def get_headless_regions_per_chunk() -> int:
     """Сколько регионов в одном вызове модели (env ``CLASSIFIER_HEADLESS_REGIONS_PER_CHUNK``).
 
