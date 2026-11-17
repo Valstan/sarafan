@@ -145,7 +145,7 @@ def test_publish_timeout_is_per_engine(monkeypatch):
     assert get_publish_timeout_for_engine() == 40.0
 
     monkeypatch.setenv("CLASSIFIER_ENGINE", "minimax")
-    assert get_publish_timeout_for_engine() == 90.0
+    assert get_publish_timeout_for_engine() == 180.0
 
     monkeypatch.setenv("MINIMAX_PUBLISH_TIMEOUT", "150")
     assert get_publish_timeout_for_engine() == 150.0
