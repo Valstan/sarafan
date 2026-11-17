@@ -532,7 +532,7 @@ def classify_posts(
     вызов, а не за пост.
 
     ``timeout`` — потолок одного чанка. Путь публикации передаёт короткий
-    (``config.opencode.get_publish_timeout``): волна не должна стоять в слоте
+    (``config.opencode.get_publish_timeout_for_engine``): волна не должна стоять в слоте
     воркера, пока free-тир думает. ``None`` — общий потолок движка.
     """
     with_text = [p for p in posts if has_text(p)]

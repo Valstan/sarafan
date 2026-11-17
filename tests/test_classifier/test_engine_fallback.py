@@ -128,3 +128,24 @@ def test_chunk_size_is_per_engine(monkeypatch):
     monkeypatch.setenv("MINIMAX_CHUNK_SIZE", "30")
     monkeypatch.setenv("CLASSIFIER_ENGINE", "minimax")
     assert classifier.get_chunk_size_for_engine() == 30
+
+
+def test_publish_timeout_is_per_engine(monkeypatch):
+    """Потолок волны — тоже по движку: 40 с у Дипсика, 90 с у MiniMax.
+
+    Вызов MiniMax — запуск агента-CLI (десятки секунд); общий потолок 40 с
+    обрывал его **прямо на волне**, то есть на главном пути.
+    """
+    from config.opencode import get_publish_timeout_for_engine
+
+    monkeypatch.delenv("OPENCODE_PUBLISH_TIMEOUT", raising=False)
+    monkeypatch.delenv("MINIMAX_PUBLISH_TIMEOUT", raising=False)
+
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "deepseek")
+    assert get_publish_timeout_for_engine() == 40.0
+
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "minimax")
+    assert get_publish_timeout_for_engine() == 90.0
+
+    monkeypatch.setenv("MINIMAX_PUBLISH_TIMEOUT", "150")
+    assert get_publish_timeout_for_engine() == 150.0

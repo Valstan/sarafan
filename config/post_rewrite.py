@@ -103,8 +103,13 @@ def get_rewrite_timeout() -> float:
     """Потолок одного вызова переписывания, сек (env ``REWRITE_TIMEOUT``).
 
     Дипсик отвечает за секунды, 40 с — с большим запасом. Для MiniMax (агент-
-    CLI) 40 с мало: вызов не успевает, и волна уходит по обычным фильтрам.
+    CLI) 40 с мало: вызов не успевает, и волна уходит по обычным фильтрам —
+    там берётся потолок пути публикации движка.
     """
+    if get_rewrite_engine() == "minimax":
+        from config.opencode import get_publish_timeout_for_engine
+
+        return get_publish_timeout_for_engine()
     try:
         return max(5.0, float(os.getenv("REWRITE_TIMEOUT") or DEFAULT_REWRITE_TIMEOUT))
     except ValueError:
