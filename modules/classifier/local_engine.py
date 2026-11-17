@@ -42,8 +42,10 @@ from database.models_extended import (
     ClassificationRule,
     ContentClassification,
 )
+from modules import neural_usage
 from modules.classifier import headless, rules, service
 from modules.classifier.schema import ClassifierVerdict, parse_verdict_loose
+from modules.neural_usage import msk_day, msk_today
 
 logger = logging.getLogger(__name__)
 
@@ -358,6 +360,42 @@ def _trunc(unit: str, column: Any):
     return func.date_trunc(literal_column("'%s'" % unit), column)
 
 
+def _msk_day(column: Any):
+    """Московские сутки колонки-времени.
+
+    В базе время лежит в **UTC без зоны** (конвенция проекта). ``AT TIME ZONE
+    'UTC'`` приклеивает зону, ``AT TIME ZONE 'Europe/Moscow'`` переводит в
+    московское время — и только после этого ``date_trunc('day', ...)`` режет
+    сутки по московской границе.
+
+    Почему это важно именно тут: сутки, начавшиеся в 00:00 UTC, — это 03:00
+    МСК. С разрезом по UTC «сегодня» на панели уезжало на третьи сутки, а
+    счётчик «за сутки» (скользящие 24 часа) показывал число, не совпадающее
+    с таблицей по дням. Теперь оба смотрят на одни и те же московские сутки.
+    """
+    return func.date_trunc(
+        literal_column("'day'"),
+        column.op("AT TIME ZONE")(literal_column("'UTC'")).op("AT TIME ZONE")(
+            literal_column("'Europe/Moscow'")
+        ),
+    )
+
+
+def _msk_window_start(days: int):
+    """Начало окна в N московских суток: 00:00 МСК, ``days - 1`` суток назад.
+
+    Скобки вокруг ``now() AT TIME ZONE ...`` обязательны: в Postgres у
+    ``AT TIME ZONE`` приоритет **ниже**, чем у бинарного минуса, и без скобок
+    выражение читалось бы как ``now() AT TIME ZONE ('MSK' - interval)``.
+    """
+    return func.date_trunc(
+        literal_column("'day'"),
+        literal_column(
+            "(now() AT TIME ZONE 'Europe/Moscow') - INTERVAL '%d days'" % max(0, int(days) - 1)
+        ),
+    )
+
+
 def _daily_by_source_query():
     """Вердикты по источникам по дням (30 дней)."""
     day = _trunc("day", ContentClassification.created_at)
@@ -412,27 +450,34 @@ def _corrections_by_week_query():
 
 
 def _engine_counts_query(days: int):
-    """Вердикты по модели за окно — из этого считается, кто отвечал."""
-    return (
-        select(
-            ContentClassification.model,
-            func.count().label("n"),
-        )
-        .where(ContentClassification.created_at >= datetime.utcnow() - timedelta(days=days))
-        .group_by(ContentClassification.model)
-    )
+    """Вердикты по модели за N московских суток (сегодняшние включительно).
 
-
-def _engine_by_day_query(days: int):
-    """Вердикты по модели по дням — «кто отвечал» по дням."""
-    day = _trunc("day", ContentClassification.created_at)
+    Разрез — по **московским** суткам: сутки, начавшиеся в 00:00 UTC, — это
+    03:00 МСК, и с разрезом по UTC «сегодня» съезжало на третьи сутки.
+    """
+    day = _msk_day(ContentClassification.created_at)
     return (
         select(
             day.label("d"),
             ContentClassification.model,
             func.count().label("n"),
         )
-        .where(ContentClassification.created_at >= datetime.utcnow() - timedelta(days=days))
+        .where(day >= _msk_window_start(days))
+        .group_by(day, ContentClassification.model)
+        .order_by(day)
+    )
+
+
+def _engine_by_day_query(days: int):
+    """Вердикты по модели по московским суткам — «кто отвечал» по дням."""
+    day = _msk_day(ContentClassification.created_at)
+    return (
+        select(
+            day.label("d"),
+            ContentClassification.model,
+            func.count().label("n"),
+        )
+        .where(day >= _msk_window_start(days))
         .group_by(day, ContentClassification.model)
         .order_by(day)
     )
@@ -444,26 +489,28 @@ def _last_verdict_query():
 
 
 def _source_counts_query(days: int):
-    """Вердикты по пути доставки за окно — «кто разбирает посты»."""
+    """Вердикты по пути доставки за N московских суток — «кто разбирает посты»."""
+    day = _msk_day(ContentClassification.created_at)
     return (
         select(
             ContentClassification.source,
             func.count().label("n"),
         )
-        .where(ContentClassification.created_at >= datetime.utcnow() - timedelta(days=days))
+        .where(day >= _msk_window_start(days))
         .group_by(ContentClassification.source)
     )
 
 
 def _engine_by_source_query(days: int):
     """Вердикты по пути доставки и по движку — «чем отвечали внутри пути»."""
+    day = _msk_day(ContentClassification.created_at)
     return (
         select(
             ContentClassification.source,
             ContentClassification.model,
             func.count().label("n"),
         )
-        .where(ContentClassification.created_at >= datetime.utcnow() - timedelta(days=days))
+        .where(day >= _msk_window_start(days))
         .group_by(ContentClassification.source, ContentClassification.model)
     )
 
@@ -561,19 +608,26 @@ async def stats(session) -> Dict[str, Any]:
     # ── Кто отвечал: движок по имени модели ──
     # Путь (`source`) и движок (`model`) — разные вещи: одна волна считает и
     # платным Дипсиком, и бесплатным Опенкодом. Панель показывает оба среза.
+    #
+    # ⚠️ Все окна — **целые московские сутки**. Прежде тут был «за сутки» =
+    # скользящие 24 часа, а рядом таблица по календарным дням UTC: два
+    # счёта одного и того же, посчитанные по разным границам, и человек видел
+    # «Дипсик 1 460» и «Дипсик 0» на одной странице. Теперь граница одна —
+    # московская полночь.
     engine_windows: Dict[str, Dict[str, Any]] = {}
     models_30d: List[Dict[str, Any]] = []
-    for win, days in (("24h", 1), ("7d", 7), ("30d", 30)):
+    for win, days in (("7d", 7), ("30d", 30)):
         rows = (await session.execute(_engine_counts_query(days))).all()
-        bucket = engine_buckets(rows)
+        bucket = engine_buckets([(m, n) for _d, m, n in rows])
         by_model: Dict[str, int] = {}
-        for m, n in rows:
+        for _d, m, n in rows:
             name = str(m or "")
             by_model[name] = by_model.get(name, 0) + int(n or 0)
         engine_windows[win] = {
             "by_engine": bucket,
             "total": sum(bucket.values()),
             "by_model": by_model,
+            "days": days,
         }
         if win == "30d":
             models_30d = [
@@ -600,6 +654,38 @@ async def stats(session) -> Dict[str, Any]:
         row.update(day_map[day])
         engine_by_day.append(row)
 
+    # ── Сегодня и вчера (московские сутки) ──
+    # Сегодняшние сутки не закончены — это видно по подписи, а не по цифре:
+    # раньше об этом приходилось догадываться по «скользящему окну».
+    today_msk = msk_today()
+    yesterday_msk = msk_day(datetime.now(timezone.utc) - timedelta(days=1))
+
+    def _day_bucket(day: str) -> Dict[str, Any]:
+        raw = day_map.get(day) or {
+            ENGINE_DEEPSEEK: 0,
+            ENGINE_OPENCODE: 0,
+            ENGINE_MINIMAX: 0,
+            ENGINE_UNKNOWN: 0,
+        }
+        return {"day": day, "by_engine": dict(raw), "total": sum(raw.values())}
+
+    engine_today = _day_bucket(today_msk)
+    engine_yesterday = _day_bucket(yesterday_msk)
+
+    # ── Все потоки через нейросеть (журнал вызовов) ──
+    # Классификация — только один из потоков: переписывание постов, конвейер
+    # сайтов, вечерний сборник, черновики уведомлений, дистилляция, подбор
+    # сообществ. Раньше панель показывала только классификацию, а расход по
+    # остальным потокам жил в логе воркера — «куда уходят деньги» приходилось
+    # собирать по обрывкам.
+    neural_records = neural_usage.read_records(days=14, max_bytes=8 * 1024 * 1024)
+    flows_by_day = neural_usage.aggregate_by_day(neural_records)
+    flows_today = [r for r in flows_by_day if r.get("day") == today_msk]
+    flows_totals = neural_usage.summarize(neural_records, day=today_msk)
+    paid_today = neural_usage.summarize(neural_records, day=today_msk, engine="deepseek")
+    minimax_today = neural_usage.summarize(neural_records, day=today_msk, engine="minimax")
+    minimax_7d = neural_usage.summarize(neural_records, engine="minimax")
+
     last_verdict = (await session.execute(_last_verdict_query())).scalar()
     # Время из БД — **UTC без зоны** (конвенция проекта). Отдаём с пометкой UTC:
     # иначе браузер прочитает «2026-11-11 18:13:06» как московское время и
@@ -610,7 +696,7 @@ async def stats(session) -> Dict[str, Any]:
     elif last_verdict is not None:
         last_verdict_at = str(last_verdict)
 
-    src_24h = {
+    src_today = {
         str(s or "?"): int(n or 0)
         for s, n in (await session.execute(_source_counts_query(1))).all()
     }
@@ -703,18 +789,28 @@ async def stats(session) -> Dict[str, Any]:
             for key in sorted(set(SOURCE_LABELS) | set(verdicts_by_source))
         },
         "verdicts_by_source": verdicts_by_source,
-        "verdicts_by_source_24h": src_24h,
+        "verdicts_by_source_today": src_today,
         "engine_by_source": engine_by_source,
         "daily_by_source": daily,
         "quality_by_source": quality,
         "weekly_quality": weekly,
         "corrections_by_week": corrections_by_week,
         "rules_by_status": {str(s or "?"): int(n) for s, n in rule_rows},
-        # ── разрез «кем ответили» ──
+        # ── разрез «кем ответили» (московские сутки) ──
         "engine_labels": dict(ENGINE_LABELS),
         "model_labels": dict(MODEL_LABELS),
         "engine_windows": engine_windows,
         "engine_by_day": engine_by_day,
+        "engine_today": engine_today,
+        "engine_yesterday": engine_yesterday,
+        "today_msk": today_msk,
+        # ── все потоки через нейросеть (журнал вызовов) ──
+        "flows_by_day": flows_by_day,
+        "flows_today": flows_today,
+        "flows_totals": flows_totals,
+        "paid_today": paid_today,
+        "minimax_today": minimax_today,
+        "minimax_7d": minimax_7d,
         "models_30d": models_30d,
         "engine_now": engine_now,
         "daemon": daemon,
