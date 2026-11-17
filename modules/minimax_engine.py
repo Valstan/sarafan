@@ -119,30 +119,77 @@ DEFAULT_CLI_MODE = "standard"
 #: ответить; на 3 шагах он не успевает (замер 13.11: ``limit_exceeded``).
 ENV_MAX_STEPS = "MINIMAX_MAX_STEPS"
 DEFAULT_MAX_STEPS = 6
-#: Сколько аккаунтов за один вызов разрешено запросить у Кармана. Больше трёх
-#: подряд «пустых» ответов — уже не «очки кончились», а неполадки на стороне
-#: Кармана, и волна должна уйти на платный движок-страховку.
+#: Сколько аккаунтов за один вызов разрешено запросить у Кармана.
 ENV_MAX_LEASES = "MINIMAX_MAX_LEASES"
 DEFAULT_MAX_LEASES = 5
 #: Пауза после сбоя связи с Карманом. Пока она не истекла, мы к нему не ходим:
 #: каждый чанк иначе ждал бы сетевого таймаута, а учёт активаций он всё равно
-#: не примет. Это НЕ предохранитель движка: волна уходит в платный DeepSeek.
+#: не примет.
+#:
+#: ⚠️ **Пауза — общая и короткая.** Замер 16.11: пауза была 30 минут и лежала
+#: в памяти процесса, поэтому четыре форка воркера жили в разных временах.
+#: Итог — 514 отказов движка за день и **ровно половина трафика в Дипсике**.
+#: Теперь пауза лежит в общем файле (её видят все процессы) и длится 10 секунд:
+#: решение владельца 16.11 — «пауза 10 секунд и повторный запрос за аккаунтом».
 ENV_KARMAN_DOWN_TTL = "MINIMAX_KARMAN_DOWN_TTL"
-DEFAULT_KARMAN_DOWN_TTL = 60
+DEFAULT_KARMAN_DOWN_TTL = 10
 #: Пауза после пустой выдачи Кармана (нет аккаунта с готовым входом). Без неё
 #: волна на 40 батчей спросила бы Кармана 40 раз подряд и словила его 429
 #: («слишком много запросов») — а отвечает он всё равно тем же.
 ENV_KARMAN_EMPTY_TTL = "MINIMAX_KARMAN_EMPTY_TTL"
-DEFAULT_KARMAN_EMPTY_TTL = 60
+DEFAULT_KARMAN_EMPTY_TTL = 10
 #: Пауза после того, как свежий аккаунт от Кармана отказал сразу (у пула
 #: сегодня нет очков). Без неё волна крутила бы ротацию и сжигала пул: живой
 #: факт 15.11 — 15 аккаунтов за две минуты.
+#:
+#: ⚠️ Было 1800 с (30 минут) — это и была причина «половины трафика в Дипсике»:
+#: три подряд пустых аккаунта выключали движок на полчаса для всех форков.
+#: Теперь 10 секунд (решение владельца 16.11), а длинная пауза заменена
+#: **счётчиком подряд идущих пустых аккаунтов** (см. ``MINIMAX_DEAD_STREAK``).
 ENV_KARMAN_NO_POINTS_TTL = "MINIMAX_KARMAN_NO_POINTS_TTL"
-DEFAULT_KARMAN_NO_POINTS_TTL = 1800
-#: Сколько свежих аккаунтов подряд могут отказать (у пула нет очков), прежде
-#: чем мы встанем на паузу.
-ENV_KARMAN_FRESH_FAIL_LIMIT = "MINIMAX_KARMAN_FRESH_FAIL_LIMIT"
-DEFAULT_FRESH_FAIL_LIMIT = 3
+DEFAULT_KARMAN_NO_POINTS_TTL = 10
+#: Сколько подряд идущих **пустых** аккаунтов (баланс ноль, ни одного токена)
+#: мы готовы выдержать, прежде чем признать пул мёртвым и отдать волну
+#: платной страховке.
+#:
+#: Решение владельца 16.11: «если 10 подряд пустых аккаунтов — то тогда передача
+#: волны Дипсику». Раньше порог был 3, а следствие — пауза на полчаса; теперь
+#: следствие другое (страховка), а пауза между попытками — 10 секунд.
+ENV_DEAD_STREAK_LIMIT = "MINIMAX_DEAD_STREAK_LIMIT"
+DEFAULT_DEAD_STREAK_LIMIT = 10
+#: Сколько секунд движок может молчать подряд, прежде чем волна уйдёт в платную
+#: страховку (env ``MINIMAX_DEAD_AFTER_SEC``).
+#:
+#: Второй рубеж рядом со счётчиком пустых аккаунтов: тот ловит «пул выдаёт
+#: мёртвые входы», а этот — «движок не отвечает вовсе» (сеть, Карман, CLI).
+#: Решение владельца 16.11: Дипсик — страховка на случай сбоев, а не на
+#: постоянную половину трафика; десять минут молчания — уже не «случайный сбой».
+ENV_DEAD_AFTER_SEC = "MINIMAX_DEAD_AFTER_SEC"
+DEFAULT_DEAD_AFTER_SEC = 600
+#: Сколько секунд после признания пула мёртвым мы **не берём** ещё аккаунт
+#: (env ``MINIMAX_POOL_DEAD_TTL``). Пока пул мёртв, волна идёт платной
+#: страховкой целиком; сбрасывается первым же успехом.
+ENV_POOL_DEAD_TTL = "MINIMAX_POOL_DEAD_TTL"
+DEFAULT_POOL_DEAD_TTL = 600
+#: Сколько мёртвых аккаунтов помнить, чтобы **не просить их у Кармана снова**.
+#: Ручка ``exclude=`` в выдаче для этого и сделана: без неё Карман отдаёт тот
+#: же id, и мы снова получаем «insufficient balance» (живой факт 16.11:
+#: аккаунты 69 → 70 → 71 подряд, все с нулевым балансом).
+ENV_DEAD_IDS_LIMIT = "MINIMAX_DEAD_IDS_LIMIT"
+DEFAULT_DEAD_IDS_LIMIT = 50
+#: Постов в одном вызове MiniMax (env ``MINIMAX_CHUNK_SIZE``). Границы 1..40.
+#:
+#: Отдель от ``CLASSIFIER_HEADLESS_CHUNK`` не из упрямства: у Дипсика вызов —
+#: это HTTP-запрос (стал «40» ещё 26.10, замер: 165 вызовов вместо 194), а у
+#: MiniMax вызов — это **запуск агента-CLI**: отдельный процесс, который
+#: заново читает правилник и тратит ~16 000 токенов на вызов. На проде чанк
+#: был опущен до 5 **общим** параметром — и Дипсик, и MiniMax работали по
+#: пять постов, то есть вчетверо больше вызовов, чем нужно.
+#:
+#: Для MiniMax дефолт 20: агент-CLI на 40 постов рвёт JSON (длинный ответ),
+#: а деление пачки пополам — это лишний оплаченный вызов.
+ENV_CHUNK_SIZE = "MINIMAX_CHUNK_SIZE"
+DEFAULT_CHUNK_SIZE = 20
 #: Ограничить выдачу Кармана нашими почтами (``?emails=``). По умолчанию
 #: **выключено**: аккаунтами пула занимается Карман, он сам решает, какой дать,
 #: и отдаёт токен — ограничивать его выбор нашими локальными профилями нельзя.
@@ -165,7 +212,6 @@ DEFAULT_WORK_AREA = "work"
 #: только на случай, если разделение труда поменяется обратно.
 ENV_REPORT_ACTIVATION = "MINIMAX_REPORT_ACTIVATION"
 DEFAULT_REPORT_ACTIVATION = "0"
-_karman_down_until = 0.0
 #: Файл с метаданными профиля рядом с ``auth.json``: почта аккаунта и его id
 #: в Кармане. По почве аккаунт, выданный Карманом, узнаётся у нас.
 PROFILE_META_NAME = "profile.json"
@@ -704,7 +750,9 @@ def materialize_leased_profile(
         # Общее состояние пула (счётчик сухих отказов и общая пауза) переживает
         # смену аккаунта: иначе каждый новый аккаунт обнулял бы счётчик — и
         # пул снова сжигался бы (живой факт 15.11: 15 аккаунтов за 2 минуты).
-        for key in (META_DRY_FAILURES, META_PAUSE_UNTIL):
+        # Список ключей — один (``SHARED_META_KEYS``): свой список здесь
+        # разошёлся бы с тем, что чистит движок, молча.
+        for key in SHARED_META_KEYS:
             if key in previous_meta:
                 meta[key] = previous_meta[key]
         (root / "profile.json").write_text(
@@ -894,6 +942,7 @@ def run_classification(
         cmd += ["--file", str(posts_file)]
         cmd.append(TASK_TEXT)
 
+        started = time.monotonic()
         proc = subprocess.run(
             cmd,
             env=env,
@@ -903,9 +952,13 @@ def run_classification(
             errors="replace",
             timeout=limit + 60,
         )
+        elapsed_ms = int((time.monotonic() - started) * 1000)
         stdout = (proc.stdout or "").strip()
         stderr = (proc.stderr or "").strip()
-        details: Dict[str, Any] = {"returncode": proc.returncode}
+        details: Dict[str, Any] = {
+            "returncode": proc.returncode,
+            "elapsed_ms": elapsed_ms,
+        }
 
         payload: Dict[str, Any] = {}
         for line in reversed(stdout.splitlines()):
@@ -962,18 +1015,33 @@ def record_usage(
     *,
     ok: bool,
     reason: str = "",
+    detail: str = "",
     points: int = 0,
     posts: int = 0,
     usage: Optional[Dict[str, Any]] = None,
+    duration_ms: int = 0,
+    label: str = "",
+    attempts: int = 0,
 ) -> None:
-    """Записать расход аккаунта в журнал (общий учёт — в Кармане, см. ADR-0017)."""
+    """Записать расход аккаунта в журнал (общий учёт — в Кармане, см. ADR-0017).
+
+    ⚠️ **Журнал — это диагностика, а не летопись.** Прежде сюда не писались
+    ``detail`` отказа и длительность вызова, и из-за этого разбор «почему
+    половина трафика в Дипсике» пришлось вести по обрывкам лога воркера шесть
+    заходов подряд (замер 16.11). Теперь в строке есть всё, что нужно для
+    разбора: причина, текст ошибки, сколько попыток и сколько миллисекунд.
+    """
     row = {
         "ts": datetime.now(timezone.utc).isoformat(),
         "account": account.name,
         "ok": ok,
         "reason": reason,
+        "detail": detail[:300],
         "points": points,
         "posts": posts,
+        "duration_ms": int(duration_ms or 0),
+        "attempts": int(attempts or 0),
+        "label": label,
         "usage": usage or {},
         "project": "Сарафан",
     }
@@ -1114,8 +1182,36 @@ def _remember_exhausted(account: MinimaxAccount) -> None:
 #: читают и пишут все процессы воркера, поэтому пауза общая, а не «в этом
 #: процессе»: иначе пять параллельных чанков волны сожгли бы по три аккаунта
 #: каждый (живой факт 15.11: 15 аккаунтов за две минуты, пауза не сработала).
+#:
+#: ⚠️ **Все четыре ключа — общие.** Раньше пауза «Карман не отвечает» жила в
+#: памяти процесса (``_karman_down_until``), и четыре форка воркера решали
+#: независимо, когда спросить Кармана снова. Теперь решение одно на всех.
 META_DRY_FAILURES = "dry_failures"
 META_PAUSE_UNTIL = "karman_pause_until_ms"
+META_KARMAN_DOWN_UNTIL = "karman_down_until_ms"
+#: С какого момента движок молчит подряд (мс). Обнуляется на первом успехе.
+META_DOWN_SINCE = "down_since_ms"
+#: Пул признан мёртвым до этого момента (мс). Пока он не прошёл, волна уходит
+#: платной страховке **без попытки** взять ещё один аккаунт: каждый такой
+#: вызов — это ещё один сгоревший аккаунт.
+META_POOL_DEAD_UNTIL = "pool_dead_until_ms"
+#: id аккаунтов, которые умерли с нулевым балансом. Их не просим у Кармана
+#: снова — ручка ``exclude=`` для этого и сделана.
+META_DEAD_IDS = "dead_account_ids"
+
+#: **Все** ключи общего состояния — одним списком. Он нужен в двух местах: при
+#: смене аккаунта (``materialize_leased_profile`` переписывает файл профиля и
+#: переносит общее состояние в новый) и здесь. Второй список разошёлся бы с
+#: первым молча — а общее состояние в этом файле и есть то, что удерживает
+#: паузу для всех процессов воркера.
+SHARED_META_KEYS = (
+    META_DRY_FAILURES,
+    META_PAUSE_UNTIL,
+    META_KARMAN_DOWN_UNTIL,
+    META_DOWN_SINCE,
+    META_POOL_DEAD_UNTIL,
+    META_DEAD_IDS,
+)
 
 
 def _work_area_root(accounts_dir: Optional[str] = None) -> Path:
@@ -1149,6 +1245,18 @@ def _karman_pause_active(meta: Dict[str, Any], now_ms: Optional[int] = None) -> 
     return until > int(now_ms if now_ms is not None else time.time() * 1000)
 
 
+def _karman_down_active(accounts_dir: Optional[str] = None, now_ms: Optional[int] = None) -> bool:
+    """Пауза после сетевого сбоя с Карманом — **общая** для всех воркеров.
+
+    Раньше она жила в памяти процесса (``_karman_down_until``): четыре форка
+    воркера решали независимо, кто и когда снова спросит Кармана, и часть
+    процессов продолжала долбить ручку, пока другие уже ушли в Дипсик.
+    """
+    meta = _shared_meta(accounts_dir)
+    until = int(meta.get(META_KARMAN_DOWN_UNTIL) or 0)
+    return until > int(now_ms if now_ms is not None else time.time() * 1000)
+
+
 def _note_dry_failure(accounts_dir: Optional[str] = None) -> int:
     """Посчитать аккаунт, умерший без единого токена (пул без очков).
 
@@ -1160,26 +1268,113 @@ def _note_dry_failure(accounts_dir: Optional[str] = None) -> int:
     return count
 
 
-#: Потолок серии свежих отказов: столько аккаунтов подряд мы готовы взять, прежде
-#: чем остановиться и подождать. Не «учёт аккаунтов» (им занимается Карман), а
-#: береж к ручке: бить по ней десятками запросов подряд бессмысленно.
-DEFAULT_FRESH_FAIL_LIMIT = 3
+def _note_dead_account(account_id: Any, accounts_dir: Optional[str] = None) -> None:
+    """Запомнить id аккаунта с нулевым балансом — чтобы не просить его снова.
+
+    Карман отдаёт «любой свободный»; без ручки ``exclude=`` он выдавал тот же
+    id снова и снова (живой факт 16.11: 69 → 70 → 71 подряд, у каждого баланс
+    ноль). Мёртвые id копятся в общем файле и уходят в запрос выдачи.
+    """
+    if account_id is None:
+        return
+    try:
+        ident = int(account_id)
+    except (TypeError, ValueError):
+        return
+    meta = _shared_meta(accounts_dir)
+    ids: List[int] = []
+    for value in meta.get(META_DEAD_IDS) or []:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    if ident not in ids:
+        ids.append(ident)
+    try:
+        limit = max(1, int(os.getenv(ENV_DEAD_IDS_LIMIT) or DEFAULT_DEAD_IDS_LIMIT))
+    except ValueError:
+        limit = DEFAULT_DEAD_IDS_LIMIT
+    _write_shared_meta({META_DEAD_IDS: ids[-limit:]}, accounts_dir)
+
+
+def _dead_account_ids(accounts_dir: Optional[str] = None) -> List[int]:
+    """id аккаунтов, которые уже умирали с нулевым балансом."""
+    ids: List[int] = []
+    for value in _shared_meta(accounts_dir).get(META_DEAD_IDS) or []:
+        try:
+            ids.append(int(value))
+        except (TypeError, ValueError):
+            continue
+    return ids
+
+
+def _dead_after_sec() -> float:
+    """Сколько секунд движок может молчать подряд до передачи волны в Дипсик."""
+    try:
+        return max(1.0, float(os.getenv(ENV_DEAD_AFTER_SEC) or DEFAULT_DEAD_AFTER_SEC))
+    except ValueError:
+        return DEFAULT_DEAD_AFTER_SEC
+
+
+def _pool_dead_ttl() -> float:
+    """Сколько секунд пул считается мёртвым после того, как его признали мёртвым.
+
+    Нужно, чтобы следующие чанки **не жгли ещё по аккаунту**: пока пул мёртв,
+    волна уходит платной страховке целиком. Сбрасывается первым же успехом.
+    """
+    try:
+        return max(5.0, float(os.getenv(ENV_POOL_DEAD_TTL) or DEFAULT_POOL_DEAD_TTL))
+    except ValueError:
+        return DEFAULT_POOL_DEAD_TTL
+
+
+def _pool_dead_active(accounts_dir: Optional[str] = None, now_ms: Optional[int] = None) -> bool:
+    """Пул уже признан мёртвым — волна идёт в платную страховку."""
+    until = int(_shared_meta(accounts_dir).get(META_POOL_DEAD_UNTIL) or 0)
+    return until > int(now_ms if now_ms is not None else time.time() * 1000)
+
+
+def _note_down_since(accounts_dir: Optional[str] = None) -> int:
+    """Отметить: движок молчит с этого момента (если ещё не отмечено).
+
+    Отметка **общая**: молчание движка — свойство пула, а не процесса.
+    """
+    meta = _shared_meta(accounts_dir)
+    since = int(meta.get(META_DOWN_SINCE) or 0)
+    if since:
+        return since
+    now_ms = int(time.time() * 1000)
+    _write_shared_meta({META_DOWN_SINCE: now_ms}, accounts_dir)
+    return now_ms
+
+
+def _down_seconds(accounts_dir: Optional[str] = None, now_ms: Optional[int] = None) -> float:
+    """Сколько секунд движок молчит подряд (0 — молчания не было)."""
+    since = int(_shared_meta(accounts_dir).get(META_DOWN_SINCE) or 0)
+    if not since:
+        return 0.0
+    now = int(now_ms if now_ms is not None else time.time() * 1000)
+    return max(0.0, (now - since) / 1000.0)
 
 
 def _no_points_ttl() -> float:
     """Пауза после того, как свежий аккаунт отказал сразу (пул без очков)."""
     try:
-        return max(5.0, float(os.getenv(ENV_KARMAN_NO_POINTS_TTL) or DEFAULT_KARMAN_NO_POINTS_TTL))
+        return max(1.0, float(os.getenv(ENV_KARMAN_NO_POINTS_TTL) or DEFAULT_KARMAN_NO_POINTS_TTL))
     except ValueError:
         return DEFAULT_KARMAN_NO_POINTS_TTL
 
 
-def _fresh_fail_limit() -> int:
-    """Сколько свежих аккаунтов подряд могут отказать до паузы."""
+def _dead_streak_limit() -> int:
+    """Сколько пустых аккаунтов подряд мы выдержим до передачи волны в Дипсик.
+
+    Решение владельца 16.11: десять. Прежде был порог 3, а следствием была
+    получасовка пауза, из-за которой половина трафика уходила в платный движок.
+    """
     try:
-        return max(1, int(os.getenv(ENV_KARMAN_FRESH_FAIL_LIMIT) or DEFAULT_FRESH_FAIL_LIMIT))
+        return max(1, int(os.getenv(ENV_DEAD_STREAK_LIMIT) or DEFAULT_DEAD_STREAK_LIMIT))
     except ValueError:
-        return DEFAULT_FRESH_FAIL_LIMIT
+        return DEFAULT_DEAD_STREAK_LIMIT
 
 
 def _activation_reported_today(account: MinimaxAccount) -> bool:
@@ -1294,29 +1489,65 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
     **Один аккаунт — на много батчей:** дневная клетка аккаунта — 400–1000
     очков, а это сотни постов, поэтому новый аккаунт берём не на каждый батч,
     а когда текущий перестал работать.
-    """
-    global _karman_down_until
 
+    **Пауза короткая и общая.** Решение владельца 16.11: «пауза 10 секунд и
+    повторный запрос за аккаунтом». Прежде пауза после пустого аккаунта была
+    получасовой и лежала в памяти процесса — четыре форка воркера жили в
+    разных временах, и **ровно половина трафика уходила в Дипсик** (замер:
+    514 отказов движка за день, 372 вызова Дипсика на классификацию).
+
+    **Длинная реакция — одна:** десять пустых аккаунтов подряд, и волна уходит
+    платной страховке (решение владельца 16.11). До этого — пробуем следующий.
+    """
     system = str(kwargs.get("system") or "")
     user = str(kwargs.get("user") or "")
 
-    if time.monotonic() < _karman_down_until:
-        # Карман лежит: не ходим к нему до конца паузы (каждый чанк иначе ждал
-        # бы сетевого таймаута). Волна уходит в платный движок-страховку.
+    # Пул уже признан мёртвым — **не берём ещё один аккаунт**: волна идёт
+    # платной страховкой целиком, пока не случится успех.
+    if _pool_dead_active():
         return {
             "ok": False,
-            "reason": "karman_unavailable",
-            "detail": "Карман не отвечает (пауза после сбоя)",
+            "reason": "pool_dead",
+            "detail": "пул признан мёртвым (волна уходит платной страховке)",
             "tried_accounts": [],
         }
 
-    if _karman_pause_active(_shared_meta()):
-        # Общая пауза после серии аккаунтов без очков: её видят все процессы
-        # воркера, поэтому пул не сжигается параллельными чанками волны.
+    # Движок молчит дольше порога — это уже не «случайный сбой», а отказ
+    # контура: волна уходит платной страховке (решение владельца 16.11 —
+    # Дипсик держит «штучные сбои», а не половину трафика).
+    down_for = _down_seconds()
+    if down_for >= _dead_after_sec():
+        return {
+            "ok": False,
+            "reason": "pool_dead",
+            "detail": "движок MiniMax молчит %.0f с подряд (порог %.0f с)"
+            % (
+                down_for,
+                _dead_after_sec(),
+            ),
+            "tried_accounts": [],
+        }
+
+    # Пауза после сетевого сбоя Кармана — **общая** (файл рабочей области), а не
+    # в памяти процесса: иначе часть форков продолжала долбить ручку, пока
+    # другие уже ушли в Дипсик.
+    if _karman_down_active():
+        _note_down_since()
         return {
             "ok": False,
             "reason": "karman_unavailable",
-            "detail": "пауза после серии аккаунтов без очков (общая на всех воркеров)",
+            "detail": "Карман не отвечает (общая пауза после сбоя)",
+            "tried_accounts": [],
+        }
+
+    # Общая пауза после пустого аккаунта: тоже 10 секунд — чтобы не долбить
+    # ручку и не ждать полчаса.
+    if _karman_pause_active(_shared_meta()):
+        _note_down_since()
+        return {
+            "ok": False,
+            "reason": "karman_unavailable",
+            "detail": "пауза после пустого аккаунта (общая на всех воркеров)",
             "tried_accounts": [],
         }
 
@@ -1369,9 +1600,22 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                         points=int(details.get("points") or 0),
                         posts=int(kwargs.get("posts") or 0),
                         usage=details.get("usage"),
+                        duration_ms=int(details.get("elapsed_ms") or 0),
+                        label=str(kwargs.get("label") or ""),
+                        attempts=len(tried),
                     )
-                    # Пул жив: сухие отказы забываем, общая пауза не нужна.
-                    _write_shared_meta({META_DRY_FAILURES: 0, META_PAUSE_UNTIL: 0})
+                    # Пул жив: серия пустых аккаунтов обнуляется, общая пауза не
+                    # нужна, «пул мёртв» снимается. Список мёртвых id остаётся —
+                    # мёртвый аккаунт мёртв.
+                    _write_shared_meta(
+                        {
+                            META_DRY_FAILURES: 0,
+                            META_PAUSE_UNTIL: 0,
+                            META_KARMAN_DOWN_UNTIL: 0,
+                            META_DOWN_SINCE: 0,
+                            META_POOL_DEAD_UNTIL: 0,
+                        }
+                    )
                     return {
                         "ok": True,
                         "content": content,
@@ -1380,6 +1624,8 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                         "account": current.name,
                         "leased": True,
                         "karman_account_id": current.karman_id,
+                        "attempts": len(tried),
+                        "duration_ms": int(details.get("elapsed_ms") or 0),
                     }
                 last_reason = str(details.get("reason") or "engine_failed")
                 last_detail = str(details.get("detail") or "")
@@ -1387,9 +1633,13 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                     current,
                     ok=False,
                     reason=last_reason,
+                    detail=last_detail,
                     points=int(details.get("points") or 0),
                     posts=int(kwargs.get("posts") or 0),
                     usage=details.get("usage"),
+                    duration_ms=int(details.get("elapsed_ms") or 0),
+                    label=str(kwargs.get("label") or ""),
+                    attempts=len(tried),
                 )
                 if last_reason not in ("quota_exhausted", "auth_expired"):
                     return {
@@ -1404,34 +1654,51 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                     # (и не тратим на него вызовы).
                     _remember_exhausted(current)
                 # Аккаунт умер, **не потратив ни токена**: это не «наш аккаунт
-                # кончился» (тогда бы токены потратились), а «пул выдал мёртвый
-                # вход». Такие аккаунты считаем в общем счётчике (файл рабочей
-                # области — его видят все процессы воркера) и после
-                # MINIMAX_KARMAN_FRESH_FAIL_LIMIT подряд ставим общую паузу:
-                # бить по ручке десятками запросов подряд бессмысленно.
+                # кончился» (тогда бы токены потратились), а «баланс ноль».
+                #
+                # ⚠️ Такие аккаунты **не пустые**: панель показывает по ним
+                # «сегодня 400 очков, забрано» (status 3), а модель отвечает
+                # «insufficient balance (1008)». То есть очки на панели есть,
+                # а баланс уже ноль — панель про это не говорит (замер 16.11).
+                #
+                # Дальше по решению владельца 16.11: **следующий аккаунт**
+                # (повторный запрос), пауза между попытками — 10 секунд, и
+                # только **десять пустых подряд** означают «пул мёртв» → волна
+                # уходит платной страховке.
                 usage = details.get("usage") or {}
                 dry = last_reason == "quota_exhausted" and not int(usage.get("totalTokens") or 0)
                 if dry:
+                    _note_dead_account(current.karman_id)
                     dry_failures = _note_dry_failure()
-                    if dry_failures >= _fresh_fail_limit():
-                        until_ms = int(time.time() * 1000 + _no_points_ttl() * 1000)
-                        _write_shared_meta({META_DRY_FAILURES: 0, META_PAUSE_UNTIL: until_ms})
-                        last_detail = (
-                            "%s; %d аккаунтов подряд без очков — пауза, чтобы не долбить ручку"
-                            % (last_detail, dry_failures)
+                    limit = _dead_streak_limit()
+                    if dry_failures >= limit:
+                        _write_shared_meta(
+                            {
+                                "dry_failures": 0,
+                                META_POOL_DEAD_UNTIL: int(
+                                    time.time() * 1000 + _pool_dead_ttl() * 1000
+                                ),
+                            }
+                        )
+                        last_detail = "%s; %d аккаунтов подряд с нулевым балансом — пул мёртв" % (
+                            last_detail,
+                            dry_failures,
                         )
                         logger.warning(
-                            "minimax: %d аккаунтов подряд без очков — общая пауза %s с, "
-                            "дальше не долбим Кармана",
+                            "minimax: %d аккаунтов подряд с нулевым балансом — пул мёртв,"
+                            " волна уходит в платный движок-страховку",
                             dry_failures,
-                            int(_no_points_ttl()),
                         )
                         return {
                             "ok": False,
-                            "reason": last_reason,
+                            "reason": "pool_dead",
                             "detail": last_detail,
                             "tried_accounts": tried,
                         }
+                    # Пауза перед следующей попыткой — общая и короткая (10 с):
+                    # не долбить ручку и не ждать полчаса.
+                    until_ms = int(time.time() * 1000 + _no_points_ttl() * 1000)
+                    _write_shared_meta({META_PAUSE_UNTIL: until_ms})
                 logger.warning(
                     "minimax: аккаунт %s больше не работает (%s: %s) — берём следующий",
                     current.name,
@@ -1443,17 +1710,23 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
         # ── 2. Следующий аккаунт — у Кармана ──
         # Просим «любой свободный, не активированный сегодня»: конкретные
         # аккаунты мы не заказываем и о них не знаем (их учёт — его зона).
+        # Но **мёртвые** (баланс ноль) — исключаем: без этого Карман отдавал
+        # тот же id снова (живой факт 16.11: 69 → 70 → 71 подряд).
         try:
-            offer = karman_minimax.take_account(emails=known_emails)
+            offer = karman_minimax.take_account(
+                exclude=_dead_account_ids(),
+                emails=known_emails,
+            )
         except RuntimeError as exc:
             logger.warning("minimax: Карман не ответил (%s)", exc)
             try:
                 down_ttl = max(
-                    5.0, float(os.getenv(ENV_KARMAN_DOWN_TTL) or DEFAULT_KARMAN_DOWN_TTL)
+                    1.0, float(os.getenv(ENV_KARMAN_DOWN_TTL) or DEFAULT_KARMAN_DOWN_TTL)
                 )
             except ValueError:
                 down_ttl = DEFAULT_KARMAN_DOWN_TTL
-            _karman_down_until = time.monotonic() + down_ttl
+            # Пауза **общая** (файл рабочей области): её видят все форки.
+            _write_shared_meta({META_KARMAN_DOWN_UNTIL: int(time.time() * 1000 + down_ttl * 1000)})
             return {
                 "ok": False,
                 "reason": "karman_unavailable",
@@ -1474,17 +1747,19 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
             # Пауза: следующие батчи не должны долбить Кармана впустую.
             try:
                 empty_ttl = max(
-                    5.0, float(os.getenv(ENV_KARMAN_EMPTY_TTL) or DEFAULT_KARMAN_EMPTY_TTL)
+                    1.0, float(os.getenv(ENV_KARMAN_EMPTY_TTL) or DEFAULT_KARMAN_EMPTY_TTL)
                 )
             except ValueError:
                 empty_ttl = DEFAULT_KARMAN_EMPTY_TTL
-            _karman_down_until = time.monotonic() + empty_ttl
+            # Пауза **общая** и короткая (10 с): следующий батч попробует снова.
+            _write_shared_meta({META_KARMAN_DOWN_UNTIL: int(time.time() * 1000 + empty_ttl * 1000)})
             break
         if offer.why:
             logger.info(
                 "minimax: Карман выбрал аккаунт %s — %s", (offer.account or {}).get("id"), offer.why
             )
-        _karman_down_until = 0.0
+        # Карман ответил — снимаем общую паузу после сбоя связи.
+        _write_shared_meta({META_KARMAN_DOWN_UNTIL: 0})
         account_id = (offer.account or {}).get("id")
         account = None
         if account_id is not None and offer.has_tokens:

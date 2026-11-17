@@ -41,7 +41,7 @@ import logging
 import os
 from typing import Any, Dict, List, Sequence, Set
 
-from config.opencode import get_publish_timeout
+from config.opencode import get_publish_timeout_for_engine
 
 # ``post_lip`` переехал в utils (нужен и сборщику сводки — порядок срочного),
 # но импортируется сюда ради прежнего пути `modules.classifier.prepublish.post_lip`:
@@ -120,7 +120,7 @@ async def blocked_lips_before_publish(
     try:
         from config.classifier import (
             classifier_disabled,
-            get_headless_chunk_size,
+            get_chunk_size_for_engine,
             get_headless_regions_per_chunk,
             get_prepublish_min_candidates,
         )
@@ -176,11 +176,13 @@ async def blocked_lips_before_publish(
         run = headless.classify_posts(
             fresh,
             postulates=postulates,
-            chunk_size=get_headless_chunk_size(),
+            chunk_size=get_chunk_size_for_engine(),
             regions_per_chunk=get_headless_regions_per_chunk(),
             # Волна стоит в единственном слоте воркера: не ответил за короткий
             # потолок — идём по обычным фильтрам (fail-open, как при отказе чанка).
-            timeout=get_publish_timeout(),
+            # Потолок — по текущему движку: у MiniMax вызов это запуск
+            # агента-CLI (десятки секунд), общие 40 с его обрывали бы.
+            timeout=get_publish_timeout_for_engine(),
         )
         if run["failures"]:
             logger.error(

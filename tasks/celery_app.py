@@ -742,7 +742,7 @@ def classify_pending_posts(limit: int = 0):
     try:
         from config.classifier import (
             classifier_disabled,
-            get_headless_chunk_size,
+            get_chunk_size_for_engine,
             get_headless_regions_per_chunk,
             get_pending_max,
             get_region_allowlist,
@@ -786,7 +786,7 @@ def classify_pending_posts(limit: int = 0):
                 run = headless.classify_posts(
                     posts,
                     postulates=postulates,
-                    chunk_size=get_headless_chunk_size(),
+                    chunk_size=get_chunk_size_for_engine(),
                     regions_per_chunk=get_headless_regions_per_chunk(),
                 )
                 logger.info("classifier headless: %s", headless.summarize(run))

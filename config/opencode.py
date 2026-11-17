@@ -225,6 +225,28 @@ def get_publish_timeout() -> float:
         return 40.0
 
 
+def get_publish_timeout_for_engine() -> float:
+    """Потолок вызова на пути публикации — **под текущий движок**.
+
+    У Дипсика это HTTP-запрос: 20–30 с на ответ, потолок 40 с. У MiniMax вызов —
+    это **запуск агента-CLI**: отдельный процесс, который читает правилник и
+    пишет ответ по JSON. Такие вызовы идут десятки секунд, и общий потолок 40 с
+    обрывал их **прямо на волне** — то есть на главном пути (живой факт 16.11:
+    волна на 20–30 постов занимала 37 с).
+
+    Поэтому у MiniMax свой потолок (``MINIMAX_PUBLISH_TIMEOUT``, дефолт 90 с):
+    обрезанный по 40 с вызов — это потраченные деньги без вердикта, а вердикт
+    на пути публикации нужен больше, чем короткая пауза волны.
+    """
+    engine = (os.getenv("CLASSIFIER_ENGINE") or "").strip().lower()
+    if engine == "minimax":
+        try:
+            return max(10.0, float(os.getenv("MINIMAX_PUBLISH_TIMEOUT", "90")))
+        except ValueError:
+            return 90.0
+    return get_publish_timeout()
+
+
 def get_model_timeout() -> float:
     """Потолок **одной** модели в цепочке фолбэков, сек.
 

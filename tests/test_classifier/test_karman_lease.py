@@ -268,8 +268,9 @@ def test_match_lease_account_by_id_then_email(tmp_path):
 def _lease_env(monkeypatch):
     monkeypatch.setenv(km.ENV_API_URL, "https://karman.invalid/api/minimax")
     monkeypatch.setenv(km.ENV_TOKEN, "room-token")
-    # Пауза после сбоя связи — состояние процесса, сбрасываем между тестами.
-    monkeypatch.setattr(mx, "_karman_down_until", 0.0)
+    # Паузы (после сбоя связи и после пустого аккаунта) теперь **общие** и
+    # лежат в файле рабочей области — состояния процесса больше нет. Каждый
+    # тест берёт свой tmp_path, поэтому общая пауза между тестами не течёт.
 
 
 def _ok_call(content='{"verdicts": []}'):
@@ -492,10 +493,11 @@ def test_chat_skips_account_without_profile_and_takes_next(monkeypatch, tmp_path
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is True
     assert result["account"] == "acc5"
-    # Конкретные аккаунты мы не заказываем: ни exclude, ни id в запросе —
-    # только «дай любой свободный, не активированный сегодня».
-    assert asked[0]["exclude"] == []
-    assert asked[1]["exclude"] == []
+    # Исключение — уже с первого запроса: аккаунт 42 умер с нулевым балансом,
+    # и мы его больше **не просим** (живой факт 16.11: Карман отдавал 69 → 70 →
+    # 71 подряд, и каждый раз был тот же класс аккаунтов).
+    assert asked[0]["exclude"] == [42]
+    assert asked[1]["exclude"] == [42]
     # Наши почты по умолчанию НЕ фильтруются: выбор аккаунта — у Кармана.
     assert asked[0]["emails"] == []
     assert asked[1]["emails"] == []
@@ -1016,17 +1018,20 @@ def test_chat_rotates_to_next_account_when_login_expired(monkeypatch, tmp_path):
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is True
     assert result["karman_account_id"] == 68
-    # Конкретные аккаунты мы не заказываем: ни exclude, ни каких-либо id
-    # в запросе — только «дай любой свободный».
-    assert all("exclude" not in kwargs for kwargs in seen_excludes)
+    # Конкретные аккаунты мы не заказываем: в запросе — только «дай любой
+    # свободный» и exclude **мёртвых** (тех, что уже умирали с нулевым
+    # балансом). Пока мёртвых не было — exclude пустой.
+    assert seen_excludes
+    assert all(kwargs.get("exclude") == [] for kwargs in seen_excludes)
 
 
 def test_pool_is_not_burned_when_fresh_accounts_have_no_points(monkeypatch, tmp_path):
-    """Свежий аккаунт без очков — не бьём по ручке десятками запросов.
+    """Свежий аккаунт без очков — идём за следующим, а не долбим ручку.
 
     Живой факт 15.11: в полночь волна взяла 15 аккаунтов подряд, каждый отказал
-    сразу («insufficient balance»). Мы ничего про эти аккаунты не помним и
-    знать не должны (учёт — зона Кармана) — просто остановимся и подождём.
+    сразу («insufficient balance»). Решение владельца 16.11: пауза **короткая**
+    (10 секунд) и повторный запрос за аккаунтом; а передача волны платной
+    страховке — только после **десяти** пустых подряд.
     """
     _lease_env(monkeypatch)
     _account(tmp_path, "work", email="cur@example.com", karman_id=67)
@@ -1037,8 +1042,9 @@ def test_pool_is_not_burned_when_fresh_accounts_have_no_points(monkeypatch, tmp_
     )
     monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
     monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
-    monkeypatch.setattr(mx, "_fresh_fail_limit", lambda: 1)
-    monkeypatch.setattr(mx, "_no_points_ttl", lambda: 1800.0)
+    # Порог мёртвых — 1: чтобы проверить саму границу «после N пустых → Дипсик».
+    monkeypatch.setattr(mx, "_dead_streak_limit", lambda: 1)
+    monkeypatch.setattr(mx, "_no_points_ttl", lambda: 10.0)
 
     fresh = _offer(68, "b@example.com")
     fresh.access_token = "tok-2"
@@ -1051,7 +1057,7 @@ def test_pool_is_not_burned_when_fresh_accounts_have_no_points(monkeypatch, tmp_
     monkeypatch.setattr(km, "take_account", _take)
 
     # Наш текущий аккаунт отработал смену и кончился (токены потрачены — это не
-    # «пул без очков»), а свежий выданный умирает сразу, не потратив ни токена.
+    # «пустой»), а свежий выданный умирает сразу, не потратив ни токена.
     state = {"n": 0}
 
     def _run(account, **kwargs):
@@ -1072,32 +1078,31 @@ def test_pool_is_not_burned_when_fresh_accounts_have_no_points(monkeypatch, tmp_
 
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is False
-    assert result["reason"] == "quota_exhausted"
-    assert "ручк" in result["detail"]
+    # Один пустой аккаунт подряд (порог в тесте — 1) ⇒ пул мёртв ⇒ волна
+    # уходит платной страховке.
+    assert result["reason"] == "pool_dead"
     # Взяли ровно один свежий аккаунт — и остановились.
     assert len(taken) == 1
-    # Про этот аккаунт мы ничего не запоминаем: учёт — зона Кармана.
+    # Мёртвый аккаунт больше не просим: его id уходит в ``exclude``.
     meta = json.loads((tmp_path / "work" / "profile.json").read_text(encoding="utf-8"))
-    assert "empty_accounts" not in meta
+    assert 68 in (meta.get(mx.META_DEAD_IDS) or [])
 
-    # Следующий батч: пауза — к Карману не идём вовсе. Пауза ОБЩАЯ: она лежит
-    # в файле рабочей области, поэтому её видят и другие процессы воркера
-    # (живой факт 15.11: пауза в памяти процесса не сработала ни разу).
+    # Следующий батч: пул уже мёртв — к Карману не идём вовсе, волна уходит
+    # платной страховке целиком. И это **общее** состояние: оно лежит в файле
+    # рабочей области, поэтому видно и другим процессам воркера (живой факт
+    # 15.11: пауза в памяти процесса не сработала ни разу).
     taken.clear()
-    mx._karman_down_until = 0.0  # состояние процесса обнулено — общая пауза должна удержать
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is False
-    assert result["reason"] == "karman_unavailable"
+    assert result["reason"] == "pool_dead"
     assert taken == []
 
 
-def test_dry_failure_of_held_account_stops_the_pool(monkeypatch, tmp_path):
-    """Аккаунт, умерший без токенов, — тоже «пул без очков».
+def test_dead_account_is_not_requested_again(monkeypatch, tmp_path):
+    """Мёртвый аккаунт (баланс ноль) уходит в ``exclude`` — Карман его не повторит.
 
-    Живой факт 15.11: Карман отдавал аккаунты, которые умирали сразу
-    («insufficient balance»). Часть таких отказов приходила на аккаунт, взятый
-    ПРЕДЫДУЩИМ вызовом (лежащий в рабочей области) — счётчик жил внутри вызова
-    и их не видел. Теперь сухой отказ считается всегда, а пауза общая.
+    Живой факт 16.11: Карман отдавал 69 → 70 → 71 подряд, и у каждого баланс
+    был ноль — потому что мы просили «любой свободный» без оговорок.
     """
     _lease_env(monkeypatch)
     _account(tmp_path, "work", email="cur@example.com", karman_id=67)
@@ -1108,8 +1113,57 @@ def test_dry_failure_of_held_account_stops_the_pool(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
     monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
-    monkeypatch.setattr(mx, "_fresh_fail_limit", lambda: 1)
-    monkeypatch.setattr(mx, "_no_points_ttl", lambda: 1800.0)
+    monkeypatch.setattr(mx, "_dead_streak_limit", lambda: 99)
+    monkeypatch.setattr(mx, "_no_points_ttl", lambda: 10.0)
+
+    seen = []
+
+    def _take(**kw):
+        seen.append(dict(kw))
+        offer = _offer(68, "b@example.com")
+        offer.access_token = "tok-%d" % len(seen)
+        return offer
+
+    monkeypatch.setattr(km, "take_account", _take)
+    monkeypatch.setattr(
+        mx,
+        "run_classification",
+        lambda *a, **k: (
+            False,
+            "",
+            {"reason": "quota_exhausted", "detail": "insufficient balance (1008)"},
+        ),
+    )
+
+    # Первый вызов: текущий аккаунт умер сухо (без токенов) — пошли за другим.
+    result = mx.chat(system="S", user="U", posts=1)
+    assert result["ok"] is False
+    # Второй вызов: мёртвый id уже в exclude.
+    mx.chat(system="S", user="U", posts=1)
+    assert seen
+    assert 67 in seen[-1].get("exclude")
+
+
+def test_dry_failure_of_held_account_stops_the_pool(monkeypatch, tmp_path):
+    """Аккаунт, умерший без токенов, — «пустой», и это считается.
+
+    Живой факт 15.11: Карман отдавал аккаунты, которые умирали сразу
+    («insufficient balance»). Часть таких отказов приходила на аккаунт, взятый
+    ПРЕДЫДУЩИМ вызовом (лежащий в рабочей области) — счётчик жил внутри вызова
+    и их не видел. Теперь сухой отказ считается всегда, а его следствие —
+    короткая общая пауза и, при десяти подряд, передача волны платной страховке.
+    """
+    _lease_env(monkeypatch)
+    _account(tmp_path, "work", email="cur@example.com", karman_id=67)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(
+        mx, "claim_points", lambda acc: {"claim_result": 1, "day_no": 5, "points": 400}
+    )
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
+    monkeypatch.setattr(mx, "_dead_streak_limit", lambda: 1)
+    monkeypatch.setattr(mx, "_no_points_ttl", lambda: 10.0)
 
     taken = []
 
@@ -1130,12 +1184,39 @@ def test_dry_failure_of_held_account_stops_the_pool(monkeypatch, tmp_path):
 
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is False
-    assert result["reason"] == "quota_exhausted"
+    # Один пустой подряд при пороге 1 ⇒ пул мёртв.
+    assert result["reason"] == "pool_dead"
     # Ни одного нового аккаунта у Кармана не взяли: пул сухой — пауза сразу.
     assert taken == []
-    # Пауза лежит в файле рабочей области — её видят все процессы воркера.
+    # «Пул мёртв» — общее состояние в файле рабочей области: его видят все
+    # процессы воркера, и следующие чанки не жгут по аккаунту впустую.
     meta = json.loads((tmp_path / "work" / "profile.json").read_text(encoding="utf-8"))
-    assert int(meta[mx.META_PAUSE_UNTIL]) > 0
+    assert int(meta[mx.META_POOL_DEAD_UNTIL]) > 0
+
+
+def test_dead_streak_limit_is_ten_by_default(monkeypatch):
+    """Порог «пустых подряд» — десять (решение владельца 16.11).
+
+    Прежде порог был 3, а следствием — пауза на полчаса: из-за неё половина
+    трафика уходила в платный Дипсик (замер: 514 отказов движка за день).
+    """
+    monkeypatch.delenv(mx.ENV_DEAD_STREAK_LIMIT, raising=False)
+    assert mx._dead_streak_limit() == 10
+    monkeypatch.setenv(mx.ENV_DEAD_STREAK_LIMIT, "4")
+    assert mx._dead_streak_limit() == 4
+
+
+def test_pauses_are_short_by_default(monkeypatch):
+    """Все паузы — 10 секунд (решение владельца 16.11), а не получасовые."""
+    for name in (
+        mx.ENV_KARMAN_DOWN_TTL,
+        mx.ENV_KARMAN_EMPTY_TTL,
+        mx.ENV_KARMAN_NO_POINTS_TTL,
+    ):
+        monkeypatch.delenv(name, raising=False)
+    assert mx.DEFAULT_KARMAN_DOWN_TTL == 10
+    assert mx.DEFAULT_KARMAN_EMPTY_TTL == 10
+    assert mx.DEFAULT_KARMAN_NO_POINTS_TTL == 10
 
 
 def test_account_ran_out_of_points_is_not_a_dry_failure(monkeypatch, tmp_path):
@@ -1154,8 +1235,8 @@ def test_account_ran_out_of_points_is_not_a_dry_failure(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
     monkeypatch.setattr(km, "report_activation", lambda *a, **k: {})
-    monkeypatch.setattr(mx, "_fresh_fail_limit", lambda: 1)
-    monkeypatch.setattr(mx, "_no_points_ttl", lambda: 1800.0)
+    monkeypatch.setattr(mx, "_dead_streak_limit", lambda: 1)
+    monkeypatch.setattr(mx, "_no_points_ttl", lambda: 10.0)
 
     taken = []
     fresh = _offer(68, "b@example.com")

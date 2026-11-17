@@ -45,11 +45,14 @@ def test_disabled_keeps_source_and_calls_nothing(monkeypatch):
 def test_rewrite_passes_publish_timeout_budget(monkeypatch):
     """Волна даёт движку короткий потолок, а не общий (120 с).
 
-    Мерило — аргумент, который уходит в движок: под нагрузкой free-тира именно
-    он ограничивает простой единственного слота воркера.
+    Мерило — аргумент, который уходит в движок: под нагрузкой именно он
+    ограничивает простой единственного слота воркера.
+
+    Потолок переписывания — свой (``REWRITE_TIMEOUT``), а не общий
+    ``OPENCODE_PUBLISH_TIMEOUT``: у переписывания свой движок и свой бюджет.
     """
     monkeypatch.delenv("POST_REWRITE_ENABLED", raising=False)
-    monkeypatch.setenv("OPENCODE_PUBLISH_TIMEOUT", "17")
+    monkeypatch.setenv("REWRITE_TIMEOUT", "17")
     calls = []
     monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: calls.append(kw) or _ok(_long()))
 
@@ -168,7 +171,13 @@ def test_short_source_is_not_rewritten(monkeypatch, caplog):
 
 
 def test_limit_caps_paid_calls(monkeypatch):
-    """Платим только за верхушку порядка публикации."""
+    """Платим только за верхушку порядка публикации — и одним вызовом.
+
+    Вызов переписывания — самая дорогая операция на этом пути (у MiniMax это
+    запуск агента-CLI: ~16 000 токенов и десятки секунд), поэтому порция волны
+    уходит **одним** вызовом, а не по одному на пост (замер 16.11: 358 вызовов
+    в сутки, 85 % всех вызовов MiniMax).
+    """
     calls = []
     monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: calls.append(kw) or _ok(_long()))
 
@@ -177,8 +186,58 @@ def test_limit_caps_paid_calls(monkeypatch):
         post["id"] = i + 1
     stats = rewriter.rewrite_posts(posts, region="mi", limit=2)
 
-    assert len(calls) == 2
+    assert len(calls) == 1
+    assert stats.attempted == 2
+    # Ответ без меток в батче из двух постов не применяется ни к кому:
+    # пересказ одного поста не должен уехать в другой (подмена текста в ленте).
+    assert stats.rewritten == 0
+    assert stats.failed == 2
+
+
+def test_batch_rewrite_splits_blocks_by_marker(monkeypatch):
+    """Батч: ответ разбирается по меткам, каждый пост — свой пересказ."""
+    answer = (
+        "=== ПОСТ 1 ===\n"
+        "ЗАГОЛОВОК: Школа открылась\n"
+        "ТЕГ: образование\n"
+        "ТЕКСТ:\n" + _long("Первый пост переписан.") + "\n\n=== ПОСТ 2 ===\n"
+        "ЗАГОЛОВОК: Дорогу перекрыли\n"
+        "ТЕГ: дороги\n"
+        "ТЕКСТ:\n" + _long("Второй пост переписан.")
+    )
+    calls = []
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: calls.append(kw) or _ok(answer))
+
+    posts = [_post(), _post()]
+    for i, post in enumerate(posts):
+        post["id"] = i + 1
+    stats = rewriter.rewrite_posts(posts, region="mi")
+
+    assert len(calls) == 1
     assert stats.rewritten == 2
+    assert posts[0]["text"].startswith("Первый пост переписан.")
+    assert posts[1]["text"].startswith("Второй пост переписан.")
+    assert posts[0]["headline"] == "Школа открылась"
+    assert posts[1]["topic_tag"] == "#дороги"
+
+
+def test_batch_rewrite_keeps_post_without_its_block(monkeypatch):
+    """Блок потерялся — пост уходит с исходным текстом, остальные не страдают."""
+    answer = (
+        "=== ПОСТ 1 ===\n"
+        "ЗАГОЛОВОК: Школа открылась\n"
+        "ТЕГ: образование\n"
+        "ТЕКСТ:\n" + _long("Первый пост переписан.")
+    )
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: _ok(answer))
+
+    posts = [_post(), _post()]
+    source = posts[1]["text"]
+    stats = rewriter.rewrite_posts(posts, region="mi")
+
+    assert stats.rewritten == 1
+    assert stats.failed == 1
+    assert posts[1]["text"] == source
 
 
 def test_exception_inside_single_post_does_not_break_wave(monkeypatch):

@@ -37,13 +37,14 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
-from config.opencode import get_publish_timeout
 from config.post_rewrite import (
     get_max_chars,
     get_max_posts,
     get_min_chars,
     get_min_source_chars,
     get_model,
+    get_rewrite_engine,
+    get_rewrite_timeout,
     rewrite_enabled,
 )
 
@@ -86,6 +87,13 @@ SYSTEM_PROMPT = """Ты — редактор районной новостной
 - Не добавляй обобщающий абзац в конце («таким образом», «в целом», «итак»).
 - Пересказ не должен быть длиннее источника: меньше фактов — короче текст.
 - Верни ТОЛЬКО три части выше: без пояснений и без кавычек вокруг ответа.
+
+ПРИ НЕСКОЛЬКИХ ТЕКСТАХ СРАЗУ:
+- Каждый исходный текст отмечен строкой «=== ПОСТ N ===» (N — его номер).
+- Ответь столько же блоков, сколько текстов, и каждый блок начинай с той же
+  метки «=== ПОСТ N ===» — с тем же N, что у исходного текста.
+- Внутри блока — те же три части: ЗАГОЛОВОК, ТЕГ, ТЕКСТ.
+- Не пропускай блоки и не смешивай: тексты разные, и пересказ у каждого свой.
 """
 
 USER_TEMPLATE = """Район: {region}
@@ -94,6 +102,19 @@ USER_TEMPLATE = """Район: {region}
 Текст источника:
 {source}
 """
+
+#: Метка поста в батче: по ней ответ разбирается на блоки, а не по порядку.
+#: Номер в метке — это номер исходного текста, поэтому «перепутать» блоки
+#: нельзя: блок без метки просто не применится (fail-open).
+BATCH_MARKER = "=== ПОСТ {n} ==="
+
+#: Метка в ответе модели. Разбор терпим к вариантам оформления: ``=== ПОСТ 1 ===``,
+#: ``--- ПОСТ 1 ---``, ``ПОСТ 1:`` — важно лишь, чтобы читался номер.
+_BATCH_MARKER_RE = re.compile(
+    r"^[ \t]*(?:[-=*#]{0,4}[ \t]*)?(?:ПОСТ|POST)[ \t]*№?[ \t]*(\d+)[ \t]*[:：]?[ \t]*"
+    r"(?:[-=*#]{0,4}[ \t]*)?$",
+    re.IGNORECASE | re.MULTILINE,
+)
 # Метки, которыми модель иногда предваряет ответ, и markdown-обёртка.
 _LABEL_RE = re.compile(
     r"^\s*(?:готовый\s+текст|текст\s+поста|текст|пост|пересказ|новость)\s*:\s*",
@@ -162,10 +183,59 @@ def _chat_call(**kwargs: Any) -> Dict[str, Any]:
     Рубеж переключения один на все пути — ``modules.classifier.headless.chat``
     (``CLASSIFIER_ENGINE``). Вторая копия решения разошлась бы с первой молча:
     включили бы движок для классификатора и забыли для пересказа.
+
+    ⚠️ Для пересказа движок **свой** (``REWRITE_ENGINE``): пока переключатель
+    был один, переписывание ушло в MiniMax не по решению, а потому что так
+    стоял общий флаг, и забрало 85 % вызовов MiniMax (замер 16.11).
     """
     from modules.classifier.headless import chat
 
+    kwargs.setdefault("engine", get_rewrite_engine())
     return chat(**kwargs)
+
+
+def build_batch_prompt(sources: Sequence[str], *, region: str = "", theme: str = "") -> str:
+    """Пользовательская часть промпта для нескольких постов сразу.
+
+    Каждый текст отмечен своей меткой — по ней же разбирается ответ.
+    """
+    head = "Район: %s\nТема: %s\n\n" % ((region or "район").strip(), (theme or "новости").strip())
+    blocks = [
+        "%s\n%s" % (BATCH_MARKER.format(n=idx), str(source or "").strip())
+        for idx, source in enumerate(sources, start=1)
+    ]
+    return head + "\n\n".join(blocks)
+
+
+def split_batch_reply(raw: str, count: int) -> Dict[int, str]:
+    """Ответ на батч → блоки по номерам постов.
+
+    Разбор **по номеру в метке**, а не по порядку: иначе один лишний или
+    пропущенный блок сдвинул бы все пересказы и тексты разъехались бы по
+    постам. Блок без метки не применяется — пост уходит с исходным текстом.
+
+    Ответ вовсе без меток — это ответ на **один** пост (модель проигнорировала
+    формат). Одиночному посту он и достаётся; в батче из нескольких постов
+    ответ без меток **не применяется ни к кому**: иначе пересказ одного поста
+    мог бы уйти в другой пост, а это подмена чужого текста в ленте.
+    """
+    text = _strip_fence(raw or "")
+    marks = list(_BATCH_MARKER_RE.finditer(text))
+    if not marks:
+        if count == 1:
+            return {1: text}
+        return {}
+    blocks: Dict[int, str] = {}
+    for idx, mark in enumerate(marks):
+        start = mark.end()
+        end = marks[idx + 1].start() if idx + 1 < len(marks) else len(text)
+        try:
+            number = int(mark.group(1))
+        except (TypeError, ValueError):
+            continue
+        if 1 <= number <= count:
+            blocks[number] = text[start:end]
+    return blocks
 
 
 def build_prompt(source: str, *, region: str = "", theme: str = "") -> str:
@@ -354,45 +424,23 @@ def _looks_truncated(text: str) -> bool:
     return last.isalpha() or last.isdigit()
 
 
-def rewrite_post(
+def _apply_rewrite(
     post: Dict[str, Any],
+    answer: str,
     *,
-    region: str = "",
-    theme: str = "",
-    stats: Optional[RewriteStats] = None,
+    stats: RewriteStats,
+    finish: str = "",
 ) -> bool:
-    """Переписать текст одного поста на месте. Возвращает True при успехе."""
-    stats = stats if stats is not None else RewriteStats()
+    """Применить пересказ к посту. ``False`` — пост уходит с исходным текстом.
+
+    Общая часть для одиночного вызова и для батча: правила проверки одни и те же
+    (обрыв, длина, форма) — различается только способ добычи ответа.
+    """
     source = str(post.get("text") or "")
-    stats.attempted += 1
-
-    result = _chat_call(
-        system=SYSTEM_PROMPT,
-        user=build_prompt(source, region=region, theme=theme),
-        temperature=0.3,
-        model=get_model() or None,
-        timeout=get_publish_timeout(),
-        label="post_rewrite",
-    )
-    usage = result.get("usage") or {}
-    if isinstance(usage, dict):
-        try:
-            stats.tokens += int(usage.get("total_tokens") or 0)
-        except (TypeError, ValueError):
-            pass
-    model = str(result.get("model") or "")
-    if model and model not in stats.models:
-        stats.models.append(model)
-
-    if not result.get("ok"):
-        stats.failed += 1
-        stats.reasons.append(str(result.get("reason") or "engine_failed"))
-        return False
-
-    headline_raw, tag_raw, body_raw = split_reply(str(result.get("content") or ""))
+    headline_raw, tag_raw, body_raw = split_reply(answer)
     cleaned = clean_rewrite(body_raw)
 
-    if str(result.get("finish") or "").lower() == "length" or _looks_truncated(cleaned):
+    if str(finish or "").lower() == "length" or _looks_truncated(cleaned):
         # Ответ оборван — лимитом токенов модели или её собственным обрывом.
         # Публиковать половину предложения хуже, чем исходный текст: живой
         # прогон 21.10 дал «…место завалено грудо» (775 знаков, ровно обрыв),
@@ -431,6 +479,107 @@ def rewrite_post(
     return True
 
 
+def _note_call(result: Dict[str, Any], stats: RewriteStats) -> None:
+    """Учесть расход и модель одного вызова."""
+    usage = result.get("usage") or {}
+    if isinstance(usage, dict):
+        try:
+            stats.tokens += int(usage.get("total_tokens") or 0)
+        except (TypeError, ValueError):
+            pass
+    model = str(result.get("model") or "")
+    if model and model not in stats.models:
+        stats.models.append(model)
+
+
+def rewrite_batch(
+    posts: Sequence[Dict[str, Any]],
+    *,
+    region: str = "",
+    theme: str = "",
+    stats: Optional[RewriteStats] = None,
+) -> int:
+    """Переписать несколько постов **одним** вызовом. Возвращает число успешных.
+
+    Зачем батч: вызов — недешёвая операция (у MiniMax это запуск агента-CLI:
+    ~16 000 токенов и десятки секунд), а переписываемых постов в волну — до
+    двух. Один вызов на два поста вместо двух вызовов — вдвое меньше расхода
+    пула и вдвое меньше времени в единственном слоте воркера.
+
+    Разбор ответа — **по номеру поста в метке** (``=== ПОСТ N ===``), а не по
+    порядку: один пропущенный блок не должен сдвинуть остальные пересказы.
+    Пост без блока уходит с исходным текстом (fail-open).
+    """
+    stats = stats if stats is not None else RewriteStats()
+    items = [p for p in posts if isinstance(p, dict)]
+    if not items:
+        return 0
+    stats.attempted += len(items)
+
+    sources = [str(p.get("text") or "") for p in items]
+    result = _chat_call(
+        system=SYSTEM_PROMPT,
+        user=build_batch_prompt(sources, region=region, theme=theme),
+        temperature=0.3,
+        model=get_model() or None,
+        timeout=get_rewrite_timeout(),
+        label="post_rewrite",
+        posts=len(items),
+    )
+    _note_call(result, stats)
+    if not result.get("ok"):
+        reason = str(result.get("reason") or "engine_failed")
+        stats.failed += len(items)
+        stats.reasons.append(reason)
+        return 0
+
+    blocks = split_batch_reply(str(result.get("content") or ""), len(items))
+    finish = str(result.get("finish") or "")
+    done = 0
+    for idx, post in enumerate(items, start=1):
+        block = blocks.get(idx)
+        if not block:
+            # Блок не пришёл (модель пропустила или перепутала номер) —
+            # пост уходит с исходным текстом, остальные пересказы не страдают.
+            stats.failed += 1
+            stats.reasons.append("no_block")
+            continue
+        if _apply_rewrite(post, block, stats=stats, finish=finish):
+            done += 1
+    return done
+
+
+def rewrite_post(
+    post: Dict[str, Any],
+    *,
+    region: str = "",
+    theme: str = "",
+    stats: Optional[RewriteStats] = None,
+) -> bool:
+    """Переписать текст одного поста на месте. Возвращает True при успехе."""
+    stats = stats if stats is not None else RewriteStats()
+    source = str(post.get("text") or "")
+    stats.attempted += 1
+
+    result = _chat_call(
+        system=SYSTEM_PROMPT,
+        user=build_prompt(source, region=region, theme=theme),
+        temperature=0.3,
+        model=get_model() or None,
+        timeout=get_rewrite_timeout(),
+        label="post_rewrite",
+        posts=1,
+    )
+    _note_call(result, stats)
+
+    if not result.get("ok"):
+        stats.failed += 1
+        stats.reasons.append(str(result.get("reason") or "engine_failed"))
+        return False
+
+    return _apply_rewrite(post, str(result.get("content") or ""), stats=stats)
+
+
 def rewrite_posts(
     posts: Sequence[Dict[str, Any]],
     *,
@@ -457,6 +606,7 @@ def rewrite_posts(
     max_posts = limit if limit is not None else get_max_posts()
     max_posts = max(0, int(max_posts))
 
+    eligible: List[Dict[str, Any]] = []
     for post in list(posts)[:max_posts]:
         if not isinstance(post, dict):
             continue
@@ -466,12 +616,17 @@ def rewrite_posts(
             # источника только добавит воды.
             stats.skipped_short += 1
             continue
-        try:
-            rewrite_post(post, region=region, theme=theme, stats=stats)
-        except Exception as e:  # noqa: BLE001 — fail-open, волна не стоит
-            stats.failed += 1
-            stats.reasons.append(f"error:{e.__class__.__name__}")
-            logger.warning("post rewrite: сбой на посте — оставляю исходник", exc_info=True)
+        eligible.append(post)
+
+    # Один вызов на всю порцию: вызов — самая дорогая операция на этом пути,
+    # а постов в волну немного (потолок POST_REWRITE_MAX_POSTS=2). По одному
+    # вызову на пост мы сжигали 85 % вызовов MiniMax (замер 16.11).
+    try:
+        rewrite_batch(eligible, region=region, theme=theme, stats=stats)
+    except Exception as e:  # noqa: BLE001 — fail-open, волна не стоит
+        stats.failed += len(eligible)
+        stats.reasons.append(f"error:{e.__class__.__name__}")
+        logger.warning("post rewrite: сбой на батче — оставляю исходники", exc_info=True)
 
     if stats.attempted or stats.skipped_short:
         logger.info(
