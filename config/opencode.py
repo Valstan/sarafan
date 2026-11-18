@@ -225,7 +225,7 @@ def get_publish_timeout() -> float:
         return 40.0
 
 
-def get_publish_timeout_for_engine() -> float:
+def get_publish_timeout_for_engine(engine: str = "") -> float:
     """Потолок вызова на пути публикации — **под текущий движок**.
 
     У Дипсика это HTTP-запрос: 20–30 с на ответ, потолок 40 с. У MiniMax вызов —
@@ -237,9 +237,16 @@ def get_publish_timeout_for_engine() -> float:
     потолок MiniMax — 180 с: обрезанный по 90 с вызов — это 30 000 токенов и
     минута слота воркера **без вердикта**, то есть чистый расход. Лучше дождаться
     ответа, чем заплатить и не получить.
+
+    ``engine`` — явный движок. **Нужен там, где движок свой, а не общий:**
+    переписывание постов ходит через ``REWRITE_ENGINE`` (с 18.11 — MiniMax), а
+    потолок по умолчанию смотрел бы на ``CLASSIFIER_ENGINE`` и выдал бы MiniMax
+    40 с — то есть обрыв вызова прямо на волне, потраченные токены без
+    пересказа. Без явного аргумента поведение прежнее: движок берётся из
+    ``CLASSIFIER_ENGINE``.
     """
-    engine = (os.getenv("CLASSIFIER_ENGINE") or "").strip().lower()
-    if engine == "minimax":
+    name = (engine or os.getenv("CLASSIFIER_ENGINE") or "").strip().lower()
+    if name == "minimax":
         try:
             return max(10.0, float(os.getenv("MINIMAX_PUBLISH_TIMEOUT", "180")))
         except ValueError:

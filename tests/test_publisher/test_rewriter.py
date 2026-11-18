@@ -52,6 +52,7 @@ def test_rewrite_passes_publish_timeout_budget(monkeypatch):
     ``OPENCODE_PUBLISH_TIMEOUT``: у переписывания свой движок и свой бюджет.
     """
     monkeypatch.delenv("POST_REWRITE_ENABLED", raising=False)
+    monkeypatch.setenv("REWRITE_ENGINE", "deepseek")
     monkeypatch.setenv("REWRITE_TIMEOUT", "17")
     calls = []
     monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: calls.append(kw) or _ok(_long()))
@@ -59,6 +60,53 @@ def test_rewrite_passes_publish_timeout_budget(monkeypatch):
     rewriter.rewrite_posts([_post()], region="mi", theme="новости")
 
     assert calls and calls[0]["timeout"] == 17.0
+
+
+def test_rewrite_on_minimax_takes_publish_timeout(monkeypatch):
+    """На MiniMax потолок переписывания — **пути публикации движка** (180 с).
+
+    Вызов MiniMax — запуск агента-CLI: он идёт десятки секунд прямо на волне
+    (замер 17.11: 45–102 с). Общий 40 с обрывал бы его на главном пути —
+    потраченные токены без пересказа. Поэтому у MiniMax потолок берётся из
+    ``MINIMAX_PUBLISH_TIMEOUT`` (решение владельца 18.11: переписывание тоже
+    ушло на MiniMax).
+    """
+    from config.opencode import get_publish_timeout_for_engine
+
+    monkeypatch.delenv("POST_REWRITE_ENABLED", raising=False)
+    monkeypatch.setenv("REWRITE_ENGINE", "minimax")
+    monkeypatch.setenv("MINIMAX_PUBLISH_TIMEOUT", "180")
+    calls = []
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: calls.append(kw) or _ok(_long()))
+
+    rewriter.rewrite_posts([_post()], region="mi", theme="новости")
+
+    # Потолок MiniMax — из пути публикации **этого** движка, а не из
+    # CLASSIFIER_ENGINE: без явного движка здесь был бы 40 с (общий HTTP-потолок
+    # Дипсика) — обрыв вызова прямо на волне, потраченные токены без пересказа.
+    assert calls and calls[0]["timeout"] == 180.0
+    assert get_publish_timeout_for_engine("minimax") == 180.0
+    assert get_publish_timeout_for_engine() == 40.0  # без CLASSIFIER_ENGINE — Дипсик
+
+
+def test_default_rewrite_engine_is_minimax(monkeypatch):
+    """Весь нейро-трафик — на MiniMax (решение владельца 18.11).
+
+    Платный Дипсик остаётся страховкой на случай отказа MiniMax, а не штатным
+    движком переписывания.
+    """
+    from config.post_rewrite import get_rewrite_engine
+
+    monkeypatch.delenv("REWRITE_ENGINE", raising=False)
+    assert get_rewrite_engine() == "minimax"
+
+
+def test_rewrite_engine_env_overrides_default(monkeypatch):
+    """Откат без деплоя: ``REWRITE_ENGINE=deepseek`` возвращает платный движок."""
+    from config.post_rewrite import get_rewrite_engine
+
+    monkeypatch.setenv("REWRITE_ENGINE", "deepseek")
+    assert get_rewrite_engine() == "deepseek"
 
 
 def test_rewrite_replaces_text_and_keeps_original(monkeypatch):
