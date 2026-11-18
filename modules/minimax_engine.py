@@ -229,10 +229,54 @@ DEFAULT_REPORT_ACTIVATION = "0"
 #: в Кармане. По почве аккаунт, выданный Карманом, узнаётся у нас.
 PROFILE_META_NAME = "profile.json"
 #: Задача, которую CLI получает вместе с файлом с постами.
+#:
+#: ⚠️ **Задача — часть контракта вызова, и она разная для разных потоков.**
+#: Живой факт 18.11: с одним и тем же заданием «вынеси вердикты» переписывание
+#: постов получало от MiniMax ответ **вердиктами классификатора**
+#: (``{"verdicts": [{"lip": "ПОСТ 1", "theme": …, "action": …}]}``) вместо
+#: пересказа: 14 отказов в сутки, каждый закрывался платным Дипсиком. Причина
+#: в том, что агенту говорили «вынеси вердикты» даже там, где просили переписать
+#: текст: задание и системный промпт противоречили друг другу, и модель
+#: выбирала схему, к которой была приучена.
 TASK_TEXT = (
     "Вынеси вердикты по постам из прикреплённого файла. "
     "Ответ — только JSON по схеме из системного промпта, без пояснений."
 )
+#: Переписывание и сборник: та же форма (посты файлом), но задание — про тексты,
+#: а не про вердикты.
+TASK_TEXT_REWRITE = (
+    "Обработай тексты постов из прикреплённого файла. "
+    "Ответ — строго в формате из системного промпта, без пояснений."
+)
+#: Конвейер сайтов: один пост на файл, ответ — JSON по схеме системного промпта.
+TASK_TEXT_CONVEYOR = (
+    "Обработай пост из прикреплённого файла. "
+    "Ответ — только JSON по схеме из системного промпта, без пояснений."
+)
+
+#: Задача по потоку: метка из журнала вызовов → текст задания для CLI.
+#: Классификация сохраняет прежнее задание (проверено на живых волнах), остальные
+#: потоки получают своё — иначе модель отвечает «по привычке», а не по задаче.
+TASK_BY_LABEL = {
+    "headless": TASK_TEXT,
+    "post_rewrite": TASK_TEXT_REWRITE,
+    "daily_digest": TASK_TEXT_REWRITE,
+    "conveyor": TASK_TEXT_CONVEYOR,
+}
+
+
+def task_text_for(label: str = "", explicit: str = "") -> str:
+    """Текст задания для CLI: явный > по метке потока > дефолт (классификация).
+
+    Метка потока уже ходит с каждым вызовом (``label=`` в журнале расхода), так
+    что правило «задание соответствует потоку» живёт в одном месте — здесь, а
+    не по одному вызову в каждом потоке.
+    """
+    text = (explicit or "").strip()
+    if text:
+        return text
+    return TASK_BY_LABEL.get((label or "").strip().lower(), TASK_TEXT)
+
 
 #: OAuth-эндпоинт MiniMax Code: обновление access-токена по refresh-токену.
 OAUTH_TOKEN_URL = "https://account.minimax.io/oauth2/token"
@@ -878,11 +922,16 @@ def run_classification(
     system: str,
     user: str,
     timeout: Optional[float] = None,
+    task: str = "",
 ) -> Tuple[bool, str, Dict[str, Any]]:
     """Один вызов MiniMax Code: ``(ok, текст ответа, детали прогона)``.
 
     Ответ приходит JSON-объектом в ``exec.result``; в ``content`` отдаём
     ``result`` — это и есть JSON вердиктов, который ждёт ``parse_chunk_response``.
+
+    ``task`` — задание агенту (что делать с файлом). Пустое = прежнее задание
+    классификатора; для переписывания и конвейера задание своё (см.
+    ``task_text_for``) — иначе модель отвечает вердиктами вместо пересказа.
     """
     cli = os.getenv(ENV_CLI) or DEFAULT_CLI
     # which() возвращает путь С расширением (mcode.cmd на Windows) — без него
@@ -953,7 +1002,7 @@ def run_classification(
         if model:
             cmd += ["--model", model]
         cmd += ["--file", str(posts_file)]
-        cmd.append(TASK_TEXT)
+        cmd.append((task or "").strip() or TASK_TEXT)
 
         started = time.monotonic()
         proc = subprocess.run(
@@ -1132,6 +1181,7 @@ def _chat_local(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any]
             system=system,
             user=user,
             timeout=kwargs.get("timeout"),
+            task=task_text_for(str(kwargs.get("label") or ""), str(kwargs.get("task") or "")),
         )
         if ok:
             record_usage(
@@ -1657,6 +1707,9 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                     system=system,
                     user=user,
                     timeout=kwargs.get("timeout"),
+                    task=task_text_for(
+                        str(kwargs.get("label") or ""), str(kwargs.get("task") or "")
+                    ),
                 )
                 if ok:
                     record_usage(

@@ -354,3 +354,47 @@ def test_chat_without_accounts(monkeypatch, tmp_path):
     result = mx.chat(system="S", user="U")
     assert result["ok"] is False
     assert result["reason"] == "no_accounts"
+
+
+def test_task_text_follows_the_flow():
+    """Задание агенту — по потоку, а не одно на всех.
+
+    Живой факт 18.11: с заданием «вынеси вердикты» переписывание постов
+    получало от модели ответ **вердиктами классификатора** вместо пересказа
+    (14 отказов в сутки, каждый закрывался платным Дипсиком). Задание и
+    системный промпт противоречили друг другу, и модель выбирала схему, к
+    которой была приучена.
+    """
+    # Классификация — прежнее задание (проверено на живых волнах).
+    assert mx.task_text_for("headless") == mx.TASK_TEXT
+    # Переписывание и сборник — про тексты, а не про вердикты.
+    assert mx.task_text_for("post_rewrite") == mx.TASK_TEXT_REWRITE
+    assert mx.task_text_for("daily_digest") == mx.TASK_TEXT_REWRITE
+    assert "вердикт" not in mx.task_text_for("post_rewrite").lower()
+    # Конвейер — свой (один пост, JSON по схеме).
+    assert mx.task_text_for("conveyor") == mx.TASK_TEXT_CONVEYOR
+    # Неизвестная метка и пустая — дефолт (классификация), а не пустая команда.
+    assert mx.task_text_for("") == mx.TASK_TEXT
+    assert mx.task_text_for("что-то новое") == mx.TASK_TEXT
+    # Явное задание важнее метки.
+    assert mx.task_text_for("headless", "своё задание") == "своё задание"
+
+
+def test_chat_passes_flow_task_to_cli(monkeypatch, tmp_path):
+    """Вызов движка отдаёт CLI задание своего потока, а не чужое."""
+    _account(tmp_path, "acc1")
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: PANEL_CLAIMABLE_TODAY)
+    monkeypatch.setattr(mx, "_ensure_points", lambda acc: True)
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+
+    seen = {}
+
+    def _fake_run(account, **kw):
+        seen.update(kw)
+        return True, json.dumps({"verdicts": []}), {"model": "MiniMax-M3.1-Flash"}
+
+    monkeypatch.setattr(mx, "run_classification", _fake_run)
+    mx.chat(system="S", user="U", label="post_rewrite")
+
+    assert seen["task"] == mx.TASK_TEXT_REWRITE

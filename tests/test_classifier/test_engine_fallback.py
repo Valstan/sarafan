@@ -254,3 +254,37 @@ def test_publish_timeout_is_per_engine(monkeypatch):
 
     monkeypatch.setenv("MINIMAX_PUBLISH_TIMEOUT", "150")
     assert get_publish_timeout_for_engine() == 150.0
+
+
+def test_task_reaches_minimax_but_never_deepseek(monkeypatch):
+    """Задание агенту MiniMax доходит до движка, а платный Дипсик его не видит.
+
+    Задание — часть контракта вызова MiniMax (по потоку: классификация,
+    переписывание, конвейер). Платный Дипсик такого аргумента не знает: если
+    задание протечёт в его запрос, он либо сломается, либо (что хуже) уйдёт в
+    тело запроса.
+    """
+    monkeypatch.setenv("CLASSIFIER_ENGINE", "minimax")
+    monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "1")
+
+    minimax_calls = []
+    deepseek_calls = []
+
+    import modules.minimax_engine as mx
+
+    def _minimax(**kwargs):
+        minimax_calls.append(kwargs)
+        return {"ok": False, "reason": "engine_failed", "detail": "упал"}
+
+    def _deepseek(**kwargs):
+        deepseek_calls.append(kwargs)
+        return {"ok": True, "content": "{}", "model": "deepseek-flash"}
+
+    monkeypatch.setattr(mx, "chat", _minimax)
+    monkeypatch.setattr(headless, "_deepseek_chat", _deepseek)
+
+    headless.chat(system="S", user="U", label="post_rewrite", task="своё задание")
+
+    assert minimax_calls and minimax_calls[0]["task"] == "своё задание"
+    assert deepseek_calls, "отказ MiniMax должен уйти в платную страховку"
+    assert "task" not in deepseek_calls[0]
