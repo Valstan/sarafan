@@ -93,6 +93,11 @@ def chat(*, engine: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
     # такой сигнатуры нет, поэтому он забирается здесь, а в тело запроса не
     # идёт. В журнал ``neural_usage`` он попадает как объём потока.
     posts = int(kwargs.pop("posts", 0) or 0)
+    # Задание агенту MiniMax: по потоку (классификация / переписывание / конвейер).
+    # Классификатору своё задание не нужно — там дефолтное, по классификации.
+    # Из kwargs убираем: платный Дипсик такого аргумента не знает, а задание
+    # для него — лишнее.
+    task = str(kwargs.pop("task", "") or "")
 
     # MiniMax Code — второй контур (ADR-0017). Пул аккаунтов с ежедневными
     # очками чекина; когда очки кончились у всех — это НЕ поломка движка,
@@ -102,7 +107,7 @@ def chat(*, engine: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
     if name == "minimax":
         from modules.minimax_engine import chat as _minimax_chat
 
-        result = _minimax_chat(posts=posts, **kwargs)
+        result = _minimax_chat(posts=posts, task=task, **kwargs)
         if result.get("ok"):
             engine_guard.note_result(True)
             return result
