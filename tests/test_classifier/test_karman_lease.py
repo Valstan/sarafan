@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import json
+import time
 from pathlib import Path
 
 from modules import karman_minimax as km
@@ -1364,3 +1365,72 @@ def test_chat_without_lease_uses_local_pool(monkeypatch, tmp_path):
     result = mx.chat(system="S", user="U", posts=1)
     assert result["ok"] is True
     assert result["account"] == "acc5"
+
+
+# --- залипание в pool_dead: контур обязан оживать сам ---------------------------
+
+
+def test_silence_deadline_expires_and_pool_recovers(monkeypatch, tmp_path):
+    """Молчание не должно держать контур мёртвым навсегда.
+
+    Живой факт 18.11: молчание 35 723 с (10 часов), у Кармана при этом **111
+    свободных аккаунтов** — а движок не спросил ни разу. Причина: отметку
+    «молчит» чистит только успех, а успех невозможен, если не пробовать.
+    """
+    _lease_env(monkeypatch)
+    _account(
+        tmp_path,
+        "acc5",
+        email="54@id45d.myjino.ru",
+        karman_id=67,
+        leased_day=km.moscow_today(),
+    )
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    # Панель аккаунта недоступна — как на проде 18.11 (401). Значит, очков нет,
+    # и единственный путь — спросить следующий аккаунт у Кармана.
+    monkeypatch.setattr(mx, "signin_panel", lambda acc, **kw: None)
+    monkeypatch.setattr(mx, "run_classification", _ok_call())
+    monkeypatch.setattr(km, "report_activation", lambda account_id, **kwargs: {})
+
+    # Отметка молчания старше и рубежа, и срока страховки.
+    silent_since = int(time.time() * 1000) - int(
+        (mx._dead_after_sec() + mx._retry_after_sec() + 60) * 1000
+    )
+    mx._write_shared_meta({mx.META_DOWN_SINCE: silent_since})
+
+    taken = []
+    monkeypatch.setattr(km, "take_account", lambda **kw: taken.append(kw) or _offer())
+
+    result = mx.chat(system="S", user="U", posts=1)
+
+    assert taken, "после срока страховки мы должны снова спросить аккаунт у Кармана"
+    assert result["ok"] is False
+    assert result["reason"] == "accounts_exhausted"
+
+
+def test_silence_within_retry_window_keeps_safety_net(monkeypatch, tmp_path):
+    """В пределах срока страховки — волна идёт платному Дипсику, Кармана не долбим."""
+    _lease_env(monkeypatch)
+    _account(
+        tmp_path,
+        "acc5",
+        email="54@id45d.myjino.ru",
+        karman_id=67,
+        leased_day=km.moscow_today(),
+    )
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+
+    silent_since = int(time.time() * 1000) - int((mx._dead_after_sec() + 30) * 1000)
+    mx._write_shared_meta({mx.META_DOWN_SINCE: silent_since})
+
+    def _never(*a, **k):
+        raise AssertionError("к Карману идти нельзя — держим страховку")
+
+    monkeypatch.setattr(km, "take_account", _never)
+
+    result = mx.chat(system="S", user="U", posts=1)
+
+    assert result["ok"] is False
+    assert result["reason"] == "pool_dead"
