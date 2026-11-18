@@ -20,6 +20,8 @@ Env vars:
   REWRITE_TIMEOUT=40            # потолок одного вызова, сек (для MiniMax —
                                 # см. get_rewrite_timeout: берётся потолок пути
                                 # публикации движка, 180 с)
+  REWRITE_PAID_TOPUP=1          # добивать ли пропущенный пост платным Дипсиком
+                                # (страховка по решению владельца 17.11)
 """
 
 from __future__ import annotations
@@ -137,8 +139,17 @@ def get_rewrite_timeout() -> float:
     иначе потолок смотрел бы на ``CLASSIFIER_ENGINE`` и выдал MiniMax 40 с —
     то есть обрыв вызова прямо на волне, потраченные токены без пересказа.
     """
-    engine = get_rewrite_engine()
-    if engine == "minimax":
+    return get_rewrite_timeout_for_engine(get_rewrite_engine())
+
+
+def get_rewrite_timeout_for_engine(engine: str) -> float:
+    """Потолок вызова переписывания **для конкретного движка**, сек.
+
+    Нужен там, где движок выбирается по ходу: страховочный вызов платным
+    Дипсиком не должен получать потолок MiniMax (180 с) — Дипсик отвечает за
+    секунды, а лишние 140 с стоят волне (слот воркера на боксе один).
+    """
+    if (engine or "").strip().lower() == "minimax":
         from config.opencode import get_publish_timeout_for_engine
 
         return get_publish_timeout_for_engine("minimax")
@@ -146,3 +157,25 @@ def get_rewrite_timeout() -> float:
         return max(5.0, float(os.getenv("REWRITE_TIMEOUT") or DEFAULT_REWRITE_TIMEOUT))
     except ValueError:
         return DEFAULT_REWRITE_TIMEOUT
+
+
+#: Env-переключатель страховки: добивать ли пропущенный пост платным Дипсиком.
+ENV_PAID_TOPUP = "REWRITE_PAID_TOPUP"
+
+
+def paid_topup_enabled() -> bool:
+    """Разрешено ли добирать пропущенный пост платным Дипсиком.
+
+    Решение владельца 17.11: «Дипсик вернуть на подстраховку, если Минимакс
+    проморгал или не смог — то отдавать пропущенное Дипсику». «Проморгал» здесь
+    означает и «ответ пришёл не по форме»: блок поста не пришёл — пересказа нет.
+
+    Отключается двумя рубильниками: ``REWRITE_PAID_TOPUP=0`` — только этот путь,
+    ``CLASSIFIER_PAID_FALLBACK=0`` — вся платная страховка разом (счёт закрыт).
+    """
+    raw = (os.getenv(ENV_PAID_TOPUP) or "1").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    from config.opencode import paid_fallback_enabled
+
+    return paid_fallback_enabled()

@@ -227,7 +227,13 @@ def test_limit_caps_paid_calls(monkeypatch):
     в сутки, 85 % всех вызовов MiniMax).
     """
     calls = []
-    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: calls.append(kw) or _ok(_long()))
+    answer = (
+        "=== ПОСТ 1 ===\nЗАГОЛОВОК: Первое\nТЕГ: новости\nТЕКСТ:\n"
+        + _long("Первый переписан.")
+        + "\n\n=== ПОСТ 2 ===\nЗАГОЛОВОК: Второе\nТЕГ: новости\nТЕКСТ:\n"
+        + _long("Второй переписан.")
+    )
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: calls.append(kw) or _ok(answer))
 
     posts = [_post() for _ in range(5)]
     for i, post in enumerate(posts):
@@ -236,10 +242,8 @@ def test_limit_caps_paid_calls(monkeypatch):
 
     assert len(calls) == 1
     assert stats.attempted == 2
-    # Ответ без меток в батче из двух постов не применяется ни к кому:
-    # пересказ одного поста не должен уехать в другой (подмена текста в ленте).
-    assert stats.rewritten == 0
-    assert stats.failed == 2
+    assert stats.rewritten == 2
+    assert stats.failed == 0
 
 
 def test_batch_rewrite_splits_blocks_by_marker(monkeypatch):
@@ -270,22 +274,235 @@ def test_batch_rewrite_splits_blocks_by_marker(monkeypatch):
 
 
 def test_batch_rewrite_keeps_post_without_its_block(monkeypatch):
-    """Блок потерялся — пост уходит с исходным текстом, остальные не страдают."""
+    """Блок потерялся, а страховка выключена — пост уходит с исходным текстом.
+
+    Ответ без меток в батче из двух постов не применяется ни к кому: пересказ
+    одного поста не должен уехать в другой (подмена текста в ленте). Добить
+    пропущенное может только страховка (см. следующий тест), а когда она
+    выключена — остаётся fail-open.
+    """
     answer = (
         "=== ПОСТ 1 ===\n"
         "ЗАГОЛОВОК: Школа открылась\n"
         "ТЕГ: образование\n"
         "ТЕКСТ:\n" + _long("Первый пост переписан.")
     )
-    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: _ok(answer))
+    calls = []
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: calls.append(kw) or _ok(answer))
+    monkeypatch.setattr(rewriter, "paid_topup_enabled", lambda: False)
 
     posts = [_post(), _post()]
     source = posts[1]["text"]
     stats = rewriter.rewrite_posts(posts, region="mi")
 
+    assert len(calls) == 1
     assert stats.rewritten == 1
     assert stats.failed == 1
+    assert "no_block" in stats.reasons
     assert posts[1]["text"] == source
+
+
+def test_batch_rewrite_accepts_json_answer(monkeypatch):
+    """Агент ответил JSON-массивом — разбор берёт блоки по номеру поста.
+
+    Живой факт 18.11: на постах с упоминаниями и ссылкой MiniMax вместо меток
+    ``=== ПОСТ N ===`` отдаёт JSON, где номер поста указан полем ``post``.
+    Разбор меток его не видел, и оба поста батча уходили с исходным текстом
+    (отказ ``no_block``).
+    """
+    answer = (
+        "```json\n"
+        "[\n"
+        '  {"post": 1, "ЗАГОЛОВОК": "В ДК открылся новый зал", "ТЕГ": "мероприятие", '
+        '"ТЕКСТ": "%s"},\n'
+        '  {"post": 2, "ЗАГОЛОВОК": "Дорогу перекрыли", "ТЕГ": "дороги", "ТЕКСТ": "%s"}\n'
+        "]\n"
+        "```"
+    ) % (_long("Первый пост переписан."), _long("Второй пост переписан."))
+    calls = []
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: calls.append(kw) or _ok(answer))
+
+    posts = [_post(), _post()]
+    for i, post in enumerate(posts):
+        post["id"] = i + 1
+    stats = rewriter.rewrite_posts(posts, region="mi")
+
+    assert len(calls) == 1
+    assert stats.rewritten == 2
+    assert stats.failed == 0
+    assert posts[0]["text"].startswith("Первый пост переписан.")
+    assert posts[1]["text"].startswith("Второй пост переписан.")
+    assert posts[0]["headline"] == "В ДК открылся новый зал"
+    assert posts[1]["topic_tag"] == "#дороги"
+
+
+def test_json_answer_without_post_number_is_not_applied(monkeypatch):
+    """JSON без номера поста применять нельзя: пересказ уехал бы не туда."""
+    answer = (
+        "```json\n" '[{"ЗАГОЛОВОК": "Без номера", "ТЕГ": "новости", "ТЕКСТ": "%s"}]\n' "```"
+    ) % _long("Пересказ без номера.")
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: _ok(answer))
+    monkeypatch.setattr(rewriter, "paid_topup_enabled", lambda: False)
+
+    posts = [_post(), _post()]
+    source = posts[0]["text"]
+    stats = rewriter.rewrite_posts(posts, region="mi")
+
+    assert stats.rewritten == 0
+    assert stats.failed == 2
+    assert posts[0]["text"] == source
+
+
+def test_json_answer_with_repeated_number_is_not_applied(monkeypatch):
+    """Два элемента с одним номером — какой чей, по JSON не понять."""
+    answer = ("```json\n" '[{"post": 1, "ТЕКСТ": "%s"}, {"post": 1, "ТЕКСТ": "%s"}]\n' "```") % (
+        _long("Первый переписан."),
+        _long("Второй переписан."),
+    )
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: _ok(answer))
+    monkeypatch.setattr(rewriter, "paid_topup_enabled", lambda: False)
+
+    posts = [_post(), _post()]
+    source = posts[0]["text"]
+    stats = rewriter.rewrite_posts(posts, region="mi")
+
+    assert stats.rewritten == 0
+    assert stats.failed == 2
+    assert posts[0]["text"] == source
+
+
+def test_raw_json_answer_never_becomes_post_text(monkeypatch):
+    """Сырой JSON в ленту не попадает — это хуже, чем исходный текст."""
+    answer = '```json\n[{"текст": "без номера и без разбора"}\n```'
+    monkeypatch.setattr(rewriter, "_chat_call", lambda **kw: _ok(answer))
+
+    post = _post()
+    source = post["text"]
+    stats = rewriter.rewrite_posts([post], region="mi")
+
+    assert stats.rewritten == 0
+    assert post["text"] == source
+    assert "json" not in post["text"].lower()
+
+
+def test_missing_block_is_topped_up_by_paid_engine(monkeypatch):
+    """Блок не пришёл — страховка добирает пост платным Дипсиком.
+
+    Живой факт 18.11: на MiniMax ответ иногда приходил без меток
+    ``=== ПОСТ N ===``, и оба поста батча уходили с исходным текстом (отказ
+    ``no_block``; на Дипсике такого не было ни разу за 129 вызовов 17.11).
+    Решение владельца 17.11: «если Минимакс проморгал или не смог — то отдавать
+    пропущенное Дипсику».
+    """
+    calls = []
+
+    def fake(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            # Основной движок ответил, но без меток — блоков нет.
+            return _ok(_long("Ответ без меток."))
+        return _ok(
+            "=== ПОСТ 1 ===\nЗАГОЛОВОК: Первое\nТЕГ: новости\nТЕКСТ:\n"
+            + _long("Первый переписан.")
+            + "\n\n=== ПОСТ 2 ===\nЗАГОЛОВОК: Второе\nТЕГ: новости\nТЕКСТ:\n"
+            + _long("Второй переписан.")
+        )
+
+    monkeypatch.setattr(rewriter, "_chat_call", fake)
+    monkeypatch.setattr(rewriter, "paid_topup_enabled", lambda: True)
+
+    posts = [_post(), _post()]
+    for i, post in enumerate(posts):
+        post["id"] = i + 1
+    stats = rewriter.rewrite_posts(posts, region="mi")
+
+    assert len(calls) == 2
+    # Страховка — платный Дипсик, и это видно прямо в аргументах вызова.
+    assert calls[1]["engine"] == "deepseek"
+    assert calls[1]["posts"] == 2
+    assert stats.rewritten == 2
+    assert stats.failed == 0
+    assert posts[0]["text"].startswith("Первый переписан.")
+    assert posts[1]["text"].startswith("Второй переписан.")
+
+
+def test_missing_block_falls_back_to_single_post(monkeypatch):
+    """Батч платным движком меток тоже не вернул — добираем по одному.
+
+    Ответ на один пост и есть его блок: разбирать там нечего, поэтому
+    одиночный вызов — последний рубеж перед fail-open.
+    """
+    calls = []
+
+    def fake(**kw):
+        calls.append(kw)
+        if int(kw.get("posts") or 0) > 1:
+            return _ok(_long("Ответ без меток."))
+        return _ok("ЗАГОЛОВОК: Один\nТЕГ: новости\nТЕКСТ:\n" + _long("Пост переписан."))
+
+    monkeypatch.setattr(rewriter, "_chat_call", fake)
+    monkeypatch.setattr(rewriter, "paid_topup_enabled", lambda: True)
+
+    posts = [_post(), _post()]
+    for i, post in enumerate(posts):
+        post["id"] = i + 1
+    stats = rewriter.rewrite_posts(posts, region="mi")
+
+    # Батч → батч страховкой → два одиночных вызова.
+    assert len(calls) == 4
+    assert calls[-1]["engine"] == "deepseek"
+    assert calls[-1]["posts"] == 1
+    assert stats.rewritten == 2
+    assert stats.failed == 0
+
+
+def test_missing_block_when_paid_topup_fails_keeps_source(monkeypatch):
+    """Страховка не сработала — пост уходит с исходным текстом, отказ учтён."""
+    calls = []
+
+    def fake(**kw):
+        calls.append(kw)
+        if len(calls) == 1:
+            return _ok(_long("Ответ без меток."))
+        return {"ok": False, "reason": "no_api_key"}
+
+    monkeypatch.setattr(rewriter, "_chat_call", fake)
+    monkeypatch.setattr(rewriter, "paid_topup_enabled", lambda: True)
+
+    posts = [_post(), _post()]
+    for i, post in enumerate(posts):
+        post["id"] = i + 1
+    stats = rewriter.rewrite_posts(posts, region="mi")
+
+    assert stats.rewritten == 0
+    assert stats.failed == 2
+    assert "no_block" in stats.reasons
+    assert posts[0]["text"] == "x" * 500
+
+
+def test_paid_topup_uses_its_own_timeout(monkeypatch):
+    """Страховка — Дипсик: её потолок 40 с, а не 180 с MiniMax.
+
+    Лишние 140 с стоили бы волне: слот воркера на боксе один.
+    """
+    monkeypatch.setenv("REWRITE_TIMEOUT", "40")
+    monkeypatch.setenv("MINIMAX_PUBLISH_TIMEOUT", "180")
+    calls = []
+
+    def fake(**kw):
+        calls.append(kw)
+        return _ok(_long("Ответ без меток."))
+
+    monkeypatch.setattr(rewriter, "_chat_call", fake)
+    monkeypatch.setattr(rewriter, "paid_topup_enabled", lambda: True)
+
+    posts = [_post(), _post()]
+    for i, post in enumerate(posts):
+        post["id"] = i + 1
+    rewriter.rewrite_posts(posts, region="mi")
+
+    assert calls
+    assert all(call["timeout"] == 40.0 for call in calls if call.get("engine") == "deepseek")
 
 
 def test_exception_inside_single_post_does_not_break_wave(monkeypatch):
