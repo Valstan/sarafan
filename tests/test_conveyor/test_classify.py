@@ -22,6 +22,17 @@ POST = {
 }
 
 
+@pytest.fixture(autouse=True)
+def _paid_path(monkeypatch):
+    """По умолчанию тесты гоняют **платный** путь (его подменяет ``_call_api``).
+
+    Основной движок конвейера — MiniMax (решение владельца 18.11), и его тесты
+    живут отдельно, в ``TestMinimaxEngine``. Так обе ветки проверяются, и
+    ни одна тестовая подмена не уезжает в сеть.
+    """
+    monkeypatch.setenv("CONVEYOR_ENGINE", "deepseek")
+
+
 def _api(status, payload):
     """Подмена HTTP-вызова фиксированным ответом."""
 
@@ -293,3 +304,105 @@ class TestUnknownSectionsFeedback:
 
     def test_empty_input(self):
         assert classify.collect_unknown_sections([]) == []
+
+
+class TestMinimaxEngine:
+    """Конвейер на MiniMax (решение владельца 18.11: «передавай всё Минимаксу»).
+
+    Отдельно от платного пути: там ключ DeepSeek обязателен, здесь — нет
+    (MiniMax ходит через аккаунты Кармана), и потолок вызова — другой.
+    """
+
+    def test_default_engine_is_minimax(self, monkeypatch):
+        from config.content_conveyor import get_conveyor_engine
+
+        monkeypatch.delenv("CONVEYOR_ENGINE", raising=False)
+        assert get_conveyor_engine() == "minimax"
+
+    def test_engine_env_overrides_default(self, monkeypatch):
+        """Откат без деплоя: ``CONVEYOR_ENGINE=deepseek``."""
+        from config.content_conveyor import get_conveyor_engine
+
+        monkeypatch.setenv("CONVEYOR_ENGINE", "deepseek")
+        assert get_conveyor_engine() == "deepseek"
+
+    def test_classify_goes_through_minimax(self, monkeypatch):
+        """На MiniMax платный DirectSeek не зовётся вовсе."""
+        monkeypatch.setenv("CONVEYOR_ENGINE", "minimax")
+        calls = []
+
+        def _fake_minimax(body):
+            calls.append(body)
+            return 200, _completion(
+                {"action": "accept", "section": "novosti", "title": "З", "text": "Т"}
+            )
+
+        monkeypatch.setattr(classify, "_call_minimax", _fake_minimax)
+        monkeypatch.setattr(
+            classify, "_call_api", lambda *a, **k: pytest.fail("платный DeepSeek не должен зваться")
+        )
+
+        out = classify.classify(POST, sections=SECTIONS, api_key="k")
+
+        assert out["ok"] and out["verdict"]["title"] == "З"
+        assert calls, "MiniMax-путь должен быть вызван"
+        assert "улицу Ленина" in calls[0]["messages"][1]["content"]
+
+    def test_minimax_needs_no_deepseek_key(self, monkeypatch):
+        """Ключ DeepSeek к MiniMax отношения не имеет — аккаунты берёт Карман."""
+        monkeypatch.setenv("CONVEYOR_ENGINE", "minimax")
+        monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+        monkeypatch.setattr(
+            classify,
+            "_call_minimax",
+            lambda body: (200, _completion({"action": "accept", "title": "З", "text": "Т"})),
+        )
+
+        out = classify.classify(POST, sections=SECTIONS)
+
+        assert out["ok"] and out["reason"] if "reason" in out else True
+
+    def test_minimax_usage_keys_are_normalised(self, monkeypatch):
+        """Ключи MiniMax (``totalTokens``) приводятся к общему ``total_tokens``.
+
+        Конвейер считает расход по ``usage["total_tokens"]`` (runner.py); молча
+        нулевой счёт хуже, чем честное число.
+        """
+        import modules.classifier.headless as headless
+
+        monkeypatch.setenv("CONVEYOR_ENGINE", "minimax")
+        seen = {}
+
+        def _fake_chat(**kwargs):
+            seen.update(kwargs)
+            return {
+                "ok": True,
+                "content": '{"action": "accept", "title": "З", "text": "Т"}',
+                "usage": {"totalTokens": 777, "inputTokens": 700, "outputTokens": 77},
+            }
+
+        monkeypatch.setattr(headless, "chat", _fake_chat)
+
+        status, response = classify._call_minimax(
+            {"messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "U"}]}
+        )
+
+        assert status == 200
+        assert response["usage"]["total_tokens"] == 777
+        assert response["usage"]["prompt_tokens"] == 700
+        assert response["usage"]["completion_tokens"] == 77
+        # Потолок вызова — путь публикации движка (180 с), а не общий 40 с:
+        # вызов MiniMax — запуск агента-CLI, он идёт десятки секунд.
+        assert seen["timeout"] == 180.0
+        assert seen["label"] == "conveyor"
+
+    def test_minimax_failure_is_reported(self, monkeypatch):
+        """Ни MiniMax, ни страховка не ответили — это отказ, а не падение."""
+        monkeypatch.setenv("CONVEYOR_ENGINE", "minimax")
+        monkeypatch.setattr(
+            classify, "_call_minimax", lambda body: (0, {"error": {"message": "engine_failed"}})
+        )
+
+        out = classify.classify(POST, sections=SECTIONS, api_key="k")
+
+        assert not out["ok"] and out["reason"] == "network"

@@ -32,6 +32,7 @@
 
 Env vars:
   CONVEYOR_DISABLED=0     # аварийный kill-switch всего конвейера
+  CONVEYOR_ENGINE=minimax # движок LLM-стадии: MiniMax (дефолт) или deepseek
   CONVEYOR_SITES          # allowlist ключей сайтов (CSV); пусто = ни один
                           # (включение сайта — явное действие, не побочный
                           #  эффект деплоя нового описания в SITES)
@@ -60,6 +61,9 @@ from __future__ import annotations
 
 import os
 from typing import Dict, List, Optional
+
+#: Движок LLM-стадии конвейера по умолчанию — MiniMax (см. get_conveyor_engine).
+DEFAULT_CONVEYOR_ENGINE = "minimax"
 
 # Описания сайтов-получателей. Порядок роли не играет — ключ ``key`` уникален
 # и служит идентичностью сайта в БД (``conveyor_deliveries.site``), в правилах
@@ -312,6 +316,23 @@ SITES: List[Dict[str, object]] = [
 def conveyor_disabled() -> bool:
     """Kill-switch всего конвейера (env ``CONVEYOR_DISABLED``). Дефолт — включён."""
     return os.getenv("CONVEYOR_DISABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+
+
+def get_conveyor_engine() -> str:
+    """Движок LLM-стадии конвейера (env ``CONVEYOR_ENGINE``).
+
+    **Дефолт — MiniMax** (решение владельца 18.11: «передавай всё Минимаксу»):
+    весь нейро-трафик проекта — на бесплатном движке, платный DeepSeek остаётся
+    страховкой (внутри ``headless.chat`` он подхватывает отказ MiniMax сам).
+
+    Раньше здесь был прямой вызов платного DeepSeek API: контур OpenCode+ВПН
+    выведен из эксплуатации 06.11 (ADR-0014), поэтому запасной free-путь не
+    срабатывал и конвейер молчал на деньги (замер 05.11: 150 постов без
+    вердикта, сайты голодные с 17.10). Откат — одна переменная:
+    ``CONVEYOR_ENGINE=deepseek``.
+    """
+    raw = (os.getenv("CONVEYOR_ENGINE") or "").strip().lower()
+    return raw or DEFAULT_CONVEYOR_ENGINE
 
 
 def get_enabled_site_keys() -> List[str]:
