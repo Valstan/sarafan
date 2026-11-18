@@ -9,6 +9,8 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Tuple
 
+import pytest
+
 from modules.conveyor import classify as classify_mod
 
 POST: Dict[str, Any] = {
@@ -22,6 +24,16 @@ OK_JSON = (
     '{"action": "accept", "section": "novosti", "title": "Концерт в нашем ДК", '
     '"text": "В нашем ДК состоялся праздничный концерт, на котором выступили коллективы района."}'
 )
+
+
+@pytest.fixture(autouse=True)
+def _paid_path(monkeypatch):
+    """Эти тесты — про платный путь и его фолбэк, поэтому движок зафиксирован.
+
+    Основной движок конвейера — MiniMax (решение владельца 18.11); его ветка
+    проверяется в ``test_classify.py``.
+    """
+    monkeypatch.setenv("CONVEYOR_ENGINE", "deepseek")
 
 
 def _balance_402() -> Tuple[int, Dict[str, Any]]:

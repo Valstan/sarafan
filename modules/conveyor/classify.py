@@ -1,6 +1,9 @@
 """LLM-стадия конвейера: рубрика сайта + заголовок + лёгкая редактура (D-015).
 
-Один вызов DeepSeek на пост — между отбором (``source``) и доставкой (``delivery``).
+Один вызов модели на пост — между отбором (``source``) и доставкой (``delivery``).
+Движок по умолчанию — **MiniMax** (решение владельца 18.11: «передавай всё
+Минимаксу»); платный DeepSeek остаётся страховкой и подхватывает отказ
+MiniMax сам (внутри ``headless.chat``). Откат — ``CONVEYOR_ENGINE=deepseek``.
 Модель решает три вещи разом, потому что все три требуют одного и того же чтения
 текста, а платить за три чтения незачем:
 
@@ -25,6 +28,7 @@ import json
 import logging
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from config.content_conveyor import get_conveyor_engine
 from config.deepseek import (
     get_api_key,
     get_base_url,
@@ -204,6 +208,67 @@ def _is_balance_error(response: Dict[str, Any]) -> bool:
     return "insufficient balance" in low or "insufficient_balance" in low
 
 
+def _call_minimax(body: Dict[str, Any]):
+    """Вызов MiniMax в форме ответа прямого DeepSeek.
+
+    Контракт тот же, что у ``_call_opencode``: движок отдаёт строку с JSON, а
+    разбор ответа ниже остаётся прежним (свой ``_extract_json`` терпим к
+    обёртке и болтовне вокруг JSON — а MiniMax-агент оборачивает ответ охотнее
+    обычной HTTP-модели).
+
+    Почему через ``headless.chat``, а не напрямую: там уже есть **живой пул
+    аккаунтов Кармана** и **страховка платным Дипсиком** — конвейер получит
+    вердикт даже если MiniMax молчит, и оба вызова будут видны в журнале
+    вызовов нейросетей.
+
+    Потолок — **пути публикации движка** (180 с), а не общий 40 с: вызов
+    MiniMax — это запуск агента-CLI, он идёт десятки секунд, и общий потолок
+    обрывал бы его на середине.
+    """
+    from modules.classifier.headless import chat
+
+    system = ""
+    user = ""
+    for message in body.get("messages") or []:
+        role = str((message or {}).get("role") or "")
+        if role == "system":
+            system = str((message or {}).get("content") or "")
+        elif role == "user":
+            user = str((message or {}).get("content") or "")
+
+    from config.opencode import get_publish_timeout_for_engine
+
+    result = chat(
+        user=user,
+        system=system,
+        temperature=0.2,
+        timeout=get_publish_timeout_for_engine("minimax"),
+        label="conveyor",
+        engine="minimax",
+    )
+    if not result.get("ok"):
+        return 0, {
+            "error": {
+                "message": str(result.get("reason") or "engine_failed"),
+                "detail": result.get("detail"),
+            }
+        }
+    usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+    return 200, {
+        "choices": [{"message": {"content": str(result.get("content") or "")}}],
+        # Ключи MiniMax (``totalTokens``) приводим к общему ``total_tokens``:
+        # конвейер считает по нему (runner.py), и молча нулевой счёт хуже, чем
+        # честное число.
+        "usage": {
+            "total_tokens": int(usage.get("totalTokens") or usage.get("total_tokens") or 0),
+            "prompt_tokens": int(usage.get("inputTokens") or usage.get("prompt_tokens") or 0),
+            "completion_tokens": int(
+                usage.get("outputTokens") or usage.get("completion_tokens") or 0
+            ),
+        },
+    }
+
+
 def _call_opencode(body: Dict[str, Any]):
     """Живой free-движок в форме ответа прямого DeepSeek.
 
@@ -253,8 +318,11 @@ def classify(
     в ``conveyor_deliveries.reason`` и станет ответом на вопрос «почему этой
     новости нет на сайте».
     """
+    engine = get_conveyor_engine()
     key = api_key if api_key is not None else get_api_key()
-    if not key:
+    if engine != "minimax" and not key:
+        # Ключ DeepSeek нужен только платному пути: MiniMax ходит через аккаунты
+        # Кармана, и отсутствие ключа его не касается.
         return {"ok": False, "reason": "no_api_key"}
     if not str(post.get("text") or "").strip():
         return {"ok": False, "reason": "empty_text"}
@@ -278,26 +346,32 @@ def classify(
         # (замер 07.11: 277 обрезанных вызовов за сутки).
         body["thinking"] = {"type": "disabled"}
 
-    status, response = _call_api(
-        body,
-        api_key=key,
-        base_url=get_base_url(),
-        timeout=get_timeout(),
-        label="conveyor",
-    )
-    if status == 402 or _is_balance_error(response):
-        # Прямой DeepSeek без денег на счёте («Insufficient Balance», 402) — идём на
-        # живой free-движок: он отдаёт тот же контракт chat(). Без этого конвейер
-        # молчит (замер 05.11: 150 постов без вердикта, сайты голодные с 17.10).
-        fb_status, fb_response = _call_opencode(body)
-        if 200 <= fb_status < 300:
-            status, response = fb_status, fb_response
-        else:
-            logger.warning(
-                "конвейер: DeepSeek без баланса, free-движок не ответил (%s) для %s",
-                fb_status,
-                post.get("lip"),
-            )
+    if engine == "minimax":
+        # Основной движок конвейера — MiniMax (решение владельца 18.11: «передавай
+        # всё Минимаксу»). Внутри headless.chat у него есть и живой пул
+        # аккаунтов Кармана, и страховка платным Дипсиком.
+        status, response = _call_minimax(body)
+    else:
+        status, response = _call_api(
+            body,
+            api_key=key,
+            base_url=get_base_url(),
+            timeout=get_timeout(),
+            label="conveyor",
+        )
+        if status == 402 or _is_balance_error(response):
+            # Прямой DeepSeek без денег на счёте («Insufficient Balance», 402) — идём на
+            # живой free-движок: он отдаёт тот же контракт chat(). Без этого конвейер
+            # молчит (замер 05.11: 150 постов без вердикта, сайты голодные с 17.10).
+            fb_status, fb_response = _call_opencode(body)
+            if 200 <= fb_status < 300:
+                status, response = fb_status, fb_response
+            else:
+                logger.warning(
+                    "конвейер: DeepSeek без баланса, free-движок не ответил (%s) для %s",
+                    fb_status,
+                    post.get("lip"),
+                )
     if status == 0:
         return {"ok": False, "reason": "network", "detail": response.get("error")}
     if not (200 <= status < 300):
