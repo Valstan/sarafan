@@ -32,6 +32,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 from dataclasses import dataclass, field
@@ -45,10 +46,21 @@ from config.post_rewrite import (
     get_model,
     get_rewrite_engine,
     get_rewrite_timeout,
+    get_rewrite_timeout_for_engine,
+    paid_topup_enabled,
     rewrite_enabled,
 )
 
 logger = logging.getLogger(__name__)
+
+#: Движок страховки: им добираем пост, блок которого не пришёл (см. ADR-0017).
+#: Платный по решению владельца 17.11: «Дипсик вернуть на подстраховку, если
+#: Минимакс проморгал или не смог — то отдавать пропущенное Дипсику».
+PAID_TOPUP_ENGINE = "deepseek"
+
+#: Сколько знаков сырого ответа показываем в логе, когда блок не пришёл.
+#: Нужен для разбора формата: по логу видно, чем ответ отличается от ожидаемого.
+_PREVIEW_CHARS = 1200
 
 SYSTEM_PROMPT = """Ты — редактор районной новостной ленты ВКонтакте. Тебе дают текст
 новости из сообщества района. Перепиши его своими словами так, чтобы пост можно
@@ -115,6 +127,12 @@ _BATCH_MARKER_RE = re.compile(
     r"(?:[-=*#]{0,4}[ \t]*)?$",
     re.IGNORECASE | re.MULTILINE,
 )
+#: Имена полей в JSON-ответе агента (живой факт 18.11): номер поста, заголовок,
+#: тег, текст. Порядок в списках — предпочтение: «post» важнее «id».
+_JSON_NUMBER_KEYS = ("post", "пост", "номер", "number", "n", "index", "idx", "id")
+_JSON_HEADLINE_KEYS = ("заголовок", "headline", "title")
+_JSON_TAG_KEYS = ("тег", "tag")
+_JSON_TEXT_KEYS = ("текст", "text", "body", "пересказ", "content")
 # Метки, которыми модель иногда предваряет ответ, и markdown-обёртка.
 _LABEL_RE = re.compile(
     r"^\s*(?:готовый\s+текст|текст\s+поста|текст|пост|пересказ|новость)\s*:\s*",
@@ -222,6 +240,18 @@ def split_batch_reply(raw: str, count: int) -> Dict[int, str]:
     text = _strip_fence(raw or "")
     marks = list(_BATCH_MARKER_RE.finditer(text))
     if not marks:
+        # Агент MiniMax на «грязном» входе вместо меток отдаёт JSON-массив
+        # (живой факт 18.11: проба на постах с упоминаниями и ссылкой вернула
+        # ``[{"post": 1, "ЗАГОЛОВОК": …, "ТЕГ": …, "ТЕКСТ": …}, …]``). Номер
+        # поста в JSON указан явно, поэтому разбор однозначен — в отличие от
+        # ответа вообще без меток, который применять нельзя.
+        blocks = _split_json_reply(text, count)
+        if blocks:
+            return blocks
+        if text.lstrip().startswith(("{", "[")):
+            # Ответ — JSON, и разобрать его не вышло. Публиковать сырой JSON
+            # в ленте хуже, чем не переписать пост вовсе: fail-open.
+            return {}
         if count == 1:
             return {1: text}
         return {}
@@ -235,6 +265,97 @@ def split_batch_reply(raw: str, count: int) -> Dict[int, str]:
             continue
         if 1 <= number <= count:
             blocks[number] = text[start:end]
+    return blocks
+
+
+def _json_text(item: Dict[str, Any], keys: Sequence[str]) -> str:
+    """Значение из JSON-объекта по списку допустимых имён поля."""
+    lowered = {str(key).strip().lower(): value for key, value in item.items()}
+    for key in keys:
+        if key not in lowered:
+            continue
+        value = lowered[key]
+        if isinstance(value, (list, tuple)):
+            value = "\n\n".join(str(part).strip() for part in value if str(part).strip())
+        if value is None:
+            continue
+        text = str(value).strip()
+        if text:
+            return text
+    return ""
+
+
+def _split_json_reply(text: str, count: int) -> Dict[int, str]:
+    """JSON-массив с ответами → блоки по номерам постов.
+
+    **Зачем.** Живой факт 18.11: агент MiniMax на постах с упоминаниями и
+    ссылками вместо меток ``=== ПОСТ N ===`` отдаёт JSON-массив, где номер
+    поста указан полем ``post``. Разбор меток его не видел — и **оба** поста
+    батча уходили с исходным текстом (отказ ``no_block``; на Дипсике такого
+    не было ни разу за 129 вызовов 17.11).
+
+    **Безопасность.** Применять ответ можно только когда номер поста указан
+    явно и однозначно: номер вне диапазона, повтор номера или отсутствие
+    текста — тогда блок не применяется (fail-open, исходный текст). Порядок
+    элементов значения не имеет: пересказ попадает в тот пост, который назван.
+
+    Возвращает пустой словарь, если разбирать нечего.
+    """
+    raw = (text or "").strip()
+    if not raw:
+        return {}
+
+    payload = ""
+    start = raw.find("[")
+    end = raw.rfind("]")
+    if start != -1 and end > start:
+        payload = raw[start : end + 1]
+    else:
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end > start:
+            payload = raw[start : end + 1]
+    if not payload:
+        return {}
+
+    try:
+        data = json.loads(payload)
+    except ValueError:
+        return {}
+
+    items = data if isinstance(data, list) else [data]
+    blocks: Dict[int, str] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        lowered = {str(key).strip().lower(): value for key, value in item.items()}
+        number = None
+        for key in _JSON_NUMBER_KEYS:
+            if key not in lowered:
+                continue
+            try:
+                number = int(lowered[key])
+            except (TypeError, ValueError):
+                continue
+            break
+        if number is None or not (1 <= number <= count):
+            continue
+        if number in blocks:
+            # Номер повторился — какой блок чей, по JSON не понять.
+            return {}
+        body = _json_text(item, _JSON_TEXT_KEYS)
+        if not body:
+            continue
+        lines = []
+        headline = _json_text(item, _JSON_HEADLINE_KEYS)
+        if headline:
+            lines.append("ЗАГОЛОВОК: %s" % headline)
+        tag = _json_text(item, _JSON_TAG_KEYS)
+        if tag:
+            lines.append("ТЕГ: %s" % tag)
+        lines.append("ТЕКСТ:")
+        lines.append(body)
+        blocks[number] = "\n".join(lines)
     return blocks
 
 
@@ -536,17 +657,176 @@ def rewrite_batch(
     blocks = split_batch_reply(str(result.get("content") or ""), len(items))
     finish = str(result.get("finish") or "")
     done = 0
+    missing: List[int] = []
     for idx, post in enumerate(items, start=1):
         block = blocks.get(idx)
         if not block:
-            # Блок не пришёл (модель пропустила или перепутала номер) —
-            # пост уходит с исходным текстом, остальные пересказы не страдают.
-            stats.failed += 1
-            stats.reasons.append("no_block")
+            # Блок не пришёл (модель пропустила или перепутала номер) — пост
+            # уходит с исходным текстом, остальные пересказы не страдают.
+            missing.append(idx)
             continue
         if _apply_rewrite(post, block, stats=stats, finish=finish):
             done += 1
+
+    if missing:
+        logger.warning(
+            "post rewrite: блоков не хватило (%d из %d) — добираем платным Дипсиком; "
+            "сырой ответ: %s",
+            len(items) - len(missing),
+            len(items),
+            _preview(str(result.get("content") or "")),
+        )
+        done += _recover_missing(
+            items,
+            missing,
+            region=region,
+            theme=theme,
+            stats=stats,
+        )
     return done
+
+
+def _preview(text: str, limit: int = _PREVIEW_CHARS) -> str:
+    """Кусок сырого ответа движка для разбора формата (обрезан по длине)."""
+    flat = " ".join((text or "").split())
+    if len(flat) <= limit:
+        return flat
+    return flat[:limit] + "…"
+
+
+def _recover_missing(
+    items: Sequence[Dict[str, Any]],
+    missing: Sequence[int],
+    *,
+    region: str = "",
+    theme: str = "",
+    stats: RewriteStats,
+) -> int:
+    """Добить посты, чьи блоки не пришли, платным Дипсиком.
+
+    **Зачем.** Живой факт 18.11: после перевода переписывания на MiniMax в
+    журнале появился отказ ``no_block`` — модель ответила, но метки
+    ``=== ПОСТ N ===`` в ответе не оказалось, и оба поста батча ушли с
+    исходным текстом. На Дипсике (замер 17.11: 129 вызовов) такого не было ни
+    разу: метки он соблюдает. Это тот же случай, что и «движок проморгал» —
+    пересказа нет, — а решение владельца 17.11 прямо называет страховкой
+    Дипсика: «если Минимакс проморгал или не смог — то отдавать пропущенное
+    Дипсику».
+
+    **Как.** Два шага, оба платные и оба дешёвые (Дипсик отвечает за секунды):
+
+    1. повторный вызов **того же батча** платным движком — метки он держит,
+       поэтому обычно хватает одного вызова;
+    2. оставшиеся посты — по одному: ответ на один пост и есть его блок.
+
+    Шаг 2 не трогает посты, чей блок пришёл, но не прошёл проверку формы
+    (короткий/длинный/оборванный текст): там дело в содержании, а второй вызов
+    того же текста ничего не изменит.
+
+    Не повторяем бесконечно: шаг 1 — один вызов, шаг 2 — по одному вызову на
+    пост. Не помогло — fail-open, пост уходит с исходным текстом.
+    """
+    if not missing:
+        return 0
+
+    timeout = get_rewrite_timeout_for_engine(PAID_TOPUP_ENGINE)
+    model = get_model() or None
+    recovered = 0
+    recovered_idx = set()
+    form_failed_idx = set()
+    pending = list(missing)
+
+    if not paid_topup_enabled():
+        logger.warning(
+            "post rewrite: платная страховка выключена — %d постов уйдут с исходным текстом",
+            len(missing),
+        )
+        _count_missing_failures(missing, recovered_idx, form_failed_idx, stats)
+        return 0
+
+    # Шаг 1: батч заново платным движком.
+    if len(pending) > 1:
+        sources = [str(items[idx - 1].get("text") or "") for idx in pending]
+        result = _chat_call(
+            system=SYSTEM_PROMPT,
+            user=build_batch_prompt(sources, region=region, theme=theme),
+            temperature=0.3,
+            model=model,
+            timeout=timeout,
+            engine=PAID_TOPUP_ENGINE,
+            label="post_rewrite",
+            posts=len(pending),
+        )
+        _note_call(result, stats)
+        if result.get("ok"):
+            blocks = split_batch_reply(str(result.get("content") or ""), len(pending))
+            finish = str(result.get("finish") or "")
+            still: List[int] = []
+            for pos, idx in enumerate(pending, start=1):
+                block = blocks.get(pos)
+                if not block:
+                    still.append(idx)
+                    continue
+                if _apply_rewrite(items[idx - 1], block, stats=stats, finish=finish):
+                    recovered += 1
+                    recovered_idx.add(idx)
+                else:
+                    # Блок пришёл, но не прошёл проверку формы: отказ уже учтён
+                    # в _apply_rewrite, второй вызов того же текста не поможет.
+                    form_failed_idx.add(idx)
+            pending = still
+
+    # Шаг 2: остаток — по одному посту (ответ на один пост и есть его блок).
+    for idx in pending:
+        source = str(items[idx - 1].get("text") or "")
+        result = _chat_call(
+            system=SYSTEM_PROMPT,
+            user=build_prompt(source, region=region, theme=theme),
+            temperature=0.3,
+            model=model,
+            timeout=timeout,
+            engine=PAID_TOPUP_ENGINE,
+            label="post_rewrite",
+            posts=1,
+        )
+        _note_call(result, stats)
+        if not result.get("ok"):
+            continue
+        if _apply_rewrite(
+            items[idx - 1],
+            str(result.get("content") or ""),
+            stats=stats,
+            finish=str(result.get("finish") or ""),
+        ):
+            recovered += 1
+            recovered_idx.add(idx)
+
+    _count_missing_failures(missing, recovered_idx, form_failed_idx, stats)
+    logger.warning(
+        "post rewrite: страховка вернула %d из %d постов",
+        recovered,
+        len(missing),
+    )
+    return recovered
+
+
+def _count_missing_failures(
+    missing: Sequence[int],
+    recovered_idx: set,
+    form_failed_idx: set,
+    stats: RewriteStats,
+) -> None:
+    """Учесть отказ ``no_block`` для постов, которых страховка не спасла.
+
+    Пост, чей блок пришёл, но не прошёл проверку формы, отказ уже учтён в
+    ``_apply_rewrite`` (причина ``shape``/``truncated``) — второй раз его не
+    считаем, иначе в логе будет один отказ на два.
+    """
+    for idx in missing:
+        if idx in recovered_idx or idx in form_failed_idx:
+            continue
+        stats.failed += 1
+        stats.reasons.append("no_block")
 
 
 def rewrite_post(
