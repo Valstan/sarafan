@@ -14,18 +14,12 @@ database/models_extended.py::ScheduledPublication  # sleeping — задел Sma
 config/content_conveyor.py::get_site  # test-only — только tests/test_conveyor/test_config.py; прод идёт через get_active_sites
 config/promo.py::CHANNELS  # sleeping — задел этапа 0 раскрутки (#538); живой реестр — modules/promotion/settings.py::DEFAULT_CHANNELS
 config/promo.py::USER_TOKEN_CHANNELS  # sleeping — тот же задел этапа 0 (#538), потребителя не было никогда
-config/opencode.py::get_identity_reset_cmd  # sleeping — engine-side хук решения P210 (сброс идентичности делает systemd-таймер на боксе, а движок лишь ставит метку); потребителя не было никогда
-config/opencode.py::get_identity_reset_cooldown  # sleeping — тот же задел P210; env NEURAL_IDENTITY_RESET_COOLDOWN нигде не задан
 
 # ── modules/ad_cabinet ────────────────────────────────────────────────────────
 modules/ad_cabinet/packages.py::PROMO_POSTS  # sleeping — константа «3 поста акции»; фактическое значение задаётся литералом в web/static/js/ad_crm.js:1971
 modules/ad_cabinet/packages.py::KINDS  # sleeping — перечень видов пакетов; живой контроль — regex в web/api/ad_crm.py:2168
 modules/ad_cabinet/client_orders.py::TRUST_AFTER_POSTS  # test-only — рантайм читает TRUST_AFTER_ORDERS; константа живёт только в тестах (алиас ради обратной совместимости)
 modules/ad_cabinet/dm_channel.py::reset_for_tests  # test-only — autouse-фикстуры tests/test_ad_cabinet + tests/test_notifications
-modules/ad_cabinet/outreach.py::SENT_STATUSES  # sleeping — набор статусов без потребителя; лимит _sent_today считает литералом "sent" (+claimed), ручные done_manual в лимиты не входят — это вопрос поведения, а не чистки
-modules/ad_cabinet/outreach.py::is_blacklisted  # sleeping — та же логика продублирована инлайном в outreach.py:162
-modules/ad_cabinet/pinning.py::exclude_client_id  # sleeping — keyword-параметр pin_conflicts, тело его игнорирует; вызов с exclude_client_id= молча ничего не исключит (не «ложное срабатывание», а инертный параметр-ловушка)
-modules/ad_cabinet/pinning.py::pin_window_day  # sleeping — не вызывается, в __all__ не экспортируется
 
 # ── core / middleware — каталоги, вошедшие в скоуп скана 2026-09-04 ───────────
 # Таксономия исключений: объявлена целиком, потребителя нет у листьев.
@@ -108,7 +102,6 @@ modules/publisher/vk_publisher_extended.py::set_publish_candidates  # alive — 
 modules/publisher/vk_publisher_extended.py::is_test_mode  # uncertain — интерфейсный геттер без найденных вызовов
 modules/publisher/vk_publisher_extended.py::get_posts_remaining_today  # uncertain — интерфейсный геттер без найденных вызовов
 modules/publisher/daily_digest.py::build_digest  # test-only — прод идёт через build_digest_from_posts (tasks/digest_tasks.py:148); обёртка живёт в тестах
-modules/publisher/rewriter.py::rewrite_post  # dead — батч-рефакторинг a2a3228 перевёл вызовы на rewrite_batch, одно-постовая обёртка осталась без потребителя
 modules/source_names.py::reset_cache  # test-only — только tests/test_publisher/test_source_names.py; сам модуль жив (enrich_group_names)
 
 # ── modules/promotion ─────────────────────────────────────────────────────────
@@ -177,7 +170,6 @@ modules/conveyor/source.py::summarize_for_prompt  # test-only — LLM-сводк
 modules/classifier/schema.py::has_merge_signal  # sleeping — для merge agree-rate (VERDICT_TYPES), ещё не подключён в прод-подсчёт
 modules/radar_id/keys.py::keys_available  # sleeping — readiness-хелпер RS256-ключа (Ф1), не подключён к health-check
 modules/deepseek_client.py::reset_balance_breaker  # test-only — autouse-фикстура tests/test_deepseek/test_client.py
-modules/karman_minimax.py::recommended  # sleeping — поле контракта Кармана (ADR-0017 §9), парсится в PoolOffer, но не читается нигде (рядом используется offer.why)
 modules/service_conditions.py::CONDITION_FIELDS  # test-only — только tests/test_config/test_service_conditions.py; в проде форма условия пишется литералом в _condition()
 modules/service_conditions.py::service_for_condition  # test-only — только tests/test_config/test_service_conditions.py
 

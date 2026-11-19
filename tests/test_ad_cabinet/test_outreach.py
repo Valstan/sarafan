@@ -245,6 +245,67 @@ async def test_live_send_marks_request_and_respects_caps(db_session):
 
 
 @pytest.mark.asyncio
+async def test_manual_send_counts_toward_daily_limit(db_session):
+    """Ручная отправка (владелец написал сам через кабинет) занимает лимит.
+
+    Предикат один — ``SENT_STATUSES`` = ('sent', 'done_manual'). Раньше счётчик
+    лимита считал литералом только 'sent', и ручные отправки шли **сверх**
+    лимита 30/сообщество и 150/сутки (P019, разбор 19.11).
+    """
+    camp = await _seed_running(db_session, dry_run=False, n=0)
+    rows = [
+        # Отправлено автоматически сегодня — занимает лимит.
+        AdOutreachRecipient(
+            campaign_id=camp.id,
+            vk_user_id=901,
+            community_vk_id=INFO,
+            status="sent",
+            sent_at=NOW,
+        ),
+        # Владелец написал сам сегодня — тоже занимает лимит.
+        AdOutreachRecipient(
+            campaign_id=camp.id,
+            vk_user_id=902,
+            community_vk_id=INFO,
+            status="done_manual",
+            sent_at=NOW,
+        ),
+        # Взято параллельным тиком — тоже занимает лимит.
+        AdOutreachRecipient(
+            campaign_id=camp.id,
+            vk_user_id=903,
+            community_vk_id=INFO,
+            status="claimed",
+            claimed_at=NOW,
+        ),
+        # Ручная отправка ВЧЕРА — сегодняшний лимит не занимает.
+        AdOutreachRecipient(
+            campaign_id=camp.id,
+            vk_user_id=904,
+            community_vk_id=INFO,
+            status="done_manual",
+            sent_at=NOW - timedelta(days=1),
+        ),
+        # Другое сообщество — свой счёт.
+        AdOutreachRecipient(
+            campaign_id=camp.id,
+            vk_user_id=905,
+            community_vk_id=INFO2,
+            status="done_manual",
+            sent_at=NOW,
+        ),
+    ]
+    for row in rows:
+        db_session.add(row)
+    await db_session.flush()
+
+    counts = await outreach._sent_today(db_session, NOW - timedelta(hours=12))
+    assert counts[INFO] == 3  # sent + done_manual + claimed
+    assert counts[INFO2] == 1  # ручная отправка в другом сообществе
+    assert counts[None] == 4  # всего за сутки
+
+
+@pytest.mark.asyncio
 async def test_per_community_cap_and_quiet_hours(db_session):
     camp = await _seed_running(db_session, dry_run=False, n=2, per_comm=1)
     db_session.add(_req(9, origin="inbound_dm", person=900, community=INFO2))

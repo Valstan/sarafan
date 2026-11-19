@@ -97,6 +97,9 @@ def _karman_offer() -> dict:
         "reason": offer.reason,
         "tier": offer.tier,
         "why": offer.why,
+        # Пометка Кармана «рекомендую этот аккаунт» (ADR-0017 §9) — часть
+        # контракта выдачи, показываем рядом с объяснением.
+        "recommended": offer.recommended,
         "account_id": (offer.account or {}).get("id"),
         "account_email": (offer.account or {}).get("email"),
         "has_access_token": offer.has_tokens,
