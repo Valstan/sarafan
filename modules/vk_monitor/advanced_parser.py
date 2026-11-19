@@ -13,6 +13,7 @@ import random
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
+from config.classifier import advertisement_filter_enabled
 from config.runtime import (
     bulletin_jaccard_dedup_enabled,
     execute_batch_enabled,
@@ -593,12 +594,18 @@ class AdvancedVKParser:
             self.stats["posts_filtered_marked_ad"] += 1
             return None
 
-        # 5. Advertisement filter
-        is_reklama_theme = theme == "reklama"
-        if is_advertisement(text, skip_for_reklama=is_reklama_theme, theme=theme):
-            if not is_reklama_theme:
-                self.stats["posts_filtered_advertisement"] += 1
-                return None
+        # 5. Advertisement filter — редакционная отсечка, «слепой второй
+        #    редактор» (P091 §1: резала «Продам помидоры», которые правила
+        #    16, 22 и 26 велят публиковать). Шаги 5a и 5c выше остаются
+        #    ВСЕГДА: это защита от бана, а не редакция.
+        #    Снимается флагом CLASSIFIER_ADVERTISEMENT_FILTER_ENABLED=0 — решение
+        #    владельца (шаг 3 звена 5). По умолчанию отсечка включена.
+        if advertisement_filter_enabled():
+            is_reklama_theme = theme == "reklama"
+            if is_advertisement(text, skip_for_reklama=is_reklama_theme, theme=theme):
+                if not is_reklama_theme:
+                    self.stats["posts_filtered_advertisement"] += 1
+                    return None
 
         # 6. Blacklist text
         if region_config and region_config.delete_msg_blacklist:

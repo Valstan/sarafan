@@ -35,6 +35,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, List, Optional, Sequence
 
+from config.classifier import advertisement_filter_enabled
 from config.runtime import collection_audit_shadow_enabled, get_collection_audit_region_codes
 from modules.filters.ads_filter import is_marked_advertisement
 from utils.post_utils import clear_copy_history, lip_of_post, vk_post_datetime
@@ -98,7 +99,13 @@ def _derive_drop_reason(post: Dict[str, Any], theme: str, region_config: Any) ->
     if is_marked_advertisement(post):
         return "marked_ad"
     # Шаг 5: реклама (для темы reklama фильтр не срабатывает — как в _filter_post).
-    if theme != "reklama" and is_advertisement(text, skip_for_reklama=False, theme=theme):
+    # Флаг тот же, что у фильтра (CLASSIFIER_ADVERTISEMENT_FILTER_ENABLED):
+    # аудит обязан пере-выводить ПРИЧИНУ настоящую, а не «как было до флага».
+    if (
+        advertisement_filter_enabled()
+        and theme != "reklama"
+        and is_advertisement(text, skip_for_reklama=False, theme=theme)
+    ):
         return "advertisement"
     # Шаг 6: чёрный список слов региона.
     blacklist = getattr(region_config, "delete_msg_blacklist", None)
