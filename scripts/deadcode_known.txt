@@ -176,11 +176,8 @@ modules/conveyor/source.py::summarize_for_prompt  # test-only — LLM-сводк
 # ── modules: classifier / radar_id ─────────────────────────────────────────
 modules/classifier/schema.py::has_merge_signal  # sleeping — для merge agree-rate (VERDICT_TYPES), ещё не подключён в прод-подсчёт
 modules/radar_id/keys.py::keys_available  # sleeping — readiness-хелпер RS256-ключа (Ф1), не подключён к health-check
-modules/classifier/engine_panel.py::final_r  # dead — слот распаковки в цикле, в теле не читается; bucket["final"] в коде нет ни разу
 modules/deepseek_client.py::reset_balance_breaker  # test-only — autouse-фикстура tests/test_deepseek/test_client.py
 modules/karman_minimax.py::recommended  # sleeping — поле контракта Кармана (ADR-0017 §9), парсится в PoolOffer, но не читается нигде (рядом используется offer.why)
-modules/minimax_engine.py::SIGNIN_TZ  # dead — значение продублировано литералом "Europe%2FMoscow" в двух signin-вызовах
-modules/minimax_engine.py::ENV_CHUNK_SIZE  # dead — дубль env-имени; по-настоящему читает config/classifier.py::get_minimax_chunk_size
 modules/service_conditions.py::CONDITION_FIELDS  # test-only — только tests/test_config/test_service_conditions.py; в проде форма условия пишется литералом в _condition()
 modules/service_conditions.py::service_for_condition  # test-only — только tests/test_config/test_service_conditions.py
 
@@ -196,12 +193,7 @@ monitoring/metrics.py::posts_published_total  # sleeping — Prometheus-метр
 modules/radar/auth.py::verify_session_token  # alive — вызывается в middleware/auth_gate.py:127
 scripts/migrate_mongodb_config.py::CATEGORY_MAPPING  # dead — one-shot Mongo-миграция, маппинг не читается
 scripts/probe_community_dm_capabilities.py::unread_peers  # dead — локальная переменная probe-скрипта
-scripts/classifier_chunk_ab.py::name_a  # dead — слот распаковки, нигде не читается (в отчёте печатаются жёсткие метки «A=…/B=…»)
-scripts/classifier_chunk_ab.py::name_b  # dead — то же
-scripts/digest_factcheck.py::_name_matches  # dead — потребитель check_facts переведён на _name_match_kind (#1008), булев враппер остался
 scripts/digest_factcheck.py::unsupported_facts  # test-only — только tests/test_classifier/test_digest_factcheck.py (сам скрипт зовёт check_facts напрямую)
-scripts/minimax_profile_relocate.py::AUTH_REL  # dead — константа не используется; путь строится из BUILD_ENV/REGION/CLIENT_ID
-scripts/probe_photo_upload.py::body2  # dead — тело ответа ретрая не читается
 tasks/parsing_tasks.py::VIDEO_REPORT_PATH  # dead — константа без потребителей
 
 # ── utils ───────────────────────────────────────────────────────────────────
@@ -212,7 +204,6 @@ utils/retry.py::log_error_to_db  # uncertain — только examples/
 utils/text_utils.py::clear_text  # alive — database/models_extended.py + scripts
 utils/translit.py::slugify_cyrillic  # test-only — tests/test_utils/test_translit.py
 utils/log_redaction.py::_reset_for_tests  # test-only — teardown-хелпер tests/test_logging/
-utils/post_utils.py::_vk_wiki_link  # dead — потребитель extract_source_attribution переписан 7eeeb9a (решение владельца 20.10 «ссылку на пост-источник убираем совсем»)
 
 # ── web/api ─────────────────────────────────────────────────────────────────
 web/api/notifications.py::NotificationsResponse  # dead — схема ни в одном endpoint

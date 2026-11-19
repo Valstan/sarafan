@@ -36,7 +36,6 @@ import json
 from pathlib import Path
 from typing import Optional
 
-AUTH_REL = Path("auth/prod/en/mcode-public")
 CLIENT_ID = "mcode-public"
 BUILD_ENV = "prod"
 REGION = "en"
