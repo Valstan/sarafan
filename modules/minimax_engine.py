@@ -1881,7 +1881,14 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
             break
         if offer.why:
             logger.info(
-                "minimax: Карман выбрал аккаунт %s — %s", (offer.account or {}).get("id"), offer.why
+                "minimax: Карман выбрал аккаунт %s — %s%s",
+                (offer.account or {}).get("id"),
+                offer.why,
+                # Пометка Кармана «рекомендую этот аккаунт» — часть контракта
+                # (ADR-0017 §9): показываем рядом с объяснением, чтобы было
+                # видно, когда движок берёт рекомендованный, а когда — просто
+                # лучший по очкам.
+                " (Карман рекомендует)" if offer.recommended else "",
             )
         # Карман ответил — снимаем общую паузу после сбоя связи.
         _write_shared_meta({META_KARMAN_DOWN_UNTIL: 0})

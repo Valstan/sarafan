@@ -16,7 +16,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple
 
 from sqlalchemy import select
@@ -36,10 +36,20 @@ async def pin_conflicts(
     session,
     targets: Sequence[Tuple[int, int]],
     publish_at: datetime,
-    *,
-    exclude_client_id: Optional[int] = None,
 ) -> List[int]:
-    """Сообщества из ``targets``, где закреп на окно ±сутки уже занят."""
+    """Сообщества из ``targets``, где закреп на окно ±сутки уже занят.
+
+    Правило: занят закреп **любого** клиента — в сообществе может висеть
+    только один закреп, и второй рекламный пост туда не влезает.
+
+    ⚠️ Раньше у функции был параметр ``exclude_client_id`` («не считать
+    конфликтом свои закрепы»), но тело его **не читало**: молчаливый no-op,
+    который выглядел как работающая фича. Ни одного вызова с этим
+    параметром не было, а правило «любого клиента» — сознательное, поэтому
+    параметр убран (P019, прогон 19.11). Если владелец захочет разрешить
+    клиенту второй закреп в своём же сообществе — это продуктовое решение,
+    и параметр вернётся вместе с ним.
+    """
     gids = [int(t[1]) for t in targets]
     if not gids:
         return []
@@ -173,10 +183,6 @@ async def build_default_unpinner(session) -> Pinner:  # pragma: no cover - се�
         return await publisher.unpin_post(int(owner_id), int(post_id))
 
     return unpin
-
-
-def pin_window_day(publish_at: datetime) -> date:
-    return publish_at.date()
 
 
 __all__ = [

@@ -920,3 +920,23 @@ def rewrite_posts(
             f" (причины: {', '.join(stats.reasons[:3])})" if stats.reasons else "",
         )
     return stats
+
+
+#: Публичный API модуля. ``rewrite_post`` — сознательный одно-постовый вход:
+#: батч-рефакторинг ``a2a3228`` перевёл волну на ``rewrite_posts``, но
+#: одно-постовый сценарий (постовый режим переписывания, потолок
+#: ``POST_REWRITE_MAX_POSTS=2``, ручные прогоны) остаётся рабочим и
+#: объявленным, а не «забытым хвостом» (P019, прогон 19.11).
+__all__ = [
+    "RewriteStats",
+    "build_batch_prompt",
+    "build_prompt",
+    "clean_headline",
+    "clean_rewrite",
+    "clean_topic_tag",
+    "rewrite_batch",
+    "rewrite_post",
+    "rewrite_posts",
+    "split_batch_reply",
+    "split_reply",
+]

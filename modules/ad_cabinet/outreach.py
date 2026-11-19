@@ -56,6 +56,11 @@ HEARTBEAT_KEY = "setka:ad_outreach_last_dispatch"
 MANUAL_CODES = (901, 902)  # 900 — человек занёс сообщество в ЧС: стоп-лист, не ручной список
 CABINET_URL = "https://сарафан.вмалмыже.рф/cabinet"
 SENT_STATUSES = ("sent", "done_manual")
+#: Статусы, которые **занимают лимит отправки** (30/сообщество, 150/сутки).
+#: ``done_manual`` — это ручная отправка владельцем через кабинет
+#: (``web/api/ad_outreach.py``: статус + ``sent_at``), и она тоже съедает лимит:
+#: иначе рассылка ограничивалась бы только автоматическими отправками, а
+#: ручные шли бы сверх лимита. Предикат один на всех — он и живёт здесь.
 
 Sender = Callable[
     ..., Awaitable[Dict[str, Any]]
@@ -159,7 +164,7 @@ async def build_audience(
         .all()
     )
     bl_rows = (await session.execute(select(AdOutreachBlacklist))).scalars().all()
-    blacklist = {int(b.vk_user_id) for b in bl_rows if b.until is None or b.until > now_utc}
+    blacklist = {int(b.vk_user_id) for b in bl_rows if is_blacklisted(b, now_utc)}
     # «Один контакт навсегда» + «один человек — в одной живой кампании»: мимо
     # все, у кого есть строка в любом статусе, кроме failed/skipped.
     busy_q = select(AdOutreachRecipient.vk_user_id).where(
@@ -468,7 +473,9 @@ async def _sent_today(session, day_start_utc: datetime) -> Dict[Optional[int], i
             .where(
                 or_(
                     and_(
-                        AdOutreachRecipient.status == "sent",
+                        # Отправленные — и автоматические, и ручные (владелец
+                        # написал сам через кабинет): обе занимают лимит.
+                        AdOutreachRecipient.status.in_(SENT_STATUSES),
                         AdOutreachRecipient.sent_at >= day_start_utc,
                     ),
                     # Взятые параллельным тиком — тоже занимают лимит.
@@ -912,6 +919,12 @@ async def campaign_counters(session, campaign_id: int) -> Dict[str, int]:
 
 
 def is_blacklisted(entry: Optional[AdOutreachBlacklist], now_utc: datetime) -> bool:
+    """Жива ли запись чёрного списка (бессрочная или срок не прошёл).
+
+    Правило одно на всех: запись действует, пока у неё не истёк ``until``.
+    Раньше оно было продублировано инлайном в :func:`build_audience` — две
+    копии правила разъезжаются при правке, поэтому инлайн зовёт эту функцию.
+    """
     return entry is not None and (entry.until is None or entry.until > now_utc)
 
 
