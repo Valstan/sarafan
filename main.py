@@ -64,6 +64,7 @@ from web.api import (  # noqa: E402
     regions,
     schedule_management,
     scheduler,
+    service_assistant,
     service_conditions,
     service_notifications,
     subscriber_growth,
@@ -255,6 +256,15 @@ app.include_router(
     service_conditions.router,
     prefix="/api",
     tags=["Service Conditions"],
+)
+# Ассистент единого профиля жителя (пилот #386, шаг 3): отвечает на вопрос
+# жителя по условиям услуги и — по ключу сервиса-владельца — по его факту.
+# Путь публичный (его зовут серверы соседних проектов), факты закрыты ключом
+# внутри двери, см. web/api/service_assistant.py.
+app.include_router(
+    service_assistant.router,
+    prefix="/api",
+    tags=["Service Assistant"],
 )
 
 
