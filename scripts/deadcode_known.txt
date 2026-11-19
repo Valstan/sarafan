@@ -14,10 +14,18 @@ database/models_extended.py::ScheduledPublication  # sleeping — задел Sma
 config/content_conveyor.py::get_site  # test-only — только tests/test_conveyor/test_config.py; прод идёт через get_active_sites
 config/promo.py::CHANNELS  # sleeping — задел этапа 0 раскрутки (#538); живой реестр — modules/promotion/settings.py::DEFAULT_CHANNELS
 config/promo.py::USER_TOKEN_CHANNELS  # sleeping — тот же задел этапа 0 (#538), потребителя не было никогда
+config/opencode.py::get_identity_reset_cmd  # sleeping — engine-side хук решения P210 (сброс идентичности делает systemd-таймер на боксе, а движок лишь ставит метку); потребителя не было никогда
+config/opencode.py::get_identity_reset_cooldown  # sleeping — тот же задел P210; env NEURAL_IDENTITY_RESET_COOLDOWN нигде не задан
 
 # ── modules/ad_cabinet ────────────────────────────────────────────────────────
 modules/ad_cabinet/packages.py::PROMO_POSTS  # sleeping — константа «3 поста акции»; фактическое значение задаётся литералом в web/static/js/ad_crm.js:1971
 modules/ad_cabinet/packages.py::KINDS  # sleeping — перечень видов пакетов; живой контроль — regex в web/api/ad_crm.py:2168
+modules/ad_cabinet/client_orders.py::TRUST_AFTER_POSTS  # test-only — рантайм читает TRUST_AFTER_ORDERS; константа живёт только в тестах (алиас ради обратной совместимости)
+modules/ad_cabinet/dm_channel.py::reset_for_tests  # test-only — autouse-фикстуры tests/test_ad_cabinet + tests/test_notifications
+modules/ad_cabinet/outreach.py::SENT_STATUSES  # sleeping — набор статусов без потребителя; лимит _sent_today считает литералом "sent" (+claimed), ручные done_manual в лимиты не входят — это вопрос поведения, а не чистки
+modules/ad_cabinet/outreach.py::is_blacklisted  # sleeping — та же логика продублирована инлайном в outreach.py:162
+modules/ad_cabinet/pinning.py::exclude_client_id  # sleeping — keyword-параметр pin_conflicts, тело его игнорирует; вызов с exclude_client_id= молча ничего не исключит (не «ложное срабатывание», а инертный параметр-ловушка)
+modules/ad_cabinet/pinning.py::pin_window_day  # sleeping — не вызывается, в __all__ не экспортируется
 
 # ── core / middleware — каталоги, вошедшие в скоуп скана 2026-09-04 ───────────
 # Таксономия исключений: объявлена целиком, потребителя нет у листьев.
@@ -99,6 +107,9 @@ modules/publisher/bulletin_builder.py::build_bezfoto_bulletin  # test-only — �
 modules/publisher/vk_publisher_extended.py::set_publish_candidates  # alive — используется в publish-workflow
 modules/publisher/vk_publisher_extended.py::is_test_mode  # uncertain — интерфейсный геттер без найденных вызовов
 modules/publisher/vk_publisher_extended.py::get_posts_remaining_today  # uncertain — интерфейсный геттер без найденных вызовов
+modules/publisher/daily_digest.py::build_digest  # test-only — прод идёт через build_digest_from_posts (tasks/digest_tasks.py:148); обёртка живёт в тестах
+modules/publisher/rewriter.py::rewrite_post  # dead — батч-рефакторинг a2a3228 перевёл вызовы на rewrite_batch, одно-постовая обёртка осталась без потребителя
+modules/source_names.py::reset_cache  # test-only — только tests/test_publisher/test_source_names.py; сам модуль жив (enrich_group_names)
 
 # ── modules/promotion ─────────────────────────────────────────────────────────
 modules/promotion/branding.py::COVER_SAFE_H  # test-only — только tests/test_promotion/test_cover_crop.py; сосед COVER_SAFE_W живой
@@ -109,6 +120,7 @@ modules/promotion/pairing.py::HOP_OBLAST  # sleeping — то же самое, �
 modules/promotion/settings.py::DISPATCH_CHANNELS  # test-only — dispatcher.py:723 перечисляет каналы литералами
 modules/promotion/vk_errors.py::alert  # sleeping — поле контракта PromoAction: выставляется, читают только тесты (будильщика владельца нет)
 modules/promotion/vk_errors.py::is_stop_signal  # test-only — dispatcher.py:579 сравнивает action.kind == "stop_module" напрямую
+modules/promotion/group_setup_vk.py::accepts_suggestions  # test-only — прод-потребитель снят #724 (18.09, «предложка только у публичных страниц»); остались тесты и ссылка в докстринге
 
 # ── modules: region_config / scheduler / notifiers / vk_monitor / router ───
 modules/region_config.py::get_active_regions  # dead — не вызывается
@@ -124,6 +136,17 @@ modules/service_activity_notifier.py::notify_health_check_start  # dead — не
 modules/service_activity_notifier.py::notify_health_check_complete  # dead — не вызывается
 modules/service_activity_notifier.py::notify_system_shutdown  # dead — не вызывается
 modules/service_notifications.py::REGION_START  # alive — член enum NotificationType
+modules/service_notifications.py::system_start  # sleeping — метод этапа, потребитель real_workflow.py снят рефакторингом 9ced2a1; сам менеджер жив (add_notification зовут три модуля и API). Вердикт 04.09 был sleeping — оставлен: интерфейс этапов ждёт решения владельца
+modules/service_notifications.py::topic_select  # sleeping — тот же снятый потребитель real_workflow.py (9ced2a1)
+modules/service_notifications.py::community_scan  # sleeping — тот же снятый потребитель real_workflow.py (9ced2a1)
+modules/service_notifications.py::post_filter  # sleeping — тот же снятый потребитель real_workflow.py (9ced2a1)
+modules/service_notifications.py::post_select  # sleeping — тот же снятый потребитель real_workflow.py (9ced2a1)
+modules/service_notifications.py::publish_vk  # sleeping — тот же снятый потребитель real_workflow.py (9ced2a1); строка "publish_vk" живёт только в enum
+modules/service_notifications.py::publish_telegram  # sleeping — тот же снятый потребитель real_workflow.py (9ced2a1)
+modules/service_notifications.py::publish_ok  # sleeping — тот же снятый потребитель real_workflow.py (9ced2a1)
+modules/service_notifications.py::publish_website  # sleeping — тот же снятый потребитель real_workflow.py (9ced2a1)
+modules/service_notifications.py::system_pause  # sleeping — тот же снятый потребитель real_workflow.py (9ced2a1)
+modules/service_notifications.py::region_queue  # sleeping — тот же снятый потребитель real_workflow.py (9ced2a1)
 modules/system_status_notifier.py::WORKFLOW_STARTING  # alive — член enum SystemStatusType
 modules/system_status_notifier.py::add_region_processing  # dead — не вызывается
 modules/test_info_post_collector.py::collect_test_info_posts_by_topic  # dead — не вызывается (test_info-стек удалён 2026-05-22)
@@ -153,6 +176,13 @@ modules/conveyor/source.py::summarize_for_prompt  # test-only — LLM-сводк
 # ── modules: classifier / radar_id ─────────────────────────────────────────
 modules/classifier/schema.py::has_merge_signal  # sleeping — для merge agree-rate (VERDICT_TYPES), ещё не подключён в прод-подсчёт
 modules/radar_id/keys.py::keys_available  # sleeping — readiness-хелпер RS256-ключа (Ф1), не подключён к health-check
+modules/classifier/engine_panel.py::final_r  # dead — слот распаковки в цикле, в теле не читается; bucket["final"] в коде нет ни разу
+modules/deepseek_client.py::reset_balance_breaker  # test-only — autouse-фикстура tests/test_deepseek/test_client.py
+modules/karman_minimax.py::recommended  # sleeping — поле контракта Кармана (ADR-0017 §9), парсится в PoolOffer, но не читается нигде (рядом используется offer.why)
+modules/minimax_engine.py::SIGNIN_TZ  # dead — значение продублировано литералом "Europe%2FMoscow" в двух signin-вызовах
+modules/minimax_engine.py::ENV_CHUNK_SIZE  # dead — дубль env-имени; по-настоящему читает config/classifier.py::get_minimax_chunk_size
+modules/service_conditions.py::CONDITION_FIELDS  # test-only — только tests/test_config/test_service_conditions.py; в проде форма условия пишется литералом в _condition()
+modules/service_conditions.py::service_for_condition  # test-only — только tests/test_config/test_service_conditions.py
 
 # ── monitoring / scripts / tasks ────────────────────────────────────────────
 monitoring/metrics.py::db_connections_active  # alive — multiproc-gauge, проверяется test_metrics_multiproc
@@ -166,6 +196,12 @@ monitoring/metrics.py::posts_published_total  # sleeping — Prometheus-метр
 modules/radar/auth.py::verify_session_token  # alive — вызывается в middleware/auth_gate.py:127
 scripts/migrate_mongodb_config.py::CATEGORY_MAPPING  # dead — one-shot Mongo-миграция, маппинг не читается
 scripts/probe_community_dm_capabilities.py::unread_peers  # dead — локальная переменная probe-скрипта
+scripts/classifier_chunk_ab.py::name_a  # dead — слот распаковки, нигде не читается (в отчёте печатаются жёсткие метки «A=…/B=…»)
+scripts/classifier_chunk_ab.py::name_b  # dead — то же
+scripts/digest_factcheck.py::_name_matches  # dead — потребитель check_facts переведён на _name_match_kind (#1008), булев враппер остался
+scripts/digest_factcheck.py::unsupported_facts  # test-only — только tests/test_classifier/test_digest_factcheck.py (сам скрипт зовёт check_facts напрямую)
+scripts/minimax_profile_relocate.py::AUTH_REL  # dead — константа не используется; путь строится из BUILD_ENV/REGION/CLIENT_ID
+scripts/probe_photo_upload.py::body2  # dead — тело ответа ретрая не читается
 tasks/parsing_tasks.py::VIDEO_REPORT_PATH  # dead — константа без потребителей
 
 # ── utils ───────────────────────────────────────────────────────────────────
@@ -176,6 +212,7 @@ utils/retry.py::log_error_to_db  # uncertain — только examples/
 utils/text_utils.py::clear_text  # alive — database/models_extended.py + scripts
 utils/translit.py::slugify_cyrillic  # test-only — tests/test_utils/test_translit.py
 utils/log_redaction.py::_reset_for_tests  # test-only — teardown-хелпер tests/test_logging/
+utils/post_utils.py::_vk_wiki_link  # dead — потребитель extract_source_attribution переписан 7eeeb9a (решение владельца 20.10 «ссылку на пост-источник убираем совсем»)
 
 # ── web/api ─────────────────────────────────────────────────────────────────
 web/api/notifications.py::NotificationsResponse  # dead — схема ни в одном endpoint
