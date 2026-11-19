@@ -32,7 +32,7 @@
 ## 🔴 Блокеры
 
 
-- **P195** [🔴 Muse (Zen free) geo-заблокирована с IP бокса](pending/P195-muse-geo-block-ip-boxa.md) · `⏱ 2026-10-14 · snooze 0 · parked · условие: донорский VPS под ssh -D или платный прокси; цепочка фолбэков снимает блокировку — прод не ждёт решения`
+- **P195** [✅ Muse geo-заблокирована с IP бокса — закрыто 19.11 как невостребованная](pending/P195-muse-geo-block-ip-boxa.md) · `⏱ 2026-11-19 · snooze 0 · ✅ ЗАКРЫТО 2026-11-19 — muse вышла из цепочки 14.10, OpenCode снят 14.11, трафик на MiniMax; вернуться, только если OpenCode вернётся`
 
 - **P164** [🔴 OOM вернулся: 13.11 убит воркер, 14.11 трижды minimax-code (замер 19.11)](pending/P164-celery-vorker-ubivaetsya-oom-primerno-raz-v.md) · `⏱ 2026-11-19 · snooze 0 · fresh · «OOM с 06.10 не было» было неверно; после 17.11 весь трафик на MiniMax, агент-CLI ~330 МБ при 1536 МБ и swap=0; лечение: worker_max_memory_per_child 350→200 МБ + RAM/vSwap у провайдера`
 - **P163** [🔴 Swap завести НЕЛЬЗЯ изнутри — это контейнер OpenVZ (проверено опытом 2026-09-14)](pending/P163-swap-zavesti-nelzya-iznutri-eto-konteyner-openvz.md) · `⏱ 2026-11-19 · snooze 0 · fresh · **условие расконсервации выполнено: OOM вернулся** (13.11 celery, 14.11 minimax-code ×3 — P164); своп изнутри невозможен, лечится памятью: провайдеру заказать RAM/vSwap`
