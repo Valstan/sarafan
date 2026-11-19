@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -67,3 +68,33 @@ def test_has_reports_presence_without_value(mod, monkeypatch):
     assert mod._has("MAX_TOKEN") is False
     monkeypatch.setenv("MAX_TOKEN", "   ")
     assert mod._has("MAX_TOKEN") is False
+
+
+def test_load_env_file_reads_pairs_without_breaking_systemd(mod, tmp_path, monkeypatch):
+    """env-файл читается в окружение; уже заданное systemd не перебивается."""
+    env_file = tmp_path / "setka.env"
+    env_file.write_text(
+        "# комментарий\n"
+        "\n"
+        "MAX_WEBHOOK_SECRET=секрет\n"
+        'AD_NEURAL_MODE="assist"\n'
+        "ЗНАЧЕНИЕ_С_ПРОБЕЛАМИ = с пробелами\n",
+        encoding="utf-8",
+    )
+    monkeypatch.delenv("MAX_WEBHOOK_SECRET", raising=False)
+    monkeypatch.delenv("AD_NEURAL_MODE", raising=False)
+    monkeypatch.delenv("ЗНАЧЕНИЕ_С_ПРОБЕЛАМИ", raising=False)
+    monkeypatch.setenv("MAX_TOKEN", "из-systemd")
+
+    assert mod.load_env_file(str(env_file)) == 3
+    assert os.environ["MAX_WEBHOOK_SECRET"] == "секрет"
+    assert os.environ["AD_NEURAL_MODE"] == "assist"
+    assert os.environ["ЗНАЧЕНИЕ_С_ПРОБЕЛАМИ"] == "с пробелами"
+    # systemd сильнее файла: значение не перебито
+    assert os.environ["MAX_TOKEN"] == "из-systemd"
+
+
+def test_load_env_file_missing_file_is_not_fatal(mod, tmp_path, monkeypatch):
+    """Отсутствующий env-файл — не повод падать: скрипт живёт дальше."""
+    monkeypatch.delenv("MAX_TOKEN", raising=False)
+    assert mod.load_env_file(str(tmp_path / "нет-такого.env")) == 0
