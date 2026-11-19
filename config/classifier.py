@@ -20,6 +20,15 @@ Env vars:
                                       # publish-посты, при молчании фильтра —
                                       # политика деградации владельца (см.
                                       # modules/classifier/selection.py); дефолт выкл
+  CLASSIFIER_ADVERTISEMENT_FILTER_ENABLED=1
+                                      # редакционная отсечка «advertisement» (шаг 5):
+                                      # 1 — режет (дефолт, нынешнее поведение),
+                                      # 0 — снята везде (шаг 3 звена 5, P091)
+  CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS
+                                      # CSV кодов регионов, где отсечка
+                                      # «advertisement» НЕ применяется: проба на
+                                      # одном районе (P091, рекомендация). Пусто —
+                                      # отсечка работает везде, как сейчас
   CLASSIFIER_DISTILL_ENABLED=0        # автоматическая чеканка правил еженедельным
                                       # beat-слотом classifier-distill-weekly;
                                       # дефолт выкл — правила чеканит ручная
@@ -40,7 +49,7 @@ from __future__ import annotations
 import logging
 import os
 from pathlib import Path
-from typing import List
+from typing import List, Set
 
 logger = logging.getLogger(__name__)
 
@@ -71,7 +80,23 @@ def classifier_disabled() -> bool:
     return os.getenv("CLASSIFIER_DISABLED", "0").strip().lower() in ("1", "true", "yes", "on")
 
 
-def advertisement_filter_enabled() -> bool:
+def advertisement_filter_exempt_regions() -> Set[str]:
+    """Коды регионов, где отсечка ``advertisement`` **не применяется**.
+
+    env ``CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS`` (CSV кодов регионов).
+    Пусто → пустое множество → отсечка работает везде, то есть нынешнее
+    поведение.
+
+    **Зачем это отдельный список, а не ещё один флаг.** P091 требует снять
+    отсечку **пробой на одном районе** («а не разом на сети»): цена шага мерится
+    фактической причиной, и сеть трогать раньше замера нельзя. Глобальный флаг
+    для такой пробы не годится — он снимает отсечку сразу везде.
+    """
+    raw = os.getenv("CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS", "") or ""
+    return {c.strip().lower() for c in raw.replace(";", ",").split(",") if c.strip()}
+
+
+def advertisement_filter_enabled(region_code: str = "") -> bool:
     """Редакционная отсечка ``advertisement`` (шаг 5) — kill-switch шага 3 звена 5.
 
     env ``CLASSIFIER_ADVERTISEMENT_FILTER_ENABLED``. **Дефолт — включён** (то есть
@@ -92,12 +117,25 @@ def advertisement_filter_enabled() -> bool:
     же класс, что замер 12.08 (43 %): за два месяца расхождение не сошло на
     нет. Подробности — ``docs/pending/P091-*.md``.
 
+    **Региональное исключение.** ``region_code`` — код региона поста (пусто →
+    исключений не бывает). Регион из
+    ``CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS`` отсечку **не получает**:
+    это режим «проба на одном районе» из P091 (замер фактической цены на
+    одном районе вместо разом на сети). Два ключа не исключают друг друга:
+    глобальный ``=0`` снимает отсечку везде, исключение — только в
+    перечисленных регионах.
+
     Отключение — решение владельца (шаг 3 звена 5, 20.11); цена шага мерить
     фактической причиной, а не пере-выведенной (P091 §6), поэтому по умолчанию
     флаг остаётся включённым, а переключение — одно env + рестарт.
     """
     raw = os.getenv("CLASSIFIER_ADVERTISEMENT_FILTER_ENABLED", "1").strip().lower()
-    return raw not in ("0", "false", "no", "off")
+    if raw in ("0", "false", "no", "off"):
+        return False
+    code = (region_code or "").strip().lower()
+    if code and code in advertisement_filter_exempt_regions():
+        return False
+    return True
 
 
 def get_region_allowlist() -> List[str]:

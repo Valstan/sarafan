@@ -25,6 +25,16 @@ class _DummyVk:
     pass
 
 
+class _RegionStub:
+    """Минимальный region_config: парсеру из него нужны только эти поля."""
+
+    def __init__(self, region_code: str):
+        self.region_code = region_code
+        self.black_id = []
+        self.delete_msg_blacklist = None
+        self.filter_group_by_region_words = None
+
+
 def _fresh_post(owner_id: int, post_id: int, text: str, marked_as_ads: bool = False):
     return {
         "owner_id": owner_id,
@@ -110,6 +120,66 @@ class TestAuditMirrorsTheFlag:
         assert _derive_drop_reason(post, "novost", None) is None
 
 
+class TestRegionalExemption:
+    """Проба на одном районе (P091): средняя отсечка снимается только там.
+
+    Глобальный флаг снимает отсечку сразу везде, а P091 требует снять её
+    **пробой на одном районе** — «цена шага мерится фактической причиной», а не
+    разом на сети. Поэтому нужен отдельный список исключений по кодам регионов.
+    """
+
+    @pytest.mark.asyncio
+    async def test_exempt_region_keeps_private_ad(self, monkeypatch):
+        """В исключённом районе средняя отсечка не режет."""
+        monkeypatch.setenv("CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS", "mi")
+        parser = _bare_parser()
+        post = _fresh_post(-100, 611, _PRIVATE_AD)
+        result = await parser._filter_post(post, "novost", _RegionStub("mi"), [], set(), set())
+        assert result is not None
+        assert parser.stats["posts_filtered_advertisement"] == 0
+
+    @pytest.mark.asyncio
+    async def test_other_region_still_filtered(self, monkeypatch):
+        """Соседний район не задет: исключение точечное."""
+        monkeypatch.setenv("CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS", "mi")
+        parser = _bare_parser()
+        post = _fresh_post(-100, 612, _PRIVATE_AD)
+        assert (
+            await parser._filter_post(post, "novost", _RegionStub("ur"), [], set(), set()) is None
+        )
+        assert parser.stats["posts_filtered_advertisement"] == 1
+
+    @pytest.mark.asyncio
+    async def test_exemption_does_not_touch_hard_spam(self, monkeypatch):
+        """5a — бан-защита. Исключение снимает только среднюю отсечку."""
+        monkeypatch.setenv("CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS", "mi")
+        parser = _bare_parser()
+        post = _fresh_post(-100, 613, "Удалённая работа, отклик в личку: 89123456789 " * 3)
+        await parser._filter_post(post, "novost", _RegionStub("mi"), [], set(), set())
+        assert parser.stats["posts_filtered_hard_spam"] > 0
+
+    @pytest.mark.asyncio
+    async def test_exemption_does_not_touch_marked_ads(self, monkeypatch):
+        """5c — чужая размеченная реклама: движок её структурно не видит."""
+        monkeypatch.setenv("CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS", "mi")
+        parser = _bare_parser()
+        post = _fresh_post(-100, 614, "Открылся новый салон связи в центре города " * 3, True)
+        assert (
+            await parser._filter_post(post, "novost", _RegionStub("mi"), [], set(), set()) is None
+        )
+        assert parser.stats["posts_filtered_marked_ad"] == 1
+
+    def test_audit_mirrors_the_regional_exemption(self, monkeypatch):
+        """Аудит обязан пере-выводить ПРИЧИНУ настоящую: в пробном районе
+        отсечки нет — значит, и в журнале её быть не должно."""
+        from modules.curation.collection_audit import _derive_drop_reason
+
+        post = {"owner_id": -100, "id": 615, "text": _PRIVATE_AD}
+        monkeypatch.setenv("CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS", "mi")
+        assert _derive_drop_reason(post, "novost", _RegionStub("mi")) is None
+        assert _derive_drop_reason(post, "novost", _RegionStub("ur")) == "advertisement"
+
+
 class TestFlagHelper:
     def test_default_is_enabled(self, monkeypatch):
         from config.classifier import advertisement_filter_enabled
@@ -130,3 +200,21 @@ class TestFlagHelper:
 
         monkeypatch.setenv("CLASSIFIER_ADVERTISEMENT_FILTER_ENABLED", value)
         assert advertisement_filter_enabled() is True
+
+    def test_exempt_regions_are_off_the_filter(self, monkeypatch):
+        """Исключение снимает отсечку только в перечисленных регионах."""
+        from config.classifier import advertisement_filter_enabled
+
+        monkeypatch.delenv("CLASSIFIER_ADVERTISEMENT_FILTER_ENABLED", raising=False)
+        monkeypatch.setenv("CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS", "mi, ur")
+        assert advertisement_filter_enabled("mi") is False
+        assert advertisement_filter_enabled("UR") is False  # регистр не важен
+        assert advertisement_filter_enabled("klz") is True
+
+    def test_empty_exempt_list_keeps_current_behaviour(self, monkeypatch):
+        """Пустой список — нынешнее поведение: отсечка работает везде."""
+        from config.classifier import advertisement_filter_enabled
+
+        monkeypatch.delenv("CLASSIFIER_ADVERTISEMENT_FILTER_ENABLED", raising=False)
+        monkeypatch.delenv("CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS", raising=False)
+        assert advertisement_filter_enabled("mi") is True
