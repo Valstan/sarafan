@@ -145,6 +145,21 @@ single_alert_token = _getenv("TELEGRAM_ALERT_BOT_TOKEN")
 if single_alert_token:
     TELEGRAM_TOKENS.setdefault("ALERT", single_alert_token)
 
+# MAX (мессенджер VK) — канал доставки уведомлений владельцу: бот «САРАФАН»
+# живёт в MAX, туда приходят карточки рекламных заявок, оттуда владелец
+# отвечает автору в один тап.
+#
+# Секрет — личный токен бота, он НЕ раздаётся в комнаты и потому лежит
+# прямо в env-файле приложения на боксе (600 root:root), как и остальные
+# «наши» секреты. Формы grant'ов сюда не подходят: allowlist принимает
+# только <SITE>_INGEST_KEY и <SITE>_PUBLISH_KEY.
+MAX_TOKEN = _getenv("MAX_TOKEN", "")
+# Чат-получатель уведомлений (чат с ботом «САРАФАН»).
+MAX_CHAT_ID = _getenv("MAX_CHAT_ID", "")
+# Секрет вебхука MAX: им подписываются события (заголовок
+# X-Max-Bot-Api-Secret). Пусто → вебхук выключен.
+MAX_WEBHOOK_SECRET = _getenv("MAX_WEBHOOK_SECRET", "")
+
 # VK tokens
 VK_TOKENS: Dict[str, str] = {}
 VK_TOKENS.update(_collect_prefixed_tokens("VK_TOKEN_"))

@@ -52,6 +52,7 @@ from web.api import (  # noqa: E402
     health,
     ingest_contract,
     local_engine,
+    max_webhook,
     notifications,
     parsing,
     parsing_stats,
@@ -265,6 +266,14 @@ app.include_router(
     service_assistant.router,
     prefix="/api",
     tags=["Service Assistant"],
+)
+# Вебхук Bot API MAX: приём нажатий на кнопку «Ответить автору» в карточке
+# рекламной заявки. Публичный путь (зовёт MAX извне), но с собственной
+# проверкой заголовка X-Max-Bot-Api-Secret — см. web/api/max_webhook.py.
+app.include_router(
+    max_webhook.router,
+    prefix="/api",
+    tags=["MAX Webhook"],
 )
 
 

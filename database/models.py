@@ -682,6 +682,10 @@ class AdRequest(Base):
     # момент авто-ответа на новую заявку. NULL — ещё не приветствовали; ставится
     # один раз (идемпотентность) фоновой таской auto-greet-ad-requests.
     greeting_sent_at = Column(DateTime, nullable=True)
+    # Уведомление в мессенджер MAX (пилот #386, миграция 116): момент отправки
+    # карточки заявки боту «САРАФАН». NULL — ещё не отправляли. Отдельная метка
+    # от greeting_sent_at: то приветствие рекламодателю, это уведомление владельцу.
+    max_notified_at = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
