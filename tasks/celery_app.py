@@ -664,6 +664,20 @@ def notify_max_new_ads():
     try:
         result = run_coro(_run())
     except Exception as e:
+        # Миграция 116 может быть ещё не применена — тогда канал MAX просто
+        # выключен, и это НЕ поломка. Шуметь тревожным ошибкой каждые полчаса
+        # нельзя: 28 раз в сутки «failed» читается как авария, а на деле
+        # нечего делать.
+        if "max_notified_at" in str(e):
+            logger.warning(
+                "MAX notify: миграция 116 не применена (нет ad_requests.max_notified_at) "
+                "— уведомления в MAX выключены, скан работает как обычно"
+            )
+            return {
+                "success": False,
+                "skipped": "migration_116_not_applied",
+                "timestamp": datetime.now().isoformat(),
+            }
         logger.error("notify_max_new_ads failed: %s", e, exc_info=True)
         return {"success": False, "timestamp": datetime.now().isoformat(), "error": str(e)}
 
