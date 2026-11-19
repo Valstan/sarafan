@@ -30,6 +30,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -37,6 +38,19 @@ import re
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
+
+#: Ключ Redis: пометка «этот пост уже судили».
+#:
+#: **Зачем.** Скан перечитывает ВСЕ предложки региона (до 100 на группу) при
+#: каждом проходе, а проходов 28 в сутки (каждые полчаса с 8:00 до 22:00).
+#: Без пометки судья звал бы движок на одни и те же посты десятки раз в сутки
+#: и выел бы пул MiniMax целиком. Пометка делает вызов **одним на пост**.
+#:
+#: Пометка живёт 30 суток. Предложка в ленте предложек висит долго, но не
+#: вечно; и после срока пост, попавший в ленту снова, будет оценён заново —
+#: это правильно, правила модели могли измениться.
+_JUDGED_KEY = "setka:notifications:max:judged"
+JUDGED_TTL_SECONDS = 30 * 24 * 3600
 
 #: Режим нейросетевого судьи (env ``AD_NEURAL_MODE``):
 #:
@@ -112,6 +126,61 @@ def mode() -> str:
     return raw if raw in (MODE_OFF, MODE_ASSIST, MODE_ASSIST_VETO) else DEFAULT_MODE
 
 
+def _redis() -> Any:
+    """Клиент Redis (db=1, как у хранилища уведомлений). ``None`` — недоступен."""
+    try:
+        from modules.notifications.storage import NotificationsStorage
+
+        return NotificationsStorage().redis_client
+    except Exception:  # pragma: no cover - инфраструктурный сбой
+        return None
+
+
+def post_key(post: Dict[str, Any]) -> str:
+    """Устойчивый ключ поста для пометки «уже судили».
+
+    У предложки есть ``community_vk_id`` + ``vk_post_id``, у входящего ЛС —
+    ``community_vk_id`` + ``last_message_id``. Если id нет вовсе, ключ строится
+    по тексту: иначе один и тот же текст судился бы на каждом скане.
+    """
+    community = str(
+        post.get("community_vk_id") or post.get("community_id") or post.get("region_code") or ""
+    )
+    post_id = post.get("vk_post_id") or post.get("last_message_id") or ""
+    if not post_id:
+        digest = hashlib.sha1(
+            (str(post.get("text") or "").strip()).encode("utf-8", "replace")
+        ).hexdigest()[:16]
+        return f"{community}:text:{digest}"
+    return f"{community}:{post_id}"
+
+
+def already_judged(key: str) -> bool:
+    """Судили ли этот пост раньше (Redis недоступен — считаем, что нет)."""
+    if not key:
+        return False
+    client = _redis()
+    if client is None:
+        return False
+    try:
+        return bool(client.exists(f"{_JUDGED_KEY}:{key}"))
+    except Exception:  # pragma: no cover - инфраструктурный сбой
+        return False
+
+
+def mark_judged(key: str) -> None:
+    """Пометить пост как оценённый (срок 30 суток)."""
+    if not key:
+        return
+    client = _redis()
+    if client is None:
+        return
+    try:
+        client.setex(f"{_JUDGED_KEY}:{key}", JUDGED_TTL_SECONDS, "1")
+    except Exception as e:  # noqa: BLE001 - повторный судья не опасен
+        logger.warning("ad neural: не удалось пометить пост как оценённый: %s", e)
+
+
 def enabled() -> bool:
     """Включён ли нейросетевой судья."""
     return mode() != MODE_OFF
@@ -137,15 +206,27 @@ def _extract_json(content: str) -> Optional[Dict[str, Any]]:
     return parsed if isinstance(parsed, dict) else None
 
 
-async def judge(text: str, *, timeout: float = 45.0) -> Optional[Dict[str, Any]]:
+async def judge(
+    text: str,
+    *,
+    post_key: Optional[str] = None,
+    timeout: float = 45.0,
+) -> Optional[Dict[str, Any]]:
     """Спросить движок: это рекламная заявка?
 
     Возвращает ``{"is_ad": bool, "confidence": int, "reason": str}`` либо
     ``None`` — если движок не ответил или ответ не разобрался. ``None`` и
     «движок сказал "нет"» — разные вещи: первое означает «решает алгоритм».
+
+    ``post_key`` — пометка «уже судили»: без неё один и тот же пост получил бы
+    по одному вызову движка на КАЖДЫЙ скан (их 28 в сутки), и пул MiniMax
+    кончился бы на первом же регионе.
     """
     prompt_text = (text or "").strip()[:TEXT_LIMIT]
     if not prompt_text:
+        return None
+
+    if post_key and already_judged(post_key):
         return None
 
     try:
@@ -188,6 +269,8 @@ async def judge(text: str, *, timeout: float = 45.0) -> Optional[Dict[str, Any]]
         return None
 
     reason = str(payload.get("reason") or "").strip()
+    if post_key:
+        mark_judged(post_key)
     return {
         "is_ad": is_ad,
         "confidence": confidence,
@@ -199,12 +282,16 @@ __all__ = (
     "AD_SYSTEM_PROMPT",
     "AD_TASK_TEXT",
     "DEFAULT_MODE",
+    "JUDGED_TTL_SECONDS",
     "MIN_CONFIDENCE",
     "MODE_ASSIST",
     "MODE_ASSIST_VETO",
     "MODE_OFF",
     "TEXT_LIMIT",
+    "already_judged",
     "enabled",
     "judge",
+    "mark_judged",
     "mode",
+    "post_key",
 )

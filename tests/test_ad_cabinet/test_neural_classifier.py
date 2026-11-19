@@ -107,6 +107,76 @@ class TestJudge:
         assert seen["user"] == "хочу разместить рекламу, сколько стоит?"
 
 
+class TestJudgedMarker:
+    """Скан перечитывает все предложки 28 раз в сутки — судья должен звать движок
+    ОДИН раз на пост, иначе пул MiniMax кончится на первом же регионе."""
+
+    def test_post_key_is_stable_for_a_post(self):
+        post = {"community_vk_id": -123, "vk_post_id": 777, "text": "хочу рекламу"}
+        assert neural.post_key(post) == neural.post_key(post)
+        assert "-123:777" in neural.post_key(post)
+
+    def test_post_key_falls_back_to_text_hash(self):
+        post = {"community_vk_id": -123, "text": "хочу рекламу"}
+        key = neural.post_key(post)
+        assert key.startswith("-123:text:")
+        assert key == neural.post_key(dict(post))
+
+    def test_different_posts_get_different_keys(self):
+        a = neural.post_key({"community_vk_id": -1, "vk_post_id": 1})
+        b = neural.post_key({"community_vk_id": -1, "vk_post_id": 2})
+        assert a != b
+
+    async def test_already_judged_post_is_not_sent_to_engine(self, monkeypatch):
+        from modules.classifier import headless
+
+        calls = []
+
+        def fake_chat(**kw):
+            calls.append(kw)
+            return {"ok": True, "content": '{"is_ad": true, "confidence": 90, "reason": "да"}'}
+
+        monkeypatch.setattr(headless, "chat", fake_chat)
+        monkeypatch.setattr(neural, "already_judged", lambda key: True)
+        monkeypatch.setattr(neural, "mark_judged", lambda key: None)
+
+        verdict = await neural.judge("хочу разместить рекламу", post_key="-1:777")
+        assert verdict is None
+        assert not calls, "уже оценённый пост не должен звать движок снова"
+
+    async def test_verdict_marks_the_post(self, monkeypatch):
+        from modules.classifier import headless
+
+        monkeypatch.setattr(
+            headless,
+            "chat",
+            lambda **kw: {
+                "ok": True,
+                "content": '{"is_ad": true, "confidence": 90, "reason": "да"}',
+            },
+        )
+        marked = []
+        monkeypatch.setattr(neural, "already_judged", lambda key: False)
+        monkeypatch.setattr(neural, "mark_judged", lambda key: marked.append(key))
+
+        verdict = await neural.judge("хочу разместить рекламу", post_key="-1:777")
+        assert verdict is not None
+        assert marked == ["-1:777"]
+
+    async def test_engine_failure_does_not_mark(self, monkeypatch):
+        """Движок не ответил — пост должен быть оценён заново на следующем скане."""
+        from modules.classifier import headless
+
+        monkeypatch.setattr(headless, "chat", lambda **kw: {"ok": False, "reason": "pool_dead"})
+        marked = []
+        monkeypatch.setattr(neural, "already_judged", lambda key: False)
+        monkeypatch.setattr(neural, "mark_judged", lambda key: marked.append(key))
+
+        verdict = await neural.judge("хочу разместить рекламу", post_key="-1:777")
+        assert verdict is None
+        assert not marked, "неответивший движок не должен помечать пост как оценённый"
+
+
 class TestClassifyIntegration:
     async def test_off_mode_keeps_algorithmic_result(self, monkeypatch):
         """В режиме off ответ — ровно алгоритмический, движок не зовётся.

@@ -122,15 +122,31 @@ ssh sarafan 'sudo systemctl restart setka'
 
 ### Шаг 3. Env на боксе
 
-В `/etc/setka/setka.env`:
+В `/etc/setka/setka.env` (600 root:root). Секреты — **не в чат и не в
+репозиторий**; вставка идёт прямо на боксе, значение в переписке не появляется:
 
-```
-MAX_TOKEN=<токен бота>
-MAX_WEBHOOK_SECRET=<секрет подписки>
-# MAX_CHAT_ID — необязательно: чат выучится сам из bot_started
+```bash
+ssh sarafan 'sudo -n cp -a /etc/setka/setka.env /tmp/setka.env.bak.20261119'
+ssh sarafan 'sudo -n sh -c "echo MAX_WEBHOOK_SECRET=\$(openssl rand -hex 24) >> /etc/setka/setka.env"'
+ssh sarafan 'sudo -n sh -c "echo AD_NEURAL_MODE=assist >> /etc/setka/setka.env"'
+ssh sarafan 'sudo -n chmod 600 /etc/setka/setka.env'
 ```
 
-И перезапуск: `ssh sarafan 'sudo systemctl restart setka setka-celery-worker'`.
+`MAX_TOKEN=<токен бота>` дописывается туда же (одной строкой) **или** кладётся
+в комнату КАРМАНА — имя добавлено в `ACCEPTED_NAMES` (`modules/secrets_bootstrap.py`),
+так что токен доедет в процесс при старте.
+
+`MAX_CHAT_ID` не нужен: чат выучится сам из `bot_started`.
+
+### Экономия вызовов: судья зовёт движок ОДИН раз на пост
+
+Скан перечитывает **все** предложки региона (до 100 на группу) при каждом
+проходе, а проходов 28 в сутки. Без пометки «уже судили» судья звал бы
+движок на одни и те же посты десятки раз в сутки и выел бы пул MiniMax
+целиком. Поэтому пометка в Redis (db=1, срок 30 суток): `post_key` строится
+из `community_vk_id` + `vk_post_id` (у ЛС — `last_message_id`), а если id нет
+— из хэша текста. **Движок не ответил — пометки нет**, пост будет оценён
+заново на следующем проходе.
 
 ### Шаг 4. Включить нейросетевого судью
 

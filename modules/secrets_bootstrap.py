@@ -135,6 +135,13 @@ ACCEPTED_NAMES: frozenset = frozenset(
         "CLOUDFLARE_API_TOKEN",
         "AD_AUTO_GREETING_COMMUNITIES",
         "AD_AUTO_GREETING_TEXT",
+        # MAX (мессенджер VK) — канал уведомлений о рекламных заявках.
+        # MAX_TOKEN — личный токен бота «САРАФАН», раздаётся владельцем через
+        # комнату; MAX_WEBHOOK_SECRET — наш секрет подписки (им MAX подписывает
+        # вебхук). AD_NEURAL_MODE — режим нейросетевого судьи заявок.
+        "MAX_TOKEN",
+        "MAX_WEBHOOK_SECRET",
+        "AD_NEURAL_MODE",
         "BULLETIN_CURATION_SHADOW_ENABLED",
         "BULLETIN_CURATION_REGION_CODES",
         "COLLECTION_AUDIT_SHADOW_ENABLED",
