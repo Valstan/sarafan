@@ -82,7 +82,7 @@ async def main() -> int:
             print("отказы чанков:", run["failures"])
         print(json.dumps(_score(posts, run["verdicts"]), ensure_ascii=False, indent=2))
 
-    (name_a, run_a), (name_b, run_b) = list(runs.items())
+    (_name_a, run_a), (_name_b, run_b) = list(runs.items())
     by_lip_a = {v.lip: v for v in run_a["verdicts"]}
     by_lip_b = {v.lip: v for v in run_b["verdicts"]}
     a_right_b_wrong = b_right_a_wrong = 0

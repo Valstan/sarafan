@@ -74,7 +74,9 @@ def collect_string_task_references() -> dict[str, str]:
     for directory in _SCAN_DIRS:
         for path in sorted((REPO_ROOT / directory).rglob("*.py")):
             try:
-                tree = ast.parse(path.read_text(encoding="utf-8"))
+                # utf-8-sig: файл с BOM иначе падает в SyntaxError и молча
+                # выпадает из сверки — а в нём могут быть вызовы задач.
+                tree = ast.parse(path.read_text(encoding="utf-8-sig"))
             except SyntaxError:  # синтаксис ловит flake8, гейт из-за него не валим
                 continue
             constants = _string_constants(tree)

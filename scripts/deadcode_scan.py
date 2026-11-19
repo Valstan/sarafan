@@ -105,6 +105,19 @@ FRAMEWORK_BASE_HINTS = {"BaseModel", "BaseSettings", "Base", "DeclarativeBase"}
 KNOWN_FILE = ROOT / "scripts" / "deadcode_known.txt"
 
 
+def _read_source(path: Path) -> str:
+    """Прочитать исходник, сняв BOM, если он есть.
+
+    ``utf-8-sig`` читает одинаково и с BOM, и без него. Обычный ``utf-8``
+    на файле с BOM роняет ``ast.parse`` в SyntaxError — а парсер ловит её и
+    идёт дальше, то есть **файл молча выпадает из сканирования**: его задачи
+    не попадают в allowlist, его поля — в allowlist фреймворков. Так
+    терялись 9 Celery-задач из ``tasks/parsing_scheduler_tasks.py`` и целый
+    модуль каскадной сводки (семь файлов с BOM в зоне сканирования).
+    """
+    return path.read_text(encoding="utf-8-sig")
+
+
 def _decorator_root(node: ast.expr) -> str:
     """'@app.task(name=...)' → 'app.task'; '@shared_task' → 'shared_task'."""
     if isinstance(node, ast.Call):
@@ -124,7 +137,7 @@ def collect_celery_task_names() -> set[str]:
     tasks_dir = ROOT / "tasks"
     for py in sorted(tasks_dir.glob("*.py")):
         try:
-            tree = ast.parse(py.read_text(encoding="utf-8"))
+            tree = ast.parse(_read_source(py))
         except SyntaxError as exc:  # не валим скан из-за одного файла
             print(f"WARN: SyntaxError in {py}: {exc}", file=sys.stderr)
             continue
@@ -168,7 +181,7 @@ def collect_framework_field_names() -> set[str]:
     class_fields: dict[str, set[str]] = {}
     for py in _iter_scan_files():
         try:
-            tree = ast.parse(py.read_text(encoding="utf-8"))
+            tree = ast.parse(_read_source(py))
         except SyntaxError:
             continue
         for node in ast.walk(tree):

@@ -268,11 +268,6 @@ def _name_match_kind(name: str, source_words: set[str]) -> str:
     return ""
 
 
-def _name_matches(name: str, source_words: set[str]) -> bool:
-    """Есть ли в источнике это имя с учётом падежа."""
-    return bool(_name_match_kind(name, source_words))
-
-
 @dataclass
 class Unsupported:
     """Что пересказа не подтвердилось источником.

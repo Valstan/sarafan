@@ -240,17 +240,6 @@ def clear_copy_history(post_data: Dict[str, Any]) -> Dict[str, Any]:
     return post_data
 
 
-def _vk_wiki_link(url: str, link_text: str) -> str:
-    """
-    Кликабельная подпись во ВКонтакте (разметка постов): [url|текст]
-    Символы, ломающие разметку, убираем из текста ссылки.
-    """
-    safe = (link_text or "").replace("[", "(").replace("]", ")").replace("|", "·").strip()
-    if not safe:
-        safe = "Источник"
-    return f"[{url}|{safe}]"
-
-
 def extract_source_attribution(post_data: Dict[str, Any], group_name: str = "") -> str:
     """Подпись источника в конце поста — **название, без ссылки**.
 

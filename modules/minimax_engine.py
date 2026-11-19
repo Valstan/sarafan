@@ -88,6 +88,10 @@ AGENT_BASE = "https://agent.minimax.io"
 #: «invalid timezone_id». Московский — чтобы «сегодня» совпадало с московским
 #: днём (у MiniMax сутки календарные, в поясе аккаунта).
 SIGNIN_TZ = "Europe/Moscow"
+#: То же имя в виде query-параметра: слэш в значении — литерал "%2F".
+#: Раньше литерал «Europe%2FMoscow» был продублирован в двух signin-вызовах,
+#: а константа SIGNIN_TZ не использовалась нигде (мёртвая копия правила).
+SIGNIN_TZ_PARAM = SIGNIN_TZ.replace("/", "%2F")
 
 #: Куда смотреть пул аккаунтов. Каждый аккаунт — каталог с профилем CLI:
 #: ``<имя>/config`` (MCODE_CONFIG_DIR) и
@@ -201,8 +205,11 @@ DEFAULT_DEAD_IDS_LIMIT = 50
 #:
 #: Для MiniMax дефолт 20: агент-CLI на 40 постов рвёт JSON (длинный ответ),
 #: а деление пачки пополам — это лишний оплаченный вызов.
-ENV_CHUNK_SIZE = "MINIMAX_CHUNK_SIZE"
-DEFAULT_CHUNK_SIZE = 20
+#:
+#: ⚠️ Имя env-ключа и дефолт живут в ``config/classifier.py``
+#: (``get_minimax_chunk_size``) — единственный источник истины. Дубли здесь
+#: были мёртвой копией правила, и их легко было бы разъехать.
+#:
 #: Ограничить выдачу Кармана нашими почтами (``?emails=``). По умолчанию
 #: **выключено**: аккаунтами пула занимается Карман, он сам решает, какой дать,
 #: и отдаёт токен — ограничивать его выбор нашими локальными профилями нельзя.
@@ -575,7 +582,7 @@ def signin_panel(account: MinimaxAccount, *, force: bool = False) -> Optional[Di
         return None
     url = "%s/minimax-cloud/api/v1/signin/status?timezone_id=%s" % (
         AGENT_BASE,
-        "Europe%2FMoscow",
+        SIGNIN_TZ_PARAM,
     )
     status, payload = _http_json(url, token)
     if status != 200:
@@ -596,7 +603,7 @@ def claim_points(account: MinimaxAccount) -> Dict[str, Any]:
         return {"claim_result": 0, "points": 0, "error": "no_token"}
     url = "%s/minimax-cloud/api/v1/signin/claim?timezone_id=%s" % (
         AGENT_BASE,
-        "Europe%2FMoscow",
+        SIGNIN_TZ_PARAM,
     )
     status, payload = _http_json(url, token, method="POST")
     data = payload.get("data") if isinstance(payload.get("data"), dict) else payload

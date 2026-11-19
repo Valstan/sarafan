@@ -201,7 +201,7 @@ async def _waves(session, days: int = 7) -> Dict[str, Any]:
     by_theme: Dict[str, Dict[str, int]] = defaultdict(
         lambda: {"runs": 0, "published": 0, "scanned": 0}
     )
-    for theme, success, pub_id, _err, scanned_r, final_r, _dur in rows:
+    for theme, success, pub_id, _err, scanned_r, _final_r, _dur in rows:
         bucket = by_theme[str(theme or "?")]
         bucket["runs"] += 1
         bucket["scanned"] += int(scanned_r or 0)

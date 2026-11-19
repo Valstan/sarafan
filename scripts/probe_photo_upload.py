@@ -245,7 +245,7 @@ async def run(args: argparse.Namespace) -> Dict[str, Any]:
                 empty_retries_used[0] += 1
                 time.sleep(args.empty_retry_wait)
                 server2 = api.photos.getWallUploadServer(group_id=gid)
-                status2, payload2, body2 = _upload(server2["upload_url"], data)
+                status2, payload2, _body2 = _upload(server2["upload_url"], data)
                 retry_info.append(
                     {
                         "attempt": attempt,
