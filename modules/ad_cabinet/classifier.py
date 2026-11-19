@@ -13,6 +13,12 @@
 Интерфейс намеренно минимальный — ``classify()`` с тем же контрактом потом
 заменится обученной моделью (TF-IDF / маленький трансформер, фаза 4) без правок
 вызывающего кода.
+
+**Нейросетевой судья (19.11, пилот #386).** Алгоритмическая часть осталась как
+была, но в «серую зону» (признак есть, порога не хватает) теперь вмешивается
+MiniMax — он и решает, заявка это или обычное объявление. Движок не ответил —
+решает алгоритм, заявка не теряется. Подробности и граница вызовов —
+``modules/ad_cabinet/neural_classifier.py``.
 """
 
 from __future__ import annotations
@@ -21,6 +27,7 @@ import re
 from typing import List, Optional, Tuple
 
 from modules.filters.ads_filter import AdvertisementFilter
+from modules.ad_cabinet import neural_classifier as neural
 
 # Контакты — главный признак «человек хочет разместиться/продать».
 _CONTACT_PATTERNS = [
@@ -99,6 +106,33 @@ async def classify(post: dict, context: Optional[dict] = None) -> Tuple[bool, in
             break
 
     is_ad = base_is_ad or score >= SCORE_THRESHOLD
+
+    # ── Нейросетевой судья (пилот #386) ────────────────────────────────────
+    # Вмешивается только в «серую зону»: алгоритм нашёл признак, но не
+    # дотянул до порога (контакт ИЛИ предложение ИЛИ внешняя ссылка — но не
+    # два сразу). Именно эту середину регулярка решает хуже всего.
+    #
+    # Почему не на всех постах: скан тянет до 100 предложек на группу, а
+    # групп десятки — полный разбор стоил бы сотни вызовов движка на скан.
+    # Почему не классификатором ленты: там другой вопрос («постить в сводку
+    # или нет»), и заявка рекламодателя получила бы «удали» — как и спам.
+    neural_verdict = None
+    if neural.enabled():
+        grey_zone = (not base_is_ad) and 0 < score < SCORE_THRESHOLD
+        veto_zone = base_is_ad and neural.mode() == neural.MODE_ASSIST_VETO
+        if grey_zone or veto_zone:
+            neural_verdict = await neural.judge(text)
+
+    if neural_verdict:
+        reason = neural_verdict.get("reason") or "рекламная заявка"
+        if neural_verdict["is_ad"]:
+            if not is_ad:
+                score = max(score, SCORE_THRESHOLD)
+                reasons.append(f"нейросеть: {reason}")
+            is_ad = True
+        elif base_is_ad and neural.mode() == neural.MODE_ASSIST_VETO:
+            is_ad = False
+            reasons.append(f"нейросеть сняла: {reason}")
 
     # Если пометили рекламой только по накопленному score (базовый фильтр
     # сводки ПРОПУСТИЛ пост — его порог 4 выше нашего 3 — и предложка-сигналы
