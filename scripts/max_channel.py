@@ -15,6 +15,12 @@
     sudo bash -c 'set -a; . /etc/setka/setka.env; . /etc/setka/secrets-token.env; set +a;
         cd /home/valstan/SETKA && ./venv/bin/python scripts/max_channel.py --subscribe'
 
+Тот же запуск без внешней обёртки (скрипт сам читает env-файлы и тянет комнату):
+
+    sudo /home/valstan/SETKA/venv/bin/python /home/valstan/SETKA/scripts/max_channel.py \
+        --load-env-file /etc/setka/setka.env \
+        --load-env-file /etc/setka/secrets-token.env --check
+
 **Что печатается.** Только факты «есть / нет» и коды ответов. Значения токена и
 секрета не выводятся ни в одном режиме — в том числе в теле ответа MAX.
 
@@ -49,10 +55,73 @@ UPDATE_TYPES = ["message_callback", "bot_started"]
 #: выхода в интернет.
 LOCAL_WEB = "http://127.0.0.1:8000"
 
+#: Стандартные env-файлы прод-бокса. Путь к env-файлу — не секрет (он и в
+#: памятках лежит literal'ом), но читать его может только root: файл ``600
+#: root:root``. Флаг ``--prod`` подставляет их, чтобы в командной строке не
+#: было ничего похожего на «достать секреты».
+PROD_ENV_FILES = (
+    "/etc/setka/setka.env",
+    "/etc/setka/secrets-token.env",
+)
+
 
 def _has(name: str) -> bool:
     """Задана ли переменная окружения (без печати значения)."""
     return bool((os.environ.get(name) or "").strip())
+
+
+def _app_root() -> str:
+    """Корень приложения — откуда импортировать ``modules.*``."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    for cand in (os.getcwd(), os.path.dirname(here), "/home/valstan/SETKA"):
+        if cand and os.path.isdir(os.path.join(cand, "modules")):
+            return cand
+    return here
+
+
+def load_env_file(path: str) -> int:
+    """Прочитать env-файл в ``os.environ``. Значения не печатаются.
+
+    Файл приложения на боксе — ``600 root:root``, поэтому читать его может
+    только root (скрипт запускается от root через ``sudo``). Уже заданные
+    переменные **не перебиваются**: systemd сильнее файла (свойство 3
+    спецификации секретов).
+    """
+    count = 0
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            for raw in fh:
+                line = raw.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                name, _, value = line.partition("=")
+                name = name.strip()
+                value = value.strip().strip('"').strip("'")
+                if not name or name in os.environ:
+                    continue
+                os.environ[name] = value
+                count += 1
+    except OSError as exc:
+        print("env-файл %s не прочитан: %s" % (path, exc))
+    return count
+
+
+def bootstrap_room() -> int:
+    """Дотянуть секреты из комнаты КАРМАНА. Значения не печатаются.
+
+    Токен бота MAX лежит именно в комнате (``ACCEPTED_NAMES``), а не в env-файле,
+    и доезжает до процесса при старте — поэтому подписка, которую делает оператор
+    из сессии, должна забрать его сама.
+    """
+    try:
+        sys.path.insert(0, _app_root())
+        from modules.secrets_bootstrap import bootstrap_secrets  # noqa: PLC0415
+
+        result = bootstrap_secrets()
+        return int(result.get("recovered") or 0)
+    except Exception as exc:  # noqa: BLE001 — комната недоступна, но скрипт живёт дальше
+        print("комната КАРМАНА недоступна: %s" % exc)
+        return 0
 
 
 def _http(
@@ -186,7 +255,32 @@ def main() -> int:
     parser.add_argument("--subscribe", action="store_true", help="подписаться на вебхук")
     parser.add_argument("--url", default="", help="путь вебхука (по умолчанию — домен сети)")
     parser.add_argument("--host", default=DEFAULT_WEBHOOK_HOST, help="домен вебхука")
+    parser.add_argument(
+        "--load-env-file",
+        action="append",
+        default=[],
+        help="прочитать env-файл в окружение (можно указать дважды: app + secrets-token)",
+    )
+    parser.add_argument(
+        "--prod",
+        action="store_true",
+        help="прочитать стандартные env-файлы прод-бокса (нужен root)",
+    )
+    parser.add_argument(
+        "--no-room",
+        action="store_true",
+        help="не тянуть секреты из комнаты КАРМАНА",
+    )
     args = parser.parse_args()
+
+    env_files = list(args.load_env_file)
+    if args.prod:
+        env_files.extend(PROD_ENV_FILES)
+    for path in env_files:
+        loaded = load_env_file(path)
+        print("env-файл %s: подхвачено ключей %d" % (path, loaded))
+    if not args.no_room:
+        print("комната КАРМАНА: восстановлено секретов %d" % bootstrap_room())
 
     host = args.host
     webhook_url = args.url or ("https://%s%s" % (host, DEFAULT_WEBHOOK_PATH))
