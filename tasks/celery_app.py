@@ -641,6 +641,45 @@ def scan_suggested_ads():
         return {"success": False, "timestamp": datetime.now().isoformat(), "error": str(e)}
 
 
+@app.task(name="tasks.celery_app.notify_max_new_ads")
+def notify_max_new_ads():
+    """Разослать карточки новых рекламных заявок в MAX (бот «САРАФАН»).
+
+    Канал доставки уведомлений владельцу: карточка с фото, текстом заявки,
+    ссылкой на исходный пост и кнопкой «Ответить автору». Ответ отправляется
+    по нажатию кнопки (вебхук MAX), а не этой задачей — здесь только доставка.
+
+    Канал не настроен (``MAX_TOKEN``/``MAX_CHAT_ID`` пусты) — задача выходит
+    молча: канал включает владелец, когда создаст бота.
+    """
+    logger.info("MAX notify: рассылаю карточки новых рекламных заявок")
+
+    async def _run():
+        from database.connection import AsyncSessionLocal
+        from modules.ad_cabinet.max_notify import notify_new_requests
+
+        async with AsyncSessionLocal() as session:
+            return await notify_new_requests(session)
+
+    try:
+        result = run_coro(_run())
+    except Exception as e:
+        logger.error("notify_max_new_ads failed: %s", e, exc_info=True)
+        return {"success": False, "timestamp": datetime.now().isoformat(), "error": str(e)}
+
+    logger.info(
+        "MAX notify: отправлено %s, пропущено %s (всего %s)",
+        result.get("sent"),
+        result.get("skipped"),
+        result.get("total"),
+    )
+    return {
+        "success": True,
+        "timestamp": datetime.now().isoformat(),
+        **result,
+    }
+
+
 def _maybe_alert_new_ads(new_total: int, regions: list, source_label: str = "предложке") -> None:
     """Telegram-алерт о новых рекламных заявках (best-effort).
 
@@ -2060,6 +2099,16 @@ app.conf.beat_schedule = {
     "scan-inbound-dm-ads": {
         "task": "tasks.celery_app.scan_inbound_dm_ads",
         "schedule": crontab(minute="5,35", hour="8-22"),
+        "options": {
+            "expires": 1500,
+            "catchup": False,
+        },
+    },
+    # Карточки новых рекламных заявок в MAX (бот «САРАФАН») — X:20/50, сразу после
+    # обоих сканов (предложка :25/:55, ЛС :05/:35). Канал не настроен → no-op.
+    "notify-max-new-ads": {
+        "task": "tasks.celery_app.notify_max_new_ads",
+        "schedule": crontab(minute="20,50", hour="8-22"),
         "options": {
             "expires": 1500,
             "catchup": False,
