@@ -121,7 +121,7 @@ async def classify(post: dict, context: Optional[dict] = None) -> Tuple[bool, in
         grey_zone = (not base_is_ad) and 0 < score < SCORE_THRESHOLD
         veto_zone = base_is_ad and neural.mode() == neural.MODE_ASSIST_VETO
         if grey_zone or veto_zone:
-            neural_verdict = await neural.judge(text)
+            neural_verdict = await neural.judge(text, post_key=neural.post_key(post))
 
     if neural_verdict:
         reason = neural_verdict.get("reason") or "рекламная заявка"
