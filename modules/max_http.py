@@ -76,13 +76,66 @@ def token() -> str:
     return (os.getenv("MAX_TOKEN") or "").strip()
 
 
+#: Ключ Redis, где лежит выученный chat_id. Chat_id узнаётся сам: когда
+#: владелец нажимает «Старт» в диалоге с ботом, MAX присылает событие
+#: ``bot_started`` с идентификатором чата. Копировать число руками не надо.
+_CHAT_ID_KEY = "setka:notifications:max_chat_id"
+
+
+def _redis() -> Any:
+    """Клиент Redis (db=1, как у хранилища уведомлений). ``None`` — если он недоступен."""
+    try:
+        from modules.notifications.storage import NotificationsStorage
+
+        return NotificationsStorage().redis_client
+    except Exception:  # pragma: no cover - инфраструктурный сбой
+        logger.warning("MAX: redis недоступен — chat_id придётся задать вручную")
+        return None
+
+
+def remember_chat_id(chat_id: Any) -> bool:
+    """Запомнить chat_id, полученный от MAX. ``True`` — записали."""
+    if chat_id in (None, ""):
+        return False
+    client = _redis()
+    if client is None:
+        return False
+    try:
+        client.set(_CHAT_ID_KEY, str(chat_id))
+        return True
+    except Exception as e:  # noqa: BLE001 - чат не критичен для работы вебхука
+        logger.warning("MAX: не удалось сохранить chat_id: %s", e)
+        return False
+
+
+def learned_chat_id() -> str:
+    """Chat_id, выученный из событий MAX (пусто — если событий не было)."""
+    client = _redis()
+    if client is None:
+        return ""
+    try:
+        return str(client.get(_CHAT_ID_KEY) or "").strip()
+    except Exception:  # pragma: no cover - инфраструктурный сбой
+        return ""
+
+
+def chat_id() -> str:
+    """Куда слать уведомления: явный env важнее выученного.
+
+    Env задаётся руками, выученный приходит от самого MAX (событие
+    ``bot_started``). Пока env не задан — берём выученный.
+    """
+    return (os.getenv("MAX_CHAT_ID") or "").strip() or learned_chat_id()
+
+
 def enabled() -> bool:
     """Настроен ли канал MAX.
 
-    Включён, если заданы и токен, и чат-получатель: без чата отправлять
-    некуда, а «молча отправленное в никуда» — худший вид доставки.
+    Включён, если задан токен и известен чат-получатель (явный ``MAX_CHAT_ID``
+    или выученный из событий MAX): без чата отправлять некуда, а «молча
+    отправленное в никуда» — худший вид доставки.
     """
-    return bool(token() and (os.getenv("MAX_CHAT_ID") or "").strip())
+    return bool(token() and chat_id())
 
 
 # ── Троттлер: не больше N сообщений в секунду на один диалог ────────────────
@@ -259,9 +312,12 @@ __all__ = (
     "MaxError",
     "answer_callback",
     "api_base",
+    "chat_id",
     "enabled",
     "get",
+    "learned_chat_id",
     "post",
+    "remember_chat_id",
     "request",
     "send_message",
     "token",

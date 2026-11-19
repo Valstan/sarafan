@@ -240,3 +240,33 @@ class TestPayloadShapes:
             },
         )
         assert resp.status_code == 200
+
+
+class TestBotStarted:
+    """Владелец нажал «Старт» — chat_id выучен, копировать руками не надо."""
+
+    def test_chat_id_is_remembered(self, client, monkeypatch):
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        saved = {}
+        monkeypatch.setattr(
+            api.max_http, "remember_chat_id", lambda cid: saved.setdefault("cid", cid) and True
+        )
+        resp = client.post(
+            "/api/max/webhook",
+            json=[{"type": "bot_started", "chat_id": 424242, "user": {"user_id": 1}}],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["handled"] == 1
+        assert saved["cid"] == 424242
+
+    def test_bot_started_without_chat_id_is_ignored(self, client, monkeypatch):
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        monkeypatch.setattr(api.max_http, "remember_chat_id", lambda cid: True)
+        resp = client.post(
+            "/api/max/webhook",
+            json=[{"type": "bot_started", "user": {"user_id": 1}}],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["handled"] == 0

@@ -179,3 +179,25 @@ class TestBaseUrl:
     def test_override_is_honoured(self, monkeypatch):
         monkeypatch.setenv("MAX_API_BASE", "https://proxy.example/max/")
         assert max_http.api_base() == "https://proxy.example/max"
+
+
+class TestChatId:
+    def test_env_wins_over_learned(self, monkeypatch):
+        """Явный env важнее выученного: он поставлен руками и осознанно."""
+        monkeypatch.setenv("MAX_CHAT_ID", "111")
+        monkeypatch.setattr(max_http, "learned_chat_id", lambda: "222")
+        assert max_http.chat_id() == "111"
+
+    def test_learned_is_used_when_env_is_empty(self, monkeypatch):
+        """Chat_id приходит из события bot_started — копировать руками не надо."""
+        monkeypatch.setenv("MAX_CHAT_ID", "")
+        monkeypatch.setattr(max_http, "learned_chat_id", lambda: "222")
+        assert max_http.chat_id() == "222"
+
+    def test_enabled_needs_token_and_chat(self, monkeypatch):
+        monkeypatch.setenv("MAX_TOKEN", "tok")
+        monkeypatch.setenv("MAX_CHAT_ID", "111")
+        monkeypatch.setattr(max_http, "learned_chat_id", lambda: "")
+        assert max_http.enabled() is True
+        monkeypatch.setenv("MAX_CHAT_ID", "")
+        assert max_http.enabled() is False

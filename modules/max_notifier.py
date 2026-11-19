@@ -205,13 +205,17 @@ def card_for_request(request: Any, *, cabinet_url: str = "") -> Dict[str, Any]:
 def send_card(card: Dict[str, Any], *, chat_id: Any = None) -> Dict[str, Any]:
     """Отправить карточку в чат MAX.
 
-    Пустой ``chat_id``/токен — канал не настроен: возвращаем ``{"ok": False}``
-    без исключения, чтобы вызывающий мог спокойно продолжить (уведомление —
-    не повод уронить скан заявок).
+    Куда слать: явно заданный ``chat_id`` → ``MAX_CHAT_ID`` → выученный из
+    событий MAX (``bot_started``, когда владелец нажал «Старт» в диалоге с
+    ботом). Последнее — чтобы не копировать число руками.
+
+    Пустой чат или токен — канал не настроен: возвращаем ``{"ok": False}`` без
+    исключения, чтобы вызывающий мог спокойно продолжить (уведомление — не
+    повод уронить скан заявок).
     """
-    target = chat_id if chat_id is not None else (os.getenv("MAX_CHAT_ID") or "").strip()
+    target = chat_id if chat_id is not None else max_http.chat_id()
     if not target:
-        logger.info("MAX: чат не задан (MAX_CHAT_ID) — карточка не отправлена")
+        logger.info("MAX: чат не задан и не выучен — карточка не отправлена")
         return {"ok": False, "reason": "no_chat_id"}
     if not max_http.token():
         logger.info("MAX: токен не задан (MAX_TOKEN) — карточка не отправлена")

@@ -21,6 +21,11 @@
 владельцу ссылку на его личный диалог: писать от своего имени через API
 нельзя (у user-токена нет scope ``messages``), но можно открыть диалог и
 дописать самому.
+
+**Событие ``bot_started`` — отдельный случай.** Когда владелец нажимает
+«Старт» в диалоге с ботом, MAX присылает ``bot_started`` с ``chat_id``. Мы его
+запоминаем (Redis), и с этого момента уведомления идут в этот чат сами —
+**идентификатор чата копировать руками не нужно**.
 """
 
 from __future__ import annotations
@@ -70,6 +75,27 @@ def _updates(payload: Any) -> List[Dict[str, Any]]:
             return [u for u in updates if isinstance(u, dict)]
         return [payload]
     return []
+
+
+async def _handle_bot_started(update: Dict[str, Any]) -> Dict[str, Any]:
+    """Владелец нажал «Старт» в диалоге с ботом — запоминаем chat_id.
+
+    Зачем это отдельным обработчиком: идентификатор чата узнаётся **только**
+    из события, и копировать его руками не нужно. MAX присылает ``bot_started``
+    с ``chat_id`` — мы его запоминаем, и с этого момента уведомления идут в
+    этот чат сами.
+    """
+    chat_id = update.get("chat_id")
+    if chat_id in (None, ""):
+        logger.info("MAX webhook: bot_started без chat_id")
+        return {"handled": False, "reason": "no_chat_id"}
+    saved = max_http.remember_chat_id(chat_id)
+    logger.info(
+        "MAX webhook: владелец запустил бота, chat_id=%s (%s)",
+        chat_id,
+        "запомнен" if saved else "запомнить не удалось (проверьте Redis)",
+    )
+    return {"handled": True, "chat_id": chat_id, "saved": saved}
 
 
 async def _handle_callback(update: Dict[str, Any]) -> Dict[str, Any]:
@@ -146,12 +172,16 @@ async def max_webhook(
 
     handled = 0
     for update in _updates(payload):
-        if update.get("type") != "message_callback":
-            continue
+        kind = update.get("type")
         try:
-            result = await _handle_callback(update)
+            if kind == "bot_started":
+                result = await _handle_bot_started(update)
+            elif kind == "message_callback":
+                result = await _handle_callback(update)
+            else:
+                continue
         except Exception as e:  # noqa: BLE001 — ответ 200 в любом случае
-            logger.exception("MAX webhook: обработка нажатия не удалась: %s", e)
+            logger.exception("MAX webhook: обработка %s не удалась: %s", kind, e)
             continue
         handled += 1 if result.get("handled") else 0
 
