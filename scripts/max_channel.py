@@ -87,23 +87,9 @@ def load_env_file(path: str) -> int:
     переменные **не перебиваются**: systemd сильнее файла (свойство 3
     спецификации секретов).
     """
-    count = 0
-    try:
-        with open(path, "r", encoding="utf-8") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                name, _, value = line.partition("=")
-                name = name.strip()
-                value = value.strip().strip('"').strip("'")
-                if not name or name in os.environ:
-                    continue
-                os.environ[name] = value
-                count += 1
-    except OSError as exc:
-        print("env-файл %s не прочитан: %s" % (path, exc))
-    return count
+    from modules.prod_env import load_env_files  # noqa: PLC0415
+
+    return load_env_files([path])
 
 
 def bootstrap_room() -> int:
