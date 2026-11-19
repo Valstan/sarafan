@@ -43,8 +43,7 @@ def cabinet_url() -> str:
         from config.runtime import SERVER
 
         domain = (
-            SERVER.get("domain")
-            or f"{SERVER.get('host', '127.0.0.1')}:{SERVER.get('port', 8000)}"
+            SERVER.get("domain") or f"{SERVER.get('host', '127.0.0.1')}:{SERVER.get('port', 8000)}"
         )
         return f"https://{domain}/ad"
     except Exception:  # pragma: no cover - конфиг без SERVER — не повод падать

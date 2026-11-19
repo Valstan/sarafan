@@ -185,9 +185,11 @@ def card_for_request(request: Any, *, cabinet_url: str = "") -> Dict[str, Any]:
     """
     origin = getattr(request, "origin", "suggested")
     origin_label = "предложке" if origin == "suggested" else "входящему ЛС"
-    link = post_url(
-        getattr(request, "community_vk_id", None), getattr(request, "vk_post_id", None)
-    ) or cabinet_url or None
+    link = (
+        post_url(getattr(request, "community_vk_id", None), getattr(request, "vk_post_id", None))
+        or cabinet_url
+        or None
+    )
     photo = _first_photo(getattr(request, "photo_urls_json", None))
     return build_card(
         ad_request_id=int(request.id),

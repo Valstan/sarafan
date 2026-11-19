@@ -166,7 +166,9 @@ def request(
         except requests.exceptions.RequestException as e:
             # Сеть не ответила: соединения не было — повтор безопасен.
             last_exc = e
-            logger.warning("MAX %s %s: сеть не ответила (попытка %d): %s", method, path, attempt + 1, e)
+            logger.warning(
+                "MAX %s %s: сеть не ответила (попытка %d): %s", method, path, attempt + 1, e
+            )
             continue
         _raise_for_status(resp)
         try:

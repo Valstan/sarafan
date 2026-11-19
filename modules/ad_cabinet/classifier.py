@@ -26,8 +26,8 @@ from __future__ import annotations
 import re
 from typing import List, Optional, Tuple
 
-from modules.filters.ads_filter import AdvertisementFilter
 from modules.ad_cabinet import neural_classifier as neural
+from modules.filters.ads_filter import AdvertisementFilter
 
 # Контакты — главный признак «человек хочет разместиться/продать».
 _CONTACT_PATTERNS = [

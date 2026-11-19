@@ -13,8 +13,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from modules.ad_cabinet import classifier as ad_classifier
 from modules.ad_cabinet import neural_classifier as neural
 
@@ -55,9 +53,7 @@ class TestJudge:
         """Нет вердикта — значит «решает алгоритм», а не «рекламы нет»."""
         from modules.classifier import headless
 
-        monkeypatch.setattr(
-            headless, "chat", lambda **kw: {"ok": False, "reason": "pool_dead"}
-        )
+        monkeypatch.setattr(headless, "chat", lambda **kw: {"ok": False, "reason": "pool_dead"})
         assert await neural.judge("хочу разместить рекламу") is None
 
     async def test_unparsable_answer_returns_none(self, monkeypatch):
