@@ -600,7 +600,10 @@ class AdvancedVKParser:
         #    ВСЕГДА: это защита от бана, а не редакция.
         #    Снимается флагом CLASSIFIER_ADVERTISEMENT_FILTER_ENABLED=0 — решение
         #    владельца (шаг 3 звена 5). По умолчанию отсечка включена.
-        if advertisement_filter_enabled():
+        #    Регион из CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS отсечку не
+        #    получает — это «проба на одном районе» (P091, рекомендация):
+        #    цена шага мерится на одном районе, а не разом на сети.
+        if advertisement_filter_enabled(getattr(region_config, "region_code", "") or ""):
             is_reklama_theme = theme == "reklama"
             if is_advertisement(text, skip_for_reklama=is_reklama_theme, theme=theme):
                 if not is_reklama_theme:

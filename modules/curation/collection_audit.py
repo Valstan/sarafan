@@ -101,8 +101,10 @@ def _derive_drop_reason(post: Dict[str, Any], theme: str, region_config: Any) ->
     # Шаг 5: реклама (для темы reklama фильтр не срабатывает — как в _filter_post).
     # Флаг тот же, что у фильтра (CLASSIFIER_ADVERTISEMENT_FILTER_ENABLED):
     # аудит обязан пере-выводить ПРИЧИНУ настоящую, а не «как было до флага».
+    # И региональное исключение то же (CLASSIFIER_ADVERTISEMENT_FILTER_EXEMPT_REGIONS):
+    # в пробном районе отсечка не работает — и в журнале её быть не должно.
     if (
-        advertisement_filter_enabled()
+        advertisement_filter_enabled(getattr(region_config, "region_code", "") or "")
         and theme != "reklama"
         and is_advertisement(text, skip_for_reklama=False, theme=theme)
     ):
