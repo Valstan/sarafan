@@ -264,17 +264,30 @@ def _download_to_temp(url: str, max_bytes: int) -> Optional[str]:
 async def _send_video_multipart(
     token: str, channel: str, file_path: str, caption: Optional[str]
 ) -> bool:
-    """Upload a local video file via multipart ``sendVideo`` (single 429 retry)."""
-    import requests
+    """Upload a local video file via multipart ``sendVideo`` (single 429 retry).
+
+    **Через ``telegram_http``, то есть через relay.** Прямой
+    ``api.telegram.org`` с бокса недоступен (G63/#041, РКН-блок), и сырой
+    ``requests.post`` уходил в никуда: видео молча не доезжало, а доставка
+    отчитывалась ``{'outputs': 2, 'delivered': 1, 'failed': 1}`` — как обычный
+    шум, а не как поломка канала (P229).
+
+    Файл переоткрывается на каждой попытке (фабрика в ``post_multipart``):
+    ``requests`` читает файл при подготовке запроса, и повтор с тем же
+    handle ушёл бы с пустым файлом.
+    """
+    from modules import telegram_http as tg_http
 
     url = _TG_API.format(token=token, method="sendVideo")
     data: Dict[str, Any] = {"chat_id": channel}
     if caption:
         data["caption"] = caption
 
+    def _files():
+        return {"video": open(file_path, "rb")}
+
     def _do():
-        with open(file_path, "rb") as fh:
-            return requests.post(url, data=data, files={"video": fh}, timeout=180)
+        return tg_http.post_multipart(url, files_factory=_files, data=data, attempts=2)
 
     for attempt in range(2):
         try:

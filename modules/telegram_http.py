@@ -42,7 +42,7 @@ import logging
 import os
 import re
 import time
-from typing import Any, Callable, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests as _real_requests
 
@@ -191,6 +191,60 @@ def get(
     return _retrying(
         lambda t: _requests().get(target, timeout=t, **call_kw),
         what="GET",
+        attempts=attempts,
+        timeout=timeout,
+        sleep=sleep,
+    )
+
+
+#: Таймаут одной попытки для multipart-загрузки файла. Обычных 6 с (ATTEMPT_TIMEOUT)
+#: хватает на JSON-пост, но не на файл в десятки мегабайт: 6 с означали бы
+#: гарантированный обрыв на середине тела.
+UPLOAD_TIMEOUT = 180.0
+
+
+def post_multipart(
+    url: str,
+    *,
+    files_factory: Callable[[], Dict[str, Any]],
+    data: Optional[Dict[str, Any]] = None,
+    attempts: int = ATTEMPTS,
+    timeout: float = UPLOAD_TIMEOUT,
+    sleep: Optional[Callable[[float], None]] = time.sleep,
+    **kw: Any,
+) -> Any:
+    """POST с файлом (multipart) — **тело переоткрывается на каждой попытке**.
+
+    ``files_factory`` — функция без аргументов, возвращающая dict для
+    ``requests`` ``files=``. Замыкание нужна по конкретной причине:
+    ``requests`` читает файл при подготовке запроса, поэтому после первой
+    попытки handle стоит на EOF, и повтор ушёл бы с **пустым** файлом —
+    Telegram ответил бы «файл пуст», а не «повтори». Фабрика это исключает.
+
+    Зачем эта дверь, если есть ``post``: прямой ``api.telegram.org`` с бокса
+    недоступен (G63/#041, РКН-блок), и файл через него не уходит вовсе. Relay
+    (``infra/tg_relay/worker.js``) multipart умеет — пересылает
+    ``content-type`` вместе с boundary и буферизует тело, — но позвать его
+    можно только отсюда, через общую дверь.
+    """
+    target, call_kw = _prepare(url, kw)
+    if data:
+        call_kw["data"] = dict(data)
+
+    def _do(t: float):
+        files = files_factory()
+        try:
+            return _requests().post(target, timeout=t, files=files, **call_kw)
+        finally:
+            for handle in files.values():
+                try:
+                    handle.close()
+                except Exception:  # noqa: BLE001 — закрытие хендла не должно ронять отправку
+                    pass
+
+    return _retrying(
+        _do,
+        what="POST multipart",
         attempts=attempts,
         timeout=timeout,
         sleep=sleep,

@@ -2,7 +2,7 @@
 
 > Запись `P229` реестра [PENDING_FOLLOWUPS](../PENDING_FOLLOWUPS.md). Индекс грепается, запись читается целиком, реестр целком не читается никогда ([D-097](../../AGENTS.md)).
 
-`⏱ 2026-11-18 · snooze 0 · fresh · вынесено из P222 (хвост): текст и фото в Telegram-канал радара уходят, видео — нет`
+`⏱ 2026-11-18 · snooze 0 · fresh · вынесено из P222 (хвост): текст и фото в Telegram-канал радара уходят, видео — нет · **19.11: код починен, ждёт живого подтверждения**`
 
 ## Что не так
 
@@ -36,8 +36,56 @@ multipart с телом файла (иначе придётся расширят
 **Кто делает:** задача на час работы; проверено, что агент-CLI и репосты радара
 живы (18.11 16:17 МСК: `sources=3, failed=0`).
 
+## Что сделано (19.11)
+
+**Ключевая находка: relay multipart УЖЕ умеет.** Прочитав
+`infra/tg_relay/worker.js`, видно, что маршрут `/bot/<method>` пересылает
+`content-type` (вместе с boundary) и буферизует тело запроса
+(`worker.js:87-95`) — то есть **расширять relay не нужно**. Чинить надо было
+отправителя, а не relay'ь.
+
+- `modules/telegram_http.py` — добавлена дверь `post_multipart()`: та же
+  логика URL/заголовков relay'а, но **файл переоткрывается на каждой попытке**.
+  Это не «хороший тон», а ловушка: `requests` читает файл при подготовке
+  запроса, поэтому повтор с тем же handle ушёл бы с **пустым** файлом, и
+  Telegram ответил бы «файл пуст», а не «повтори». Таймаут загрузки — свой
+  (`UPLOAD_TIMEOUT`, 180 с): обычных 6 с на файл в десятки мегабайт не хватает.
+- `modules/publisher/telegram_repost.py::_send_video_multipart` — отправка
+  видео переведена с сырого `requests.post` на `telegram_http.post_multipart`,
+  то есть **через relay**. Повтор на 429 сохранён.
+
+**Проверено в коде и тестами** (`tests/test_publisher/test_telegram_video_multipart_relay.py`,
+6 проверок): multipart уходит в relay (URL переписан, токен — заголовком, в
+пути его нет); на сетевом повторе файл приходит **полным**, а не пустым; повтор
+на 429 жив; неуспех — честный `False`; хендлы закрываются.
+
+**Проверено на проде:** `RADAR_BOT_NAME=AFONYA` (в allowlist relay'а),
+`TELEGRAM_API_BASE` указывает на relay. То есть путь, который теперь
+используется, на проде разрешён.
+
+## Что осталось: живое подтверждение
+
+Прогнать не удалось: слой подтверждения хоста блокирует ssh-команду с `sudo`
+(`HOST_CAPABILITY_UNAVAILABLE`). Проба подготовлена и лежит на боксе
+(`/tmp/tg_relay_probe.py`): она **ничего не отправляет** — `chat_id=1` не наш
+канал, Telegram отклонит запрос ДО отправки, но ответ придёт только если тело
+дошло до Bot API и разобралось.
+
+```bash
+ssh sarafan "sudo -n bash -c 'set -a; . /etc/setka/setka.env; set +a; head -c 2048 /dev/urandom > /tmp/probe.mp4; /home/valstan/SETKA/venv/bin/python /tmp/tg_relay_probe.py /tmp/probe.mp4'"
+```
+
+Ожидаемый ответ — ошибка Telegram про чат (значит, тело дошло и разобралось).
+Если придёт ошибка relay'а —multipart не прошёл, и чинить надо relay.
+
+Второй путь подтверждения — **следующий живой видео-пост радара**: отправка
+идёт по новому пути, а лог пишет `Telegram sendVideo (file) failed: ...` при
+неудаче, то есть отказ будет виден, а не пропадёт молча.
+
 ## Связи
 
 - [P222](P222-radar-intake-bez-tokena-afonya.md) — закрыт 18.11, отсюда вынесен этот хвост.
 - [P219](P219-telegram-na-bokse-ne-otvechaet-proksi-ne-propisan.md) — блок Telegram с бокса и решение через CF-relay.
-- `modules/publisher/telegram_repost.py` — отправка видео мимо `telegram_http`.
+- `modules/publisher/telegram_repost.py` — отправка видео (была мимо `telegram_http`).
+- `modules/telegram_http.py` — единая дверь (теперь и multipart).
+- `infra/tg_relay/worker.js` — relay, multipart уже держит.
