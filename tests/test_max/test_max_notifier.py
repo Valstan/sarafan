@@ -125,10 +125,21 @@ class TestSendCard:
         sent = []
         monkeypatch.setattr(max_notifier.max_http, "send_message", lambda *a, **k: sent.append(a))
         monkeypatch.setenv("MAX_CHAT_ID", "")
+        monkeypatch.setattr(max_notifier.max_http, "chat_id", lambda: "")
         result = max_notifier.send_card({"text": "t", "attachments": []})
         assert result["ok"] is False
         assert result["reason"] == "no_chat_id"
         assert not sent
+
+    def test_learned_chat_id_is_used_when_env_is_empty(self, monkeypatch):
+        """Чат выучен из события bot_started — копировать руками не надо."""
+        sent = []
+        monkeypatch.setattr(max_notifier.max_http, "send_message", lambda *a, **k: sent.append(a))
+        monkeypatch.setenv("MAX_TOKEN", "tok")
+        monkeypatch.setattr(max_notifier.max_http, "chat_id", lambda: "424242")
+        result = max_notifier.send_card({"text": "t", "attachments": []})
+        assert result["ok"] is True
+        assert sent and sent[0][0] == "424242"
 
     def test_without_token_card_is_not_sent(self, monkeypatch):
         sent = []
