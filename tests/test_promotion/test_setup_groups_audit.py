@@ -49,11 +49,16 @@ def _snap(*, avatar: bool, cover: bool):
     return SetupResult(ok=True, payload={"has_photo": avatar, "has_cover": cover})
 
 
+_KIND_DEFAULT = object()
+
+
 async def _select(mod, targets, snapshots):
     """Прогнать отбор с заданными снимками (код региона → SetupResult)."""
     by_gid = {abs(t["vk_group_id"]): snapshots[t["code"]] for t in targets}
+    seen: dict = {}
 
-    async def _targets(_codes):
+    async def _targets(_codes, kinds=_KIND_DEFAULT):
+        seen["kinds"] = kinds
         return targets
 
     async def _tokens():
@@ -70,6 +75,7 @@ async def _select(mod, targets, snapshots):
         ),
     ):
         picked = await mod.select_repair_targets_by_snapshot(None)
+    _select.seen = seen
     return [t["code"] for t in picked]
 
 
@@ -117,3 +123,30 @@ class TestSelectBySnapshot:
             "orichi": _snap(avatar=False, cover=True),  # журнала не было — чиним
         }
         assert await _select(mod, targets, snapshots) == ["orichi"]
+
+    @pytest.mark.asyncio
+    async def test_oblast_with_missing_avatar_is_picked(self, mod):
+        """Гвоздь: область — тоже группа проекта, ремонт её не обходит.
+
+        Найдено 2026-11-20 на живом прогоне: ``--audit`` показывал «Чинить: 5»
+        (в списке были ``kirov_obl`` и ``tatarstan_obl``), а ``--repair`` брал
+        только ``kind='raion'`` — области в ремонт не попадали никогда. Гейт
+        зелёный, работа не сделана.
+        """
+        targets = [_target("tatarstan_obl", 7), _target("kirov_obl", 8)]
+        snapshots = {
+            "tatarstan_obl": _snap(avatar=False, cover=False),
+            "kirov_obl": _snap(avatar=True, cover=False),
+        }
+        assert await _select(mod, targets, snapshots) == ["tatarstan_obl", "kirov_obl"]
+
+    @pytest.mark.asyncio
+    async def test_repair_asks_for_all_kinds(self, mod):
+        """Отбор ремонта обязан просить и районы, и области.
+
+        Без этой строки тест выше проходил бы и на старом коде: подсунуть
+        области в подменённый ``load_targets`` можно было и раньше — вопрос в
+        том, какие ``kinds`` скрипт реально запрашивает у БД.
+        """
+        await _select(mod, [_target("uni", 1)], {"uni": _snap(avatar=False, cover=True)})
+        assert _select.seen["kinds"] == ("raion", "oblast")
