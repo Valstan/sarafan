@@ -11,6 +11,19 @@
 против окна пробы, исключение новых регионов, вечерний сборник (``kind='digest'``)
 не в счёт.
 
+⚠️ **Время в базе — разное в разных таблицах** (P209), и это ломает счёт, если
+не знать:
+
+- ``collected_post_audit.collected_at`` и ``published_posts.published_at`` —
+  **локальное время бокса (MSK)**: пишется ``DEFAULT now()``;
+- ``content_classifications.created_at`` — **UTC**: в модели явный
+  ``datetime.utcnow``.
+
+Окна здесь считаются по локальному MSK: граница окна — просто ``now()`` **без
+сдвига**, а ``--since`` — полночь по МСК. Первая версия скрипта сдвигала границу
+на −3 часа «как будто в базе UTC» — из-за этого окно 19.11 вышло неполным
+(обрезался хвост суток) и дневные числа поехали на 3 часа.
+
 Запуск на проде:
 
     sudo bash -c 'set -a; . /etc/setka/setka.env; . /etc/setka/secrets-token.env; set +a;
@@ -24,9 +37,6 @@
   --control  коды контрольных районов через запятую (по умолчанию — все прочие
              районы, у которых есть собранные посты в базовом окне).
 
-Время в базе — наивный UTC (конвенция проекта), границы считаются в UTC, а
-суточные корзины и окно --since трактуются как **московские** (МСК = UTC+3).
-
 Только чтение.
 """
 
@@ -35,7 +45,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timedelta
 from typing import Dict, List
 
 sys.path.insert(0, str(__import__("pathlib").Path(__file__).resolve().parent.parent))
@@ -44,26 +54,18 @@ from sqlalchemy import text  # noqa: E402
 
 from modules.prod_env import load_prod_env  # noqa: E402
 
-#: МСК = UTC+3 круглый год (Россия не переходит на летнее время).
-MSK_OFFSET = timedelta(hours=3)
-
 #: Отсечка, которую снимаем на пробе.
 DROP_REASON = "advertisement"
 
 
-def _naive_utc_now() -> datetime:
-    """Сейчас в наивном UTC — как колонки времени в базе.
-
-    Не ``datetime.utcnow()``: он помечен на удаление в Python 3.12+. Наивный
-    UTC получаем явно, чтобы не путать его с московским (МСК = UTC+3).
-    """
-    return datetime.now(timezone.utc).replace(tzinfo=None)
+async def _db_now_local(session) -> datetime:
+    """Сейчас в локальном времени БД (MSK) — как пишутся колонки аудита."""
+    return await session.scalar(text("SELECT (now() AT TIME ZONE current_setting('TimeZone'))"))
 
 
-def _msk_date_to_utc(date_str: str) -> datetime:
-    """Дата МСК → наивный UTC (начало суток)."""
-    day = datetime.strptime(date_str, "%Y-%m-%d")
-    return day - MSK_OFFSET
+def _msk_midnight(date_str: str) -> datetime:
+    """Дата (МСК) → полночь этой даты в локальном времени базы."""
+    return datetime.strptime(date_str, "%Y-%m-%d")
 
 
 async def _collect(session, region: str, start: datetime, end: datetime) -> Dict[str, int]:
@@ -174,13 +176,13 @@ async def main() -> int:
     # импорте и без env падает с «DATABASE_URL is not set».
     from database.connection import AsyncSessionLocal  # noqa: PLC0415
 
-    now_utc = _naive_utc_now()
-    probe_start = _msk_date_to_utc(args.since)
-    base_start = probe_start - timedelta(days=args.days)
-    probe_days = max((now_utc - probe_start).total_seconds() / 86400.0, 0.5)
-    base_days = float(args.days)
-
     async with AsyncSessionLocal() as session:
+        now_local = await _db_now_local(session)
+        probe_start = _msk_midnight(args.since)
+        base_start = probe_start - timedelta(days=args.days)
+        probe_days = max((now_local - probe_start).total_seconds() / 86400.0, 0.5)
+        base_days = float(args.days)
+
         control = [c.strip() for c in args.control.split(",") if c.strip()]
         if not control:
             audited = await _audited_regions(session, base_start, probe_start)
@@ -190,12 +192,12 @@ async def main() -> int:
             return 2
 
         probe_base = await _collect(session, args.region, base_start, probe_start)
-        probe_probe = await _collect(session, args.region, probe_start, now_utc)
+        probe_probe = await _collect(session, args.region, probe_start, now_local)
         pub_region_base = await _published(session, args.region, base_start, probe_start)
-        pub_region_probe = await _published(session, args.region, probe_start, now_utc)
+        pub_region_probe = await _published(session, args.region, probe_start, now_local)
 
         pub_control_base = await _published_by_region(session, control, base_start, probe_start)
-        pub_control_probe = await _published_by_region(session, control, probe_start, now_utc)
+        pub_control_probe = await _published_by_region(session, control, probe_start, now_local)
 
         # Публикации контроля: сумма и среднее по району (на каждый район одинаково
         # не приходится — у них разный поток, поэтому сравниваем средние).
@@ -215,6 +217,7 @@ async def main() -> int:
         % (args.region, args.since, args.days, probe_days)
     )
     print("контроль: %d районов" % ctl_regions)
+    print("время: локальное бокса (MSK) — так пишутся collected_at/published_at")
 
     print("\n-- сбор по пробному району --")
     for label, win in (("база", probe_base), ("проба", probe_probe)):
