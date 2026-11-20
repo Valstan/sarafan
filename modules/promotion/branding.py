@@ -41,7 +41,7 @@ import io
 import os
 from typing import List, Optional, Tuple
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 # Версия шаблона: бамп при любой правке дизайна ниже. Канал setup пишет её в
 # promo_group_setup.setup_version — повтор той же версии = no-op по уникуму.
@@ -52,7 +52,19 @@ from PIL import Image, ImageDraw, ImageFont
 # v3 (2026-08-31): холст переведён с 2560×644 на 1920×768. Замер `groups.getById`
 #   показал, что ВК хранит обложку в 2.5:1, а мы рисовали 3.975:1 — ВК ужимал
 #   картинку в свою пропорцию и резал бока при любых crop-параметрах.
-TEMPLATE_VERSION = 3
+# v4 (2026-11-20): замер по всем 82 сообществам сети показал, что «свой аватар» и
+#   «своя обложка» — не деталь, а то, чего нет у половины новых групп: у 12 групп
+#   `has_photo=0` (ВК рисует серый плейсхолдер), а включённая обложка стоит только
+#   у одной группы из 82. Значит картинка должна читаться с маленького превью в
+#   ленте, а обложка — на телефоне. Дизайн переработан, концепт (оттенок из хэша
+#   кода, диагональные полосы, «ИМЯ / ИНФО») сохранён:
+#   * радиальный градиент вместо плоской заливки — объём без нового цвета;
+#   * тёмная плашка под текстом + размытая тень — белый текст перестаёт спорить
+#     с полосами и читается в превью;
+#   * акцентный оттенок на строке «ИНФО» и на линии-разделителе обложки — глаз
+#     цепляется за слово, а не за весь плакат;
+#   * тонкое кольцо по краю аватара — круглый кроп ВК становится осмысленным.
+TEMPLATE_VERSION = 4
 
 AVATAR_SIZE = 1024
 
@@ -86,6 +98,13 @@ _FONT_PATH = os.path.join(
 _SAT, _LIGHT = 0.58, 0.40
 _STRIPE_LIGHT = 0.30  # полосы темнее фона — читаются, но не спорят с текстом
 _JPEG_QUALITY = 92
+
+# v4: свет и глубина (см. комментарий к TEMPLATE_VERSION).
+_GLOW_LIGHT = 0.50  # центр холста — светлее
+_EDGE_LIGHT = 0.16  # край холста — почти в тон фону
+_ACCENT_LIGHT = 0.72  # акцент: строка «ИНФО», разделитель обложки
+_PLATE_ALPHA = 175  # плотность плашки под текстом
+_STRIPE_ALPHA = 70  # полосы стали мягче — не спорят с плашкой
 
 
 def region_hue(code: str) -> int:
@@ -123,20 +142,6 @@ def _text_w(draw: ImageDraw.ImageDraw, text: str, font: ImageFont.FreeTypeFont) 
     return box[2] - box[0]
 
 
-def _diagonal_stripes(
-    img: Image.Image, hue: int, *, count: int, width: int, spacing: int, offset: int
-) -> None:
-    """Диагональные полосы (45°) тёмным тоном того же оттенка."""
-    draw = ImageDraw.Draw(img)
-    color = _hls_rgb(hue, _STRIPE_LIGHT, _SAT)
-    w, h = img.size
-    # Стартуем левее края, чтобы диагонали покрыли весь холст.
-    x = -h + offset
-    for _ in range(count):
-        draw.line([(x, h), (x + h, 0)], fill=color, width=width)
-        x += spacing
-
-
 def _title_lines(name: str) -> List[str]:
     """Аватар: слова имени построчно + строка «ИНФО» всегда последней.
 
@@ -146,73 +151,239 @@ def _title_lines(name: str) -> List[str]:
     return name.upper().split() + ["ИНФО"]
 
 
+def _radial_mask(size: Tuple[int, int]) -> Image.Image:
+    """L-маска: 0 в центре, 255 по краям (радиальный градиент Pillow)."""
+    return Image.radial_gradient("L").resize(size, Image.BICUBIC)
+
+
+def _gradient_bg(size: Tuple[int, int], hue: int) -> Image.Image:
+    """Фон со светом в центре и затемнением по краям — тот же оттенок, больше объёма."""
+    center = Image.new("RGB", size, _hls_rgb(hue, _GLOW_LIGHT, _SAT))
+    edge = Image.new("RGB", size, _hls_rgb(hue, _EDGE_LIGHT, _SAT))
+    return Image.composite(edge, center, _radial_mask(size))
+
+
+def _stripes_layer(
+    size: Tuple[int, int],
+    hue: int,
+    *,
+    count: int,
+    width: int,
+    spacing: int,
+    offset: int,
+    alpha: int,
+    light: float,
+) -> Image.Image:
+    """Полосы отдельным RGBA-слоем — их можно делать мягкими (через alpha)."""
+    layer = Image.new("RGBA", size, (0, 0, 0, 0))
+    draw = ImageDraw.Draw(layer)
+    color = _hls_rgb(hue, light, _SAT) + (alpha,)
+    w, h = size
+    x = -h + offset
+    for _ in range(count):
+        draw.line([(x, h), (x + h, 0)], fill=color, width=width)
+        x += spacing
+    return layer
+
+
+def _draw_text_shadowed(
+    img: Image.Image,
+    text: str,
+    font: ImageFont.FreeTypeFont,
+    xy: Tuple[int, int],
+    fill: Tuple[int, int, int],
+    shadow: Tuple[int, int, int],
+    blur: int = 7,
+) -> None:
+    """Текст с мягкой размытой тенью — дешёвый способ поднять контраст."""
+    draw = ImageDraw.Draw(img)
+    box = draw.textbbox((0, 0), text, font=font)
+    w, h = box[2] - box[0], box[3] - box[1]
+    mask = Image.new("L", (w + blur * 4, h + blur * 4), 0)
+    ImageDraw.Draw(mask).text((blur * 2 - box[0], blur * 2 - box[1]), text, font=font, fill=255)
+    mask = mask.filter(ImageFilter.GaussianBlur(blur)).point(lambda v: int(v * 0.45))
+    img.paste(shadow, (xy[0] + box[0] - blur * 2, xy[1] + box[1] - blur * 2), mask)
+    draw.text(xy, text, font=font, fill=fill)
+
+
 def render_avatar(code: str, name: str) -> bytes:
-    """Аватар 1024×1024 JPEG: фон-оттенок, полосы, «ИМЯ / ИНФО» по центру.
+    """Аватар 1024×1024 JPEG: светящийся фон, «ИМЯ / ИНФО» на плашке.
 
     ``name`` — короткое имя района без суффиксов («Опарино», «Белая Холуница»);
     в две строки: имя (при двух словах — само по себе двумя строками) + «ИНФО».
     Всё важное — в центральном круге: ВК показывает аватар кругом.
     """
     hue = region_hue(code)
-    img = Image.new("RGB", (AVATAR_SIZE, AVATAR_SIZE), _hls_rgb(hue, _LIGHT, _SAT))
-    _diagonal_stripes(img, hue, count=5, width=56, spacing=300, offset=hue % 300)
-    draw = ImageDraw.Draw(img)
+    size = (AVATAR_SIZE, AVATAR_SIZE)
+    img = _gradient_bg(size, hue).convert("RGBA")
+    img = Image.alpha_composite(
+        img,
+        _stripes_layer(
+            size,
+            hue,
+            count=5,
+            width=56,
+            spacing=300,
+            offset=hue % 300,
+            alpha=_STRIPE_ALPHA,
+            light=_STRIPE_LIGHT,
+        ),
+    )
+    # Одна широкая акцентная диагональ — «блик», который ловит взгляд.
+    img = Image.alpha_composite(
+        img,
+        _stripes_layer(
+            size,
+            hue,
+            count=1,
+            width=96,
+            spacing=size[0] * 2,
+            offset=(hue * 11) % size[0],
+            alpha=95,
+            light=_ACCENT_LIGHT,
+        ),
+    )
 
     lines: List[str] = _title_lines(name)
+    draw = ImageDraw.Draw(img)
 
     # Центральный круг ~72% стороны — гарантия видимости после круглого кропа.
-    max_text_w = int(AVATAR_SIZE * 0.66)
-    fonts = [_fit_font(draw, line, max_text_w, 200) for line in lines]
+    max_text_w = int(AVATAR_SIZE * 0.60)
+    fonts = [_fit_font(draw, line, max_text_w, 190) for line in lines]
     heights = [draw.textbbox((0, 0), t, font=f)[3] for t, f in zip(lines, fonts)]
-    gap = 28
+    widths = [_text_w(draw, t, f) for t, f in zip(lines, fonts)]
+    gap = 22
     total_h = sum(heights) + gap * (len(lines) - 1)
-    y = (AVATAR_SIZE - total_h) // 2
+    block_w = max(widths)
 
-    for text, font, h in zip(lines, fonts, heights):
-        w = _text_w(draw, text, font)
+    # Плашка под текстом: тёмная подложка + тонкая акцентная рамка.
+    pad_x, pad_y = 48, 42
+    x0 = (AVATAR_SIZE - block_w) // 2 - pad_x
+    y0 = (AVATAR_SIZE - total_h) // 2 - pad_y
+    plate = Image.new("RGBA", size, (0, 0, 0, 0))
+    ImageDraw.Draw(plate).rounded_rectangle(
+        [x0, y0, x0 + block_w + pad_x * 2, y0 + total_h + pad_y * 2],
+        radius=58,
+        fill=_hls_rgb(hue, 0.10, _SAT) + (_PLATE_ALPHA,),
+        outline=_hls_rgb(hue, _ACCENT_LIGHT, _SAT) + (110,),
+        width=4,
+    )
+    img = Image.alpha_composite(img, plate)
+
+    shadow = _hls_rgb(hue, 0.07, _SAT)
+    y = (AVATAR_SIZE - total_h) // 2
+    for text, font, h, w in zip(lines, fonts, heights, widths):
         x = (AVATAR_SIZE - w) // 2
-        draw.text((x + 4, y + 4), text, font=font, fill=_hls_rgb(hue, 0.16, _SAT))  # тень
-        draw.text((x, y), text, font=font, fill=(255, 255, 255))
+        color = _hls_rgb(hue, _ACCENT_LIGHT, _SAT) if text == "ИНФО" else (255, 255, 255)
+        _draw_text_shadowed(img, text, font, (x, y), color, shadow)
         y += h + gap
 
+    # Тонкое кольцо по краю — круглый кроп ВК становится осмысленным.
+    ring = Image.new("RGBA", size, (0, 0, 0, 0))
+    ImageDraw.Draw(ring).ellipse(
+        [18, 18, AVATAR_SIZE - 18, AVATAR_SIZE - 18], outline=(255, 255, 255, 70), width=6
+    )
+    img = Image.alpha_composite(img, ring)
+
     out = io.BytesIO()
-    img.save(out, "JPEG", quality=_JPEG_QUALITY)
+    img.convert("RGB").save(out, "JPEG", quality=_JPEG_QUALITY)
     return out.getvalue()
 
 
 def render_cover(code: str, name: str, tagline: str) -> bytes:
-    """Обложка 2560×644 JPEG: «ИМЯ - ИНФО» крупно + тэглайн строкой ниже.
+    """Обложка 1920×768 JPEG: «ИМЯ - ИНФО» крупно + тэглайн строкой ниже.
 
-    Текст держится в безопасной зоне 1590×400 по центру: мобильный клиент
+    Текст держится в безопасной зоне 1196×768 по центру: мобильный клиент
     обрезает края обложки, десктоп показывает целиком.
     """
     hue = region_hue(code)
-    img = Image.new("RGB", (COVER_W, COVER_H), _hls_rgb(hue, _LIGHT, _SAT))
-    _diagonal_stripes(img, hue, count=8, width=64, spacing=420, offset=hue % 420)
-    draw = ImageDraw.Draw(img)
+    size = (COVER_W, COVER_H)
+    img = _gradient_bg(size, hue).convert("RGBA")
+    img = Image.alpha_composite(
+        img,
+        _stripes_layer(
+            size,
+            hue,
+            count=8,
+            width=64,
+            spacing=420,
+            offset=hue % 420,
+            alpha=_STRIPE_ALPHA,
+            light=_STRIPE_LIGHT,
+        ),
+    )
+    img = Image.alpha_composite(
+        img,
+        _stripes_layer(
+            size,
+            hue,
+            count=1,
+            width=150,
+            spacing=size[0] * 2,
+            offset=(hue * 7) % size[0],
+            alpha=80,
+            light=_ACCENT_LIGHT,
+        ),
+    )
 
+    draw = ImageDraw.Draw(img)
     title = f"{name.upper()} - ИНФО"
-    safe_w = COVER_SAFE_W - 120  # поля внутри безопасной зоны
-    title_font = _fit_font(draw, title, safe_w, 190)
-    tag_font = _fit_font(draw, tagline, safe_w, 64)
+    safe_w = COVER_SAFE_W - 140  # поля внутри безопасной зоны
+    title_font = _fit_font(draw, title, safe_w, 180)
+    tag_font = _fit_font(draw, tagline, safe_w, 60)
 
     t_box = draw.textbbox((0, 0), title, font=title_font)
     g_box = draw.textbbox((0, 0), tagline, font=tag_font)
     t_h, g_h = t_box[3] - t_box[1], g_box[3] - g_box[1]
-    gap = 30
-    total_h = t_h + gap + g_h
+    t_w = t_box[2] - t_box[0]
+    gap = 26
+    rule_h = 8
+    total_h = t_h + gap + rule_h + gap + g_h
     y = (COVER_H - total_h) // 2 - t_box[1]
+    # Плашка на весь текстовый блок — та же опора, что и на аватаре.
+    pad_x, pad_y = 72, 46
+    plate = Image.new("RGBA", size, (0, 0, 0, 0))
+    ImageDraw.Draw(plate).rounded_rectangle(
+        [
+            (COVER_W - t_w) // 2 - pad_x,
+            (COVER_H - total_h) // 2 - pad_y,
+            (COVER_W + t_w) // 2 + pad_x,
+            (COVER_H + total_h) // 2 + pad_y,
+        ],
+        radius=48,
+        fill=_hls_rgb(hue, 0.10, _SAT) + (_PLATE_ALPHA,),
+        outline=_hls_rgb(hue, _ACCENT_LIGHT, _SAT) + (100,),
+        width=4,
+    )
+    img = Image.alpha_composite(img, plate)
+    draw = ImageDraw.Draw(img)
 
-    for text, font in ((title, title_font), (tagline, tag_font)):
-        w = _text_w(draw, text, font)
-        x = (COVER_W - w) // 2
-        draw.text((x + 5, y + 5), text, font=font, fill=_hls_rgb(hue, 0.16, _SAT))
-        draw.text((x, y), text, font=font, fill=(255, 255, 255))
-        box = draw.textbbox((0, 0), text, font=font)
-        y += (box[3] - box[1]) + gap
+    shadow = _hls_rgb(hue, 0.07, _SAT)
+    w = _text_w(draw, title, title_font)
+    x = (COVER_W - w) // 2
+    _draw_text_shadowed(img, title, title_font, (x, y), (255, 255, 255), shadow)
+    y += t_h + gap + 12  # разделитель не должен липнуть к выносным элементам букв
+
+    # Акцентная линия-разделитель — взгляд идёт по ней от заголовка к тэглайну.
+    rule_w = min(int(t_w * 0.55), 460)
+    ImageDraw.Draw(img).rounded_rectangle(
+        [
+            (COVER_W - rule_w) // 2,
+            y,
+            (COVER_W + rule_w) // 2,
+            y + rule_h,
+        ],
+        radius=rule_h // 2,
+        fill=_hls_rgb(hue, _ACCENT_LIGHT, _SAT) + (235,),
+    )
+    y += rule_h + gap
+
+    w = _text_w(draw, tagline, tag_font)
+    x = (COVER_W - w) // 2
+    _draw_text_shadowed(img, tagline, tag_font, (x, y), _hls_rgb(hue, _ACCENT_LIGHT, _SAT), shadow)
 
     out = io.BytesIO()
-    img.save(out, "JPEG", quality=_JPEG_QUALITY)
+    img.convert("RGB").save(out, "JPEG", quality=_JPEG_QUALITY)
     return out.getvalue()
 
 
