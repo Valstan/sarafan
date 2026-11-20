@@ -219,6 +219,128 @@ class TestCallback:
         assert resp.status_code == 200
 
 
+class TestMessageCreated:
+    """Владелец написал боту — чат выучен из сообщения.
+
+    Это страховка к ``bot_started``: MAX шлёт его один раз (на первом запуске
+    диалога), и если владелец открыл бота до подписки, событие потерялось.
+    """
+
+    @staticmethod
+    def _message_update(chat_id="chat-42") -> dict:
+        return {
+            "type": "message_created",
+            "message": {
+                "text": "привет",
+                "chat": {"chat_id": chat_id},
+                "recipient": {"user_id": 7},
+            },
+        }
+
+    def test_chat_id_is_remembered(self, client, monkeypatch):
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        saved = {}
+        monkeypatch.setattr(
+            api.max_http, "remember_chat_id", lambda cid: saved.setdefault("cid", cid) and True
+        )
+        monkeypatch.setattr(api.max_http, "learned_chat_id", lambda: "")
+        monkeypatch.setattr(api.max_http, "send_message", lambda *a, **k: {})
+
+        resp = client.post(
+            "/api/max/webhook",
+            json=[self._message_update()],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["handled"] == 1
+        assert saved["cid"] == "chat-42"
+
+    def test_top_level_chat_id_is_remembered(self, client, monkeypatch):
+        """Форма события менялась: чат может лежать на верхнем уровне."""
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        saved = {}
+        monkeypatch.setattr(
+            api.max_http, "remember_chat_id", lambda cid: saved.setdefault("cid", cid) and True
+        )
+        monkeypatch.setattr(api.max_http, "learned_chat_id", lambda: "")
+        monkeypatch.setattr(api.max_http, "send_message", lambda *a, **k: {})
+
+        resp = client.post(
+            "/api/max/webhook",
+            json=[{"type": "message_created", "chat_id": "chat-7", "message": {"text": "привет"}}],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert saved["cid"] == "chat-7"
+
+    def test_new_chat_gets_confirmation(self, client, monkeypatch):
+        """Владелец должен увидеть, что канал ожил, — иначе он не поймёт, жив ли бот."""
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        monkeypatch.setattr(api.max_http, "remember_chat_id", lambda cid: True)
+        monkeypatch.setattr(api.max_http, "learned_chat_id", lambda: "")
+        sent = []
+        monkeypatch.setattr(
+            api.max_http, "send_message", lambda cid, text, **k: sent.append((cid, text))
+        )
+
+        resp = client.post(
+            "/api/max/webhook",
+            json=[self._message_update()],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert sent and sent[0][0] == "chat-42"
+        assert "на связи" in sent[0][1]
+
+    def test_known_chat_gets_no_confirmation(self, client, monkeypatch):
+        """Каждое сообщение владельца не должно порождать ответ — только новое."""
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        monkeypatch.setattr(api.max_http, "remember_chat_id", lambda cid: True)
+        monkeypatch.setattr(api.max_http, "learned_chat_id", lambda: "chat-42")
+        sent = []
+        monkeypatch.setattr(
+            api.max_http, "send_message", lambda cid, text, **k: sent.append((cid, text))
+        )
+
+        resp = client.post(
+            "/api/max/webhook",
+            json=[self._message_update()],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert not sent
+
+    def test_message_without_chat_id_is_ignored(self, client, monkeypatch):
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        monkeypatch.setattr(api.max_http, "remember_chat_id", lambda cid: True)
+        resp = client.post(
+            "/api/max/webhook",
+            json=[{"type": "message_created", "message": {"text": "привет"}}],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["handled"] == 0
+
+    def test_confirmation_failure_does_not_break_the_batch(self, client, monkeypatch):
+        """Подтверждение — не причина отвечать MAX кодом ошибки: подписка отключится."""
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        monkeypatch.setattr(api.max_http, "remember_chat_id", lambda cid: True)
+        monkeypatch.setattr(api.max_http, "learned_chat_id", lambda: "")
+
+        def boom(*a, **k):
+            raise RuntimeError("MAX недоступен")
+
+        monkeypatch.setattr(api.max_http, "send_message", boom)
+
+        resp = client.post(
+            "/api/max/webhook",
+            json=[self._message_update()],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["handled"] == 1
+
+
 class TestPayloadShapes:
     def test_single_update_object_is_accepted(self, client, monkeypatch):
         monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")

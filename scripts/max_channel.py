@@ -23,6 +23,9 @@
 
 **Что печатается.** Только факты «есть / нет» и коды ответов. Значения токена и
 секрета не выводятся ни в одном режиме — в том числе в теле ответа MAX.
+Формат секрета проверяется **до** похода к API: MAX отвергает всё, что не
+``[A-Za-z0-9_-]{5,256}`` (фраза с пробелами — код 400), и владельцу нужен
+человеческий ответ, а не ``Field 'secret' does not match required pattern``.
 
 Коды возврата: 0 — канал готов (или подписка прошла), 1 — чего-то не хватает,
 2 — не удалось выполнить проверку.
@@ -33,8 +36,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sys
 import urllib.error
+import urllib.parse
 import urllib.request
 from typing import Dict, Optional, Tuple
 
@@ -47,9 +52,18 @@ API_BASE = "https://platform-api2.max.ru"
 DEFAULT_WEBHOOK_PATH = "/api/max/webhook"
 DEFAULT_WEBHOOK_HOST = "сарафан.вмалмыже.рф"
 
-#: Типы событий, которые нам нужны: нажатие кнопки ответа и старт диалога
-#: (из него бот узнаёт chat_id).
-UPDATE_TYPES = ["message_callback", "bot_started"]
+#: Типы событий, которые нам нужны: нажатие кнопки ответа, старт диалога
+#: (из него бот узнаёт chat_id) и **любое сообщение владельца боту** — из него
+#: чат тоже узнаётся. Третий тип — страховка: ``bot_started`` платформа шлёт
+#: один раз (на первом запуске диалога), и если владелец открыл бота до
+#: подписки, событие потерялось навсегда. Тот же приём — в «Матрице РМЗ».
+UPDATE_TYPES = ["message_callback", "bot_started", "message_created"]
+
+#: Паттерн секрета подписки, который требует MAX (схема ``SubscriptionRequestBody``):
+#: от 5 до 256 символов, разрешены только латинские буквы, цифры, дефис и
+#: подчёркивание. Фраза с пробелами (``«мой секретный код»``) платформа
+#: отвергает кодом 400 — поэтому проверяем ДО похода к API, а не после.
+MAX_SECRET_PATTERN = re.compile(r"^[A-Za-z0-9_-]{5,256}$")
 
 #: Локальный адрес веб-сервиса на боксе — для проверки живости маршрута без
 #: выхода в интернет.
@@ -140,16 +154,42 @@ def subscription_payload(url: str, secret: str) -> bytes:
 def explain_webhook_code(code: int) -> str:
     """Что значит код ответа нашей двери."""
     if code == 200:
-        return "дверь отвечает 200 — вебхук живой"
+        return "дверь отвечает 200 — вебхук живой, секрет совпал"
     if code == 503:
         return "503 — секрет подписки на сервере не задан (MAX_WEBHOOK_SECRET пуст)"
     if code == 401:
-        return "401 — секрет задан, но не совпал (или не пришёл в заголовке)"
+        return "401 — секрет в MAX не совпадает с секретом в окружении"
     if code == 404:
         return "404 — маршрута нет: веб-сервис поднят на старом коде (нужен рестарт)"
     if code == 0:
         return "нет соединения — веб-сервис не отвечает"
     return "код %s — неожиданно" % code
+
+
+def secret_fits_max(secret: str) -> bool:
+    """Подойдёт ли секрет подписки для MAX.
+
+    Проверка формата, а не «похоже на секрет»: MAX отвергает всё, что не
+    ``[A-Za-z0-9_-]{5,256}`` — фразу с пробелами, кириллицу и спецсимволы.
+    Ошибка приходит от API кодом 400 с текстом про pattern, поэтому дешевле
+    проверить у себя и сказать владельцу точно, что не так.
+    """
+    return bool(MAX_SECRET_PATTERN.match((secret or "").strip()))
+
+
+def describe_secret_fit(secret: str) -> str:
+    """Человеческое объяснение по формату секрета (значение не печатается)."""
+    value = (secret or "").strip()
+    if not value:
+        return "секрет пуст"
+    if secret_fits_max(value):
+        return "секрет подходит формату MAX: да"
+    return (
+        "секрет подходит формату MAX: НЕТ — допустимы только латинские буквы, "
+        "цифры, дефис и подчёркивание, длина 5–256 (сейчас пробелов и других "
+        "недопустимых символов: %d, длина %d)"
+        % (sum(1 for c in value if not re.match(r"[A-Za-z0-9_-]", c)), len(value))
+    )
 
 
 def _learned_chat_id() -> Optional[str]:
@@ -179,27 +219,40 @@ def check(webhook_url: str) -> int:
         print("чат выучен: не проверено (Redis недоступен)")
     else:
         print(
-            "чат выучен из bot_started: %s" % ("да" if learned else "НЕТ — нажмите «Старт» в боте")
+            "чат выучен из bot_started: %s"
+            % ("да" if learned else "НЕТ — нажмите «Старт» или напишите боту")
         )
 
+    # Проба идёт С тем же секретом, который уходит в подписку: 200 означает,
+    # что дверь и подписка говорят на одном языке. Без заголовка MAX-стик
+    # отвечал бы 401 всегда — и это ничего не проверяло.
+    secret_value = (os.environ.get("MAX_WEBHOOK_SECRET") or "").strip()
+    headers = {"Content-Type": "application/json"}
+    if secret_value:
+        headers["X-Max-Bot-Api-Secret"] = secret_value
     code, _ = _http(
         LOCAL_WEB + DEFAULT_WEBHOOK_PATH,
         method="POST",
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         body=b"{}",
     )
-    print("маршрут вебхука (локально): %s" % explain_webhook_code(code))
+    print("маршрут вебхука (локально, с секретом): %s" % explain_webhook_code(code))
     print("цель подписки: %s" % webhook_url)
+    print(describe_secret_fit(secret_value))
 
     missing = []
     if not token:
         missing.append("MAX_TOKEN")
     if not secret:
         missing.append("MAX_WEBHOOK_SECRET")
+    if secret and not secret_fits_max(secret_value):
+        missing.append("секрет подписки не по формату MAX")
     if not learned and not chat_env:
-        missing.append("«Старт» в боте (chat_id не выучен)")
+        missing.append("«Старт» в боте (или любое сообщение боту — chat_id не выучен)")
     if code == 404:
         missing.append("рестарт веб-сервиса (маршрута нет)")
+    if code == 401:
+        missing.append("секрет в MAX не совпадает с секретом в окружении")
 
     if missing:
         print("\nНЕ ХВАТАЕТ: %s" % ", ".join(missing))
@@ -216,6 +269,20 @@ def subscribe(webhook_url: str) -> int:
         print("нужны MAX_TOKEN и MAX_WEBHOOK_SECRET в окружении — одно из них не задано")
         return 1
 
+    # Формат секрета проверяем сами: MAX отвечает на негодный секрет кодом 400
+    # с текстом про pattern, и без этой проверки владелец видит только
+    # «Field 'secret' does not match required pattern» — без подсказки, что делать.
+    if not secret_fits_max(secret):
+        print("%s" % describe_secret_fit(secret))
+        print("\nПодписка не отправлена: MAX отверг бы такой секрет кодом 400.")
+        print("Нужен набор из латинских букв, цифр, дефиса и подчёркивания (5–256 символов).")
+        return 1
+
+    # Подписка на тот же адрес уже может быть — тогда POST вернёт «уже есть».
+    # Снимаем старую (с прежним набором событий) и подписываемся заново.
+    if _drop_existing_subscription(webhook_url, token):
+        print("старая подписка на этот адрес снята — подписываемся заново")
+
     code, body = _http(
         API_BASE + "/subscriptions",
         method="POST",
@@ -230,9 +297,24 @@ def subscribe(webhook_url: str) -> int:
         print(text[:600])
     if code in (200, 201):
         print("\nПодписка оформлена: MAX будет звать %s" % webhook_url)
+        print("события: %s" % ", ".join(UPDATE_TYPES))
         return 0
     print("\nПодписка не прошла — разбери ответ выше.")
     return 1
+
+
+def _drop_existing_subscription(webhook_url: str, token: str) -> bool:
+    """Снять подписку на этот адрес, если она есть. ``True`` — сняли.
+
+    Нужно, чтобы повторная подписка меняла набор событий: у MAX один адрес —
+    одна подписка, и новый ``POST`` с прежними типами не обновлял бы её.
+    """
+    try:
+        url = "%s/subscriptions?url=%s" % (API_BASE, urllib.parse.quote(webhook_url, safe=""))
+        code, _ = _http(url, method="DELETE", headers={"Authorization": token})
+    except Exception:  # noqa: BLE001 — снятие не обязано ломать подписку
+        return False
+    return code in (200, 204)
 
 
 def main() -> int:
