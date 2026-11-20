@@ -32,6 +32,14 @@ class _Resp:
         return str(self._payload)
 
 
+class _Paths:
+    """Заглушка ``ssl.get_default_verify_paths()`` — нужен только ``cafile``."""
+
+    def __init__(self, cafile):
+        self.cafile = cafile
+        self.capath = None
+
+
 @pytest.fixture(autouse=True)
 def _max_env(monkeypatch):
     monkeypatch.setenv("MAX_TOKEN", "tok-123")
@@ -70,6 +78,57 @@ class TestAuth:
         with pytest.raises(max_http.MaxError) as exc:
             max_http.post("/messages", json={})
         assert "MAX_TOKEN" in str(exc.value)
+
+
+class TestCaBundle:
+    """TLS к MAX: корень российского УЦ есть в системном хранилище, но не в certifi.
+
+    Без этого любая отправка в MAX падает с ``certificate verify failed`` —
+    карточка заявки просто не уходит, и канал выглядит живым, пока он мёртв.
+    """
+
+    def test_system_bundle_is_used_when_it_exists(self, monkeypatch, tmp_path):
+        bundle = tmp_path / "ca-certificates.crt"
+        bundle.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+
+        monkeypatch.setattr(max_http.ssl, "get_default_verify_paths", lambda: _Paths(str(bundle)))
+        assert max_http._ca_bundle() == str(bundle)
+
+    def test_missing_bundle_falls_back_to_default_verification(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            max_http.ssl, "get_default_verify_paths", lambda: _Paths(str(tmp_path / "нет.env"))
+        )
+        assert max_http._ca_bundle() is None
+
+    def test_request_is_verified_against_system_bundle(self, monkeypatch, tmp_path):
+        bundle = tmp_path / "ca-certificates.crt"
+        bundle.write_text("-----BEGIN CERTIFICATE-----\n", encoding="utf-8")
+        monkeypatch.setattr(max_http.ssl, "get_default_verify_paths", lambda: _Paths(str(bundle)))
+
+        seen = {}
+
+        def fake_request(method, url, **kw):
+            seen["verify"] = kw.get("verify")
+            return _Resp()
+
+        monkeypatch.setattr(requests, "request", fake_request)
+        max_http.post("/messages", json={"text": "hi"})
+        assert seen["verify"] == str(bundle)
+
+    def test_request_without_system_bundle_keeps_default(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            max_http.ssl, "get_default_verify_paths", lambda: _Paths(str(tmp_path / "нет.env"))
+        )
+
+        seen = {}
+
+        def fake_request(method, url, **kw):
+            seen["verify"] = kw.get("verify")
+            return _Resp()
+
+        monkeypatch.setattr(requests, "request", fake_request)
+        max_http.post("/messages", json={"text": "hi"})
+        assert seen["verify"] is True
 
 
 class TestRetries:

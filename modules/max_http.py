@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import logging
 import os
+import ssl
 import threading
 import time
 from typing import Any, Dict, Optional
@@ -74,6 +75,34 @@ def api_base() -> str:
 def token() -> str:
     """Токен бота (``MAX_TOKEN``). Пусто — MAX не настроен, отправки выключены."""
     return (os.getenv("MAX_TOKEN") or "").strip()
+
+
+def _ca_bundle() -> Optional[str]:
+    """Файл системных корней сертификатов — если он есть.
+
+    **Зачем.** ``requests`` по умолчанию доверяет **своему** набору корней
+    (``certifi``), а не системному хранилищу. Сертификат ``platform-api2.max.ru``
+    выпущен российским УЦ («Russian Trusted Root CA», Минцифры), и в ``certifi``
+    его нет → любая отправка в MAX падает с
+    ``SSLError: certificate verify failed: unable to get local issuer certificate``.
+    В системном хранилище Linux корень **есть** — поэтому говорим ``requests``
+    доверять именно ему.
+
+    Тот же класс грабли у соседей: в «Матрице РМЗ» Node тоже не смотрит
+    системный стор, и там цепочку кладут в репозиторий как публичный файл
+    (``deploy/certs/max-ca.pem``). Мы идём системным путём: корень в системном
+    хранилище уже есть, а тащить сертификаты в репозиторий незачем.
+
+    Если системного bundle нет — работаем как раньше (стандартная проверка
+    ``requests``): хуже не станет.
+    """
+    try:
+        cafile = ssl.get_default_verify_paths().cafile
+    except Exception:  # noqa: BLE001 — пути ssl недоступны, работаем как раньше
+        return None
+    if cafile and os.path.isfile(cafile):
+        return cafile
+    return None
 
 
 #: Ключ Redis, где лежит выученный chat_id. Chat_id узнаётся сам: когда
@@ -215,6 +244,7 @@ def request(
                 params=params,
                 headers=_headers(),
                 timeout=timeout,
+                verify=_ca_bundle() or True,
             )
         except requests.exceptions.RequestException as e:
             # Сеть не ответила: соединения не было — повтор безопасен.
