@@ -61,6 +61,18 @@ TEMPLATE_DESC_MAX = 240
 # Сколько user-вызовов VALSTAN стоит один full-регион (см. docstring).
 USER_CALLS_PER_REGION = 5
 
+# Все виды групп проекта: районы и области.
+#
+# Нужен там, где скрипт только ДОЗАЛИВАЕТ недостающее по живому снимку ВК
+# (``--repair --by-snapshot``). Области — полноценные группы проекта, у них
+# тоже бывают пустые аватар и обложка, и ``--audit`` их честно считает.
+#
+# Найдено 2026-11-20: аудит показывал «Чинить: 5», а ``--repair`` брал только
+# районы — области ``kirov_obl`` и ``tatarstan_obl`` были в списке обещаний, но
+# в ремонт не попадали никогда. Гейт зелёный, работа не сделана — ровно тот
+# класс, который гейт и ловит.
+ALL_KINDS = ("raion", "oblast")
+
 
 def _genitive_from_zagolovki(zagolovki: Optional[dict]) -> Optional[str]:
     """«Новости Опаринского округа:» → «Опаринского округа»."""
@@ -78,11 +90,16 @@ async def load_targets(
     """Активные регионы с главной группой + брендинг-данные из region_configs.
 
     ``kinds`` по умолчанию только районы — так исторически работали ``--apply`` и
-    ``--repair``. Областные группы (``kind='oblast'``) им не нужны: у них своё
-    оформление. Но описание и поисковый индекс нужны и им, поэтому режимы
-    ``--audit`` и ``--refresh-desc`` зовут с обоими видами: **«все группы
-    проекта» — это 41 район плюс 2 области**, и молчаливое сужение до районов
-    как раз и оставило бы области без индекса.
+    ``--repair``. Областные группы (``kind='oblast'``) для оформления и визитки
+    не берутся: у них своё наполнение, а ``--apply`` ставит приветственный пост
+    и закреп — это крупное сообщество, и лишний пост там не нужен.
+
+    Но области — полноценные группы проекта: у них тоже есть аватар и обложка,
+    и ``--audit`` их считает. Поэтому режимы, которые только **доливают
+    недостающее** (``--repair --by-snapshot``), берут и области — см. ``ALL_KINDS``;
+    режимы, которые что-то **пишут сверху** (``--apply``), остаются на районах.
+    Описание и поисковый индекс нужны и областям, поэтому ``--audit`` и
+    ``--refresh-desc`` зовут с обоими видами.
     """
     from sqlalchemy import text
 
@@ -1069,12 +1086,16 @@ async def select_repair_targets_by_snapshot(codes: Optional[List[str]]) -> List[
 
     Снимок берётся community-ключом, поэтому отбор почти не стоит user-бюджета;
     сам ремонт всё равно решает по своему снимку внутри ``repair_region``.
+
+    Области берутся наравне с районами (``ALL_KINDS``): ремонт только доливает
+    недостающее и ничего не переписывает сверху, поэтому область тут безопасна —
+    в отличие от ``--apply``, который ставит пост и закреп (см. ``load_targets``).
     """
     import vk_api
 
     from modules.promotion.group_setup_vk import get_current
 
-    targets = await load_targets(codes)
+    targets = await load_targets(codes, kinds=ALL_KINDS)
     user_token, community_tokens = await load_tokens()
     user_api = vk_api.VkApi(token=user_token).get_api() if user_token else None
 
@@ -1134,7 +1155,9 @@ async def run_repair(codes: Optional[List[str]], by_snapshot: bool = False) -> i
             logger.info("Записей со статусом error нет — чинить нечего")
             return 0
 
-        targets = [t for t in await load_targets(codes) if t["region_id"] in broken_ids]
+        targets = [
+            t for t in await load_targets(codes, kinds=ALL_KINDS) if t["region_id"] in broken_ids
+        ]
     all_targets = await load_targets(None)
     nb_index = neighbor_index(all_targets)
     for t in targets:
