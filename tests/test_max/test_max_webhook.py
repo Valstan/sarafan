@@ -219,6 +219,106 @@ class TestCallback:
         assert resp.status_code == 200
 
 
+class TestEventShapes:
+    """Живая форма событий MAX (20.11): ключ типа — ``update_type``, а не ``type``.
+
+    На этом молчал весь канал: события приходили, обработчик искал ``type``,
+    получал ``None`` и тихо пропускал всё — без единой строчки в логе.
+    """
+
+    def test_bot_started_with_update_type(self, client, monkeypatch):
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        saved = {}
+        monkeypatch.setattr(
+            api.max_http, "remember_chat_id", lambda cid: saved.setdefault("cid", cid) and True
+        )
+        resp = client.post(
+            "/api/max/webhook",
+            json=[
+                {
+                    "update_type": "bot_started",
+                    "chat_id": 590541123,
+                    "timestamp": 1732000000000,
+                    "user": {"user_id": 570727064},
+                }
+            ],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["handled"] == 1
+        assert saved["cid"] == "590541123"
+
+    def test_message_created_with_recipient_chat_id(self, client, monkeypatch):
+        """Живая форма сообщения: ``message.recipient.chat_id`` + ``user_id``."""
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        saved = {}
+        monkeypatch.setattr(
+            api.max_http, "remember_chat_id", lambda cid: saved.setdefault("cid", cid) and True
+        )
+        monkeypatch.setattr(api.max_http, "learned_chat_id", lambda: "")
+        monkeypatch.setattr(api.max_http, "send_message", lambda *a, **k: {})
+
+        resp = client.post(
+            "/api/max/webhook",
+            json=[
+                {
+                    "update_type": "message_created",
+                    "timestamp": 1732000000000,
+                    "message": {
+                        "body": "привет",
+                        "recipient": {"chat_id": 590541123, "user_id": 570727064},
+                        "sender": {"user_id": 570727064},
+                    },
+                }
+            ],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["handled"] == 1
+        assert saved["cid"] == "590541123"
+
+    def test_callback_with_update_type_is_handled(self, client, monkeypatch):
+        """Нажатие кнопки приходит в живой форме — значит, ответ автору должен уйти."""
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        request = _FakeRequest()
+        _patch_db(monkeypatch, request)
+
+        async def fake_build_text(session, ar):
+            return "Здравствуйте! Услуги: https://сарафан.вмалмыже.рф/regions/links"
+
+        async def fake_send(session, ar, **kw):
+            return {"success": True, "vk_message_id": 99, "via": "community-token"}
+
+        import modules.ad_cabinet.send_reply as sr
+
+        monkeypatch.setattr(sr, "build_reply_text", fake_build_text)
+        monkeypatch.setattr(sr, "send_reply_to_author", fake_send)
+        monkeypatch.setattr(api.max_http, "answer_callback", lambda cb, text=None: {})
+
+        resp = client.post(
+            "/api/max/webhook",
+            json=[
+                {
+                    "update_type": "message_callback",
+                    "callback": {"callback_id": "cb-9", "payload": "ad:42"},
+                }
+            ],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["handled"] == 1
+
+    def test_unknown_event_type_is_not_an_error(self, client, monkeypatch):
+        monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")
+        resp = client.post(
+            "/api/max/webhook",
+            json=[{"update_type": "message_edited", "message": {"body": "x"}}],
+            headers={"X-Max-Bot-Api-Secret": "sekret"},
+        )
+        assert resp.status_code == 200
+        assert resp.json()["handled"] == 0
+
+
 class TestMessageCreated:
     """Владелец написал боту — чат выучен из сообщения.
 
@@ -380,7 +480,7 @@ class TestBotStarted:
         )
         assert resp.status_code == 200
         assert resp.json()["handled"] == 1
-        assert saved["cid"] == 424242
+        assert saved["cid"] == "424242"
 
     def test_bot_started_without_chat_id_is_ignored(self, client, monkeypatch):
         monkeypatch.setenv("MAX_WEBHOOK_SECRET", "sekret")

@@ -96,14 +96,30 @@ def _updates(payload: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _event_type(update: Dict[str, Any]) -> str:
+    """Тип события MAX.
+
+    **Ключ называется ``update_type``, а не ``type``** — это выяснилось живьём
+    20.11, когда события от MAX приходили, а канал молчал: обработчик искал
+    ``type``, получал ``None`` и тихо пропускал всё. Старый ключ ``type``
+    оставлен как запасной: смена формы события не должна снова выключить канал
+    молча.
+    """
+    for key in ("update_type", "type"):
+        value = update.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
 def _chat_id_from_update(update: Dict[str, Any]) -> Optional[str]:
     """Идентификатор чата из события MAX — в любой из известных форм.
 
     Формы событий у MAX менялись и ещё поменяются: у ``bot_started`` чат лежит
     **на верхнем уровне** события, у ``message_created`` — внутри
-    ``message.chat`` (или ``message.recipient``). Поэтому ищем по нескольким
-    местам сразу, а не в одном: иначе событие сменит форму — и канал молча
-    останется без адресата.
+    ``message.recipient`` (``chat_id`` рядом с ``user_id``). Поэтому ищем по
+    нескольким местам сразу, а не в одном: иначе событие сменит форму — и канал
+    молча останется без адресата.
 
     Порядок — от надёжного к сомнительному: сначала ``chat_id`` (идентификатор
     чата), и только потом ``user_id`` (идентификатор человека). Адресат для
@@ -147,6 +163,9 @@ async def _handle_bot_started(update: Dict[str, Any]) -> Dict[str, Any]:
     if chat_id in (None, ""):
         logger.info("MAX webhook: bot_started без chat_id")
         return {"handled": False, "reason": "no_chat_id"}
+    # Строка везде: MAX присылает идентификатор то числом, то строкой, а в Redis
+    # он должен лежать одним и тем же — иначе «новый чат» не отличить от прежнего.
+    chat_id = str(chat_id)
     saved = max_http.remember_chat_id(chat_id)
     logger.info(
         "MAX webhook: владелец запустил бота, chat_id=%s (%s)",
@@ -269,7 +288,7 @@ async def max_webhook(
 
     handled = 0
     for update in _updates(payload):
-        kind = update.get("type")
+        kind = _event_type(update)
         try:
             if kind == "bot_started":
                 result = await _handle_bot_started(update)
@@ -278,6 +297,7 @@ async def max_webhook(
             elif kind == "message_callback":
                 result = await _handle_callback(update)
             else:
+                logger.info("MAX webhook: событие типа %r — игнорируем", kind)
                 continue
         except Exception as e:  # noqa: BLE001 — ответ 200 в любом случае
             logger.exception("MAX webhook: обработка %s не удалась: %s", kind, e)
