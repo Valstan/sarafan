@@ -1,4 +1,4 @@
--- 116: skeleton for the thirteenth Tatarstan batch: agryzsky (Агрызский),
+-- 117: skeleton for the thirteenth Tatarstan batch: agryzsky (Агрызский),
 -- aktanyshsky (Актанышский), yutazinsky (Ютазинский). Same pattern as 101-115:
 -- INACTIVE regions with vk_group_id NULL — the "- ИНФО" groups are created after
 -- this migration. Additive and reversible.
