@@ -26,6 +26,17 @@
 «Старт» в диалоге с ботом, MAX присылает ``bot_started`` с ``chat_id``. Мы его
 запоминаем (Redis), и с этого момента уведомления идут в этот чат сами —
 **идентификатор чата копировать руками не нужно**.
+
+**Но «Старт» может и не сработать как страховка.** События приходят только
+после подписки, а ``bot_started`` платформа шлёт **один раз — на первом
+запуске диалога**. Если владелец открыл бота раньше, чем появилась подписка,
+событие потерялось, а повторное нажатие «Старт» может и не дать его снова.
+Поэтому вторым источником чата служит **любое сообщение владельца боту**
+(``message_created``): MAX шлёт его всегда, и в нём чат тоже есть. Этот же
+приём применяет соседний проект «Матрица РМЗ» — там адресат вычитывается
+из входящего сообщения (у MAX ``GET /chats`` отключён, иного способа узнать
+чат нет). Новый чат подтверждаем сообщением «САРАФАН на связи» — владелец
+видит, что канал ожил, а не просто молчит.
 """
 
 from __future__ import annotations
@@ -41,6 +52,14 @@ from modules.max_notifier import ad_request_id_from_payload
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
+
+#: Ответ владельцу, когда канал ожил: чат получен — значит, карточки заявок
+#: пойдут сюда. Короткий: MAX-карточка и так читается на телефоне.
+CONFIRMATION_TEXT = (
+    "САРАФАН на связи: канал рекламных заявок включён.\n"
+    "Этот чат получен — новые заявки будут приходить сюда, отвечать можно "
+    "одним нажатием."
+)
 
 
 def webhook_secret() -> str:
@@ -77,6 +96,45 @@ def _updates(payload: Any) -> List[Dict[str, Any]]:
     return []
 
 
+def _chat_id_from_update(update: Dict[str, Any]) -> Optional[str]:
+    """Идентификатор чата из события MAX — в любой из известных форм.
+
+    Формы событий у MAX менялись и ещё поменяются: у ``bot_started`` чат лежит
+    **на верхнем уровне** события, у ``message_created`` — внутри
+    ``message.chat`` (или ``message.recipient``). Поэтому ищем по нескольким
+    местам сразу, а не в одном: иначе событие сменит форму — и канал молча
+    останется без адресата.
+
+    Порядок — от надёжного к сомнительному: сначала ``chat_id`` (идентификатор
+    чата), и только потом ``user_id`` (идентификатор человека). Адресат для
+    отправки — это чат, поэтому ``user_id`` берём только если чата в событии
+    нет вовсе.
+    """
+    message = update.get("message") or {}
+    chat = message.get("chat") or {}
+    recipient = message.get("recipient") or {}
+    top_chat = update.get("chat") or {}
+
+    chat_candidates = (
+        update.get("chat_id"),
+        message.get("chat_id"),
+        chat.get("chat_id"),
+        chat.get("id"),
+        top_chat.get("chat_id"),
+        top_chat.get("id"),
+        recipient.get("chat_id"),
+    )
+    for value in chat_candidates:
+        if value not in (None, ""):
+            return str(value)
+
+    user_candidates = (recipient.get("user_id"), (message.get("user") or {}).get("user_id"))
+    for value in user_candidates:
+        if value not in (None, ""):
+            return str(value)
+    return None
+
+
 async def _handle_bot_started(update: Dict[str, Any]) -> Dict[str, Any]:
     """Владелец нажал «Старт» в диалоге с ботом — запоминаем chat_id.
 
@@ -96,6 +154,45 @@ async def _handle_bot_started(update: Dict[str, Any]) -> Dict[str, Any]:
         "запомнен" if saved else "запомнить не удалось (проверьте Redis)",
     )
     return {"handled": True, "chat_id": chat_id, "saved": saved}
+
+
+async def _handle_message_created(update: Dict[str, Any]) -> Dict[str, Any]:
+    """Владелец написал боту — узнаём из этого чат и подтверждаем, что канал ожил.
+
+    Зачем это второй источник чата: ``bot_started`` платформа шлёт **один раз**
+    — на первом запуске диалога. Если владелец открыл бота до появления
+    подписки, событие потерялось, и нажатие «Старт» заново может его не
+    породить. Любое сообщение боту событие приносит всегда, и в нём чат есть
+    — так же, как в «Матрице РМЗ».
+
+    Подтверждение («САРАФАН на связи») отправляется только когда чат новый:
+    иначе каждое сообщение владельца порождало бы ответ.
+    """
+    chat_id = _chat_id_from_update(update)
+    if not chat_id:
+        logger.info("MAX webhook: message_created без chat_id")
+        return {"handled": False, "reason": "no_chat_id"}
+
+    known = max_http.learned_chat_id()
+    saved = max_http.remember_chat_id(chat_id)
+    logger.info(
+        "MAX webhook: сообщение владельца, chat_id=%s (%s)",
+        chat_id,
+        "запомнен" if saved else "запомнить не удалось (проверьте Redis)",
+    )
+    if not saved:
+        return {"handled": False, "reason": "not_saved", "chat_id": chat_id}
+
+    if known and str(known) == str(chat_id):
+        return {"handled": True, "chat_id": chat_id, "saved": True, "confirmation": False}
+
+    confirmed = False
+    try:
+        max_http.send_message(chat_id, CONFIRMATION_TEXT)
+        confirmed = True
+    except Exception as e:  # noqa: BLE001 — подтверждение не должно ронять обработку
+        logger.warning("MAX webhook: не удалось подтвердить подключение: %s", e)
+    return {"handled": True, "chat_id": chat_id, "saved": True, "confirmation": confirmed}
 
 
 async def _handle_callback(update: Dict[str, Any]) -> Dict[str, Any]:
@@ -176,6 +273,8 @@ async def max_webhook(
         try:
             if kind == "bot_started":
                 result = await _handle_bot_started(update)
+            elif kind == "message_created":
+                result = await _handle_message_created(update)
             elif kind == "message_callback":
                 result = await _handle_callback(update)
             else:
