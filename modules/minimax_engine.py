@@ -223,6 +223,45 @@ DEFAULT_EMAILS_FILTER = "0"
 #: ключ записи токена (он выводится из пути) остаётся верным.
 ENV_WORK_AREA = "MINIMAX_WORK_AREA"
 DEFAULT_WORK_AREA = "work"
+#: Потолок состояния CLI в рабочей области (env ``MINIMAX_STATE_MAX_MB``).
+#:
+#: **Живой факт 22.11 — это и был причиной двухдневного отказа MiniMax.**
+#: CLI (MiniMax Code) копит в своей области ВСЁ, что было за время работы:
+#: сессии агента, sqlite-состояние, логи наблюдаемости, каталог запусков и
+#: фоновых задач. К 22.11 область весила **897 МБ** (31 112 файлов), и вызов
+#: CLI поднимал RSS до **554 МБ** — ядро снимало процесс (запись в ``dmesg``:
+#: ``OOM killed process 683639 (minimax-code) … anon-rss:554124kB``), вызов
+#: возвращал ``exec_failed``, и **каждый** вызов уходил в платный Дипсик
+#: (замер: 945 отказов и 945 вызовов Дипсика 20.11, 953 и 954 — 21.11).
+#:
+#: Что важно: **бокс не был перегружен.** Загрузка воркера за сутки — 27 %,
+#: CPU во время волны — 0,3 %, свободно 601–684 МБ. Не хватало не мощности,
+#: а разделения. И состояние растёт само: ~26 КБ на вызов — через сутки
+#: состояние снова упирается в бокс.
+#:
+#: Потолок держит область в узде: 64 МБ состояния дают RSS около 315 МБ
+#: (замер: пустая область — 297 МБ, 897 МБ — 554 МБ, то есть ~0,29 МБ RSS на
+#: МБ состояния), а это уже помещается в свободную память бокса. Сброс —
+#: дешевле и надёжнее, чем борьба за мегабайты.
+ENV_STATE_MAX_MB = "MINIMAX_STATE_MAX_MB"
+DEFAULT_STATE_MAX_MB = 64
+#: Потолок кучи V8 для CLI (env ``MINIMAX_NODE_MAX_OLD_SPACE_MB``).
+#:
+#: Без потолка Node выбирает лимит кучи по памяти машины, и на боксе в 1536 МБ
+#: это около 768 МБ: процесс раздувается до ~900 МБ RSS и **его снимает ядро**
+#: — а жертвой ядро выбирает крупнейший процесс, то есть на боксе может
+#: снять не CLI, а воркер. Потолок превращает это в быстрый отказ самого CLI
+#: (и наш откат), а не в убийство чужого процесса.
+ENV_NODE_MAX_OLD_SPACE_MB = "MINIMAX_NODE_MAX_OLD_SPACE_MB"
+DEFAULT_NODE_MAX_OLD_SPACE_MB = 384
+#: Признаки того, что CLI сожрал память (для классификации отказа).
+_MEMORY_MARKERS = (
+    "heap out of memory",
+    "allocation failed",
+    "reached heap limit",
+    "out of memory",
+    "oom",
+)
 #: Отмечать ли активацию в журнале Кармана (``POST /api/minimax/activations``).
 #:
 #: По контракту 14.11 (ответ Кармана, id 142) — **не отмечаем**: «в карман
@@ -920,7 +959,115 @@ def _classify_failure(detail: str, default: str = "engine_failed") -> str:
         return "quota_exhausted"
     if _is_auth_error(detail):
         return "auth_expired"
+    if _looks_like_memory_failure(detail):
+        return "engine_oom"
     return default
+
+
+def _state_max_mb() -> float:
+    """Потолок состояния CLI в мегабайтах."""
+    try:
+        return max(1.0, float(os.getenv(ENV_STATE_MAX_MB) or DEFAULT_STATE_MAX_MB))
+    except ValueError:
+        return float(DEFAULT_STATE_MAX_MB)
+
+
+def _node_max_old_space_mb() -> int:
+    """Потолок кучи V8 для CLI в мегабайтах."""
+    try:
+        return max(64, int(os.getenv(ENV_NODE_MAX_OLD_SPACE_MB) or DEFAULT_NODE_MAX_OLD_SPACE_MB))
+    except ValueError:
+        return int(DEFAULT_NODE_MAX_OLD_SPACE_MB)
+
+
+def _state_size_mb(data_dir: Path) -> float:
+    """Размер состояния CLI в области (МБ).
+
+    Обход целиком, а не «по верхнему уровню»: состояние лежит не в одном
+    файле, а в дереве (сессии, sqlite-состояние, логи, каталоги запусков) —
+    22.11 это 31 112 файлов на 897 МБ. Обход дорогой ровно тогда, когда состояние
+    уже большое (то есть когда мы всё равно его сбрасываем), а после сброса он
+    дешёвый: десятки мегабайт.
+    """
+    total = 0
+    try:
+        for root, _dirs, files in os.walk(data_dir):
+            for name in files:
+                try:
+                    total += os.stat(os.path.join(root, name)).st_size
+                except OSError:
+                    continue
+    except OSError:
+        return 0.0
+    return total / (1024.0 * 1024.0)
+
+
+def _reset_cli_state(data_dir: Path) -> None:
+    """Сбросить накопленное состояние CLI, **сохранив вход**.
+
+    Токен-стор лежит в ``<область>/data/auth/prod/en/mcode-public/auth.json``,
+    а его ключ выводится из **пути** (``token_store_key``) — поэтому путь
+    области менять нельзя, чистим содержимое. ``config.yaml`` тоже не трогаем
+    (он root-owned, а движку он не нужен: модель и режим передаются флагами).
+    """
+    keep = {"auth", "config.yaml"}
+    try:
+        entries = list(data_dir.iterdir())
+    except OSError:
+        return
+    for entry in entries:
+        if entry.name in keep:
+            continue
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink()
+        except OSError:
+            continue
+
+
+def _ensure_cli_state_bounded(account: MinimaxAccount) -> None:
+    """Не дать состоянию CLI вырасти до объёма, который убивает бокс.
+
+    Замер 22.11: состояние 897 МБ → RSS CLI 554 МБ → OOM-килл ядра → **каждый**
+    вызов в платный Дипсик (945 и 953 отказа за два дня, ноль успешных).
+    Потолок 64 МБ держит RSS в пределах ~315 МБ — он помещается в свободную
+    память бокса (601–684 МБ).
+    """
+    data_dir = account.data_dir
+    size = _state_size_mb(data_dir)
+    limit = _state_max_mb()
+    if size <= limit:
+        return
+    logger.warning(
+        "minimax: состояние CLI %.0f МБ (потолок %.0f МБ) — сбрасываю: "
+        "иначе RSS убьёт бокс и весь трафик уйдёт в платный Дипсик",
+        size,
+        limit,
+    )
+    _reset_cli_state(data_dir)
+
+
+def _looks_like_memory_failure(detail: str) -> bool:
+    """Съел ли CLI память (куча V8 или ядро)."""
+    low = (detail or "").lower()
+    if not low:
+        return False
+    return any(marker in low for marker in _MEMORY_MARKERS)
+
+
+def _killed_by_memory(returncode: int, stderr: str) -> bool:
+    """Различаем «убит по памяти» и прочие отказы.
+
+    Ядро снимает процесс сигналом 9 → код возврата ``-9`` (или 137, если
+    кодировкаshell). Это **не** вина аккаунта: другой аккаунт на том же боксе
+    даст тот же отказ, поэтому ротация тут бессмысленна — правильное действие
+    сбросить накопленное состояние и повторить вызов.
+    """
+    if returncode in (-9, 137):
+        return True
+    return _looks_like_memory_failure(stderr)
 
 
 def run_classification(
@@ -984,8 +1131,15 @@ def run_classification(
         env["MAVIS_DATA_DIR"] = str(account.data_dir)
         # IPv4: на боксе нет маршрута IPv6, а DNS отдаёт AAAA первыми — без
         # этого Node ждёт соединения до таймаута (замерено 13.11).
+        #
+        # Потолок кучи V8 — страховка бокса: без него Node выбирает лимит по
+        # памяти машины (~768 МБ на боксе в 1536 МБ), процесс раздувается до
+        # ~900 МБ, и **ядро снимает крупнейший процесс** — то есть не CLI, а
+        # воркер (замер 22.11: OOM-килл CLI при RSS 554 МБ).
         env["NODE_OPTIONS"] = (
-            env.get("NODE_OPTIONS", "") + " --dns-result-order=ipv4first"
+            env.get("NODE_OPTIONS", "")
+            + " --dns-result-order=ipv4first"
+            + " --max-old-space-size=%d" % _node_max_old_space_mb()
         ).strip()
 
         cmd = [
@@ -1011,19 +1165,40 @@ def run_classification(
         cmd += ["--file", str(posts_file)]
         cmd.append((task or "").strip() or TASK_TEXT)
 
+        # Перед вызовом — сторож состояния CLI: накопленное состояние тянет RSS
+        # процесса вверх, и ядро снимает CLI (а вместе с ним — воркер) или V8
+        # упирается в кучу. Замер 22.11: 897 МБ состояния → RSS 554 МБ → OOM.
+        _ensure_cli_state_bounded(account)
+
         started = time.monotonic()
-        proc = subprocess.run(
-            cmd,
-            env=env,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=limit + 60,
-        )
+        proc = None
+        stdout = ""
+        stderr = ""
+        for attempt in range(2):
+            proc = subprocess.run(
+                cmd,
+                env=env,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=limit + 60,
+            )
+            stdout = (proc.stdout or "").strip()
+            stderr = (proc.stderr or "").strip()
+            if not _killed_by_memory(proc.returncode, stderr):
+                break
+            if attempt:
+                break
+            # Убит по памяти — виновато накопленное состояние, а не аккаунт:
+            # другой аккаунт на том же боксе дал бы тот же отказ. Сбрасываем
+            # состояние и повторяем один раз.
+            logger.warning(
+                "minimax: CLI снят по памяти (код %s) — состояние сброшено, повторяю вызов",
+                proc.returncode,
+            )
+            _reset_cli_state(account.data_dir)
         elapsed_ms = int((time.monotonic() - started) * 1000)
-        stdout = (proc.stdout or "").strip()
-        stderr = (proc.stderr or "").strip()
         details: Dict[str, Any] = {
             "returncode": proc.returncode,
             "elapsed_ms": elapsed_ms,
@@ -1064,9 +1239,14 @@ def run_classification(
             return False, "", dict(details, reason=reason, detail=message)
 
         details["stderr"] = stderr[-400:]
+        # Начало stderr — **тоже** в деталях: у краша V8 именно там («heap out of
+        # memory», «Allocation failed»), а хвост содержит только C++-стек V8, и
+        # по нему диагноз не ставится (замер 22.11: причину двухдневного
+        # отказа нашли лишь после того, как начало перестало отрезаться).
+        details["stderr_head"] = stderr[:400]
         details["stdout"] = stdout[-400:]
         reason = _classify_failure(stderr, default="exec_failed")
-        return False, "", dict(details, reason=reason, detail=stderr[-400:])
+        return False, "", dict(details, reason=reason, detail=stderr[:400] or stderr[-400:])
     except subprocess.TimeoutExpired:
         return False, "", {"reason": "timeout", "detail": "%ds" % int(limit)}
     except Exception as exc:  # noqa: BLE001
