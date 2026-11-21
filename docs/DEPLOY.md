@@ -138,16 +138,22 @@ All crontab entries from old_postopus are now Celery Beat schedules:
 
 | Theme | Schedule | Task |
 |-------|----------|------|
-| **Reklama** | 10:05, 14:05, 19:05 | `run_all_regions_theme('reklama')` |
+| **Reklama** | 19:05 | `run_all_regions_theme('reklama')` |
 | ~~**Sosed**~~ | снята 2026-09-14 | пустые прогоны: ноль сводок за 30 дней, см. `tasks/celery_app.py` |
-| **Novost** | 6:40, 11:40, 12:40, 16:40, 18:40, 20:40 | `run_all_regions_theme('novost')` |
-| **Kultura** | 7:20, 13:20, 16:20, 19:20, 21:20 | `run_all_regions_theme('kultura')` |
-| **Sport** | 12:30, 19:30 | `run_all_regions_theme('sport')` |
-| **Admin** | 8:20, 12:20, 20:20 | `run_all_regions_theme('admin')` |
-| **Union** | 11:30, 17:30 | `run_all_regions_theme('union')` |
+| **Novost** | 6:40, 10:40, 13:40, 16:40, 18:40, 20:40 | `run_all_regions_theme('novost')` |
+| **Kultura** | 7:20 | `run_all_regions_theme('kultura')` |
+| **Sport** | 22:50 | `run_all_regions_theme('sport')` |
+| **Admin** | 22:20 | `run_all_regions_theme('admin')` |
+| **Union** | 17:30 | `run_all_regions_theme('union')` |
 | **Detsad** | 13:30 | `run_all_regions_theme('detsad')` |
-| **Addons** | 6:20, 11:20, 18:20, 22:20 | `run_all_regions_theme('addons')` |
-| **Copy Setka** | Every hour at :07, :37 | `parse_and_publish_theme('copy', 'setka')` |
+| ~~**Addons**~~ | снята 2026-09-22 | тема разбиралась волнами своих тем, см. `tasks/celery_app.py` |
+| **Proisshestviya** (strict) | 20:50 | `run_all_regions_theme('proisshestviya', strict=True)` |
+| **Tatarstan oblast** | 19:45 | `parse_and_publish_theme('tatarstan_obl', 'oblast')` |
+| **Copy Setka** | :07 и :47 в нечётных часах (7,9,…,21), :37 в чётных (8,10,…,22) | `parse_and_publish_theme('copy', 'setka')` |
+
+Источник правды — beat-расписание в [`tasks/celery_app.py`](../tasks/celery_app.py)
+(имена слотов `postopus-<тема>-<час>`); таблица выше переписана 21.11 по живому
+состоянию прода после возврата шести слотов `novost` (ADR-0018).
 
 **Plus existing SETKA tasks:**
 - Hourly workflow (at :05)
