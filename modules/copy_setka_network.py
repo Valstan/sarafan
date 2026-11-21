@@ -6,11 +6,22 @@
   уходит VK wall.repost прикреплённого поста (copy_history[0] или attachment type=wall).
 - Иначе — копия содержимого: при repost-цепочке (copy_history) берётся исходный пост
   целиком (текст + вложения); иначе — сам пост. Публикация wall.post по регионам.
-- Ключевые слова маршрутизации (подстрока, без учёта регистра) сужают рассылку
-  до поддерева области: «киров» — сама `kirov_obl` + её районы, «казань» —
-  `tatarstan_obl` + её районы. Нет ключевых слов или есть оба сразу — вся сеть.
-  Слово-маршрут ортогонально «репост»/«копия»: «репост Казань» — это репост
-  оригинала, но только по Татарстану.
+
+**Развилки по областям больше нет** (заказ владельца 21.11: «без разницы, пишут в
+посте казань или киров или ещё что-то, всё равно публикация разносится по всем
+входящим в сеть САРАФАН нашим группам»). Замер 21.11 и так показал, что фильтр не
+работал: 22 развеера подряд, все со ``scope='all'``, ни одного по слову-маршруту.
+Цели — только наши группы (``Region.vk_group_id`` активных регионов), публикация
+идёт токеном MAMA.
+
+**Скорость разлёта (21.11).** Потолок тика общий, но репост-путь ограничен
+ОТДЕЛЬНО — потому что ``wall.repost`` ВК принимает только с user-токена (community-
+токен отклоняет кодом 27, замер 21.05), и весь веер идёт с ОДНОГО аккаунта. Капча
+бьёт по аккаунту: 10+ репостов за 7 с → «Captcha needed» (21.05), 16 подряд по
+1,5 с → 6 из 16 в капче (06.07). Профиль 8 репостов с паузой 5 с держится месяцами
+без капчи — его и держим; скорость даёт частота тиков (раз в 5 минут): 81 группа =
+11 тиков ≈ 55 минут вместо 8,5 часов. Копи-путь (``wall.post``) идёт токеном САМОЙ
+группы — по аккаунту публикаций не больше одной, поэтому капча на нём невозможна.
 
 За один запуск обрабатывается не больше одного нового поста; wall.get — последние 10;
 история дублей (lip) — не больше 10 идентификаторов.
@@ -40,53 +51,13 @@ def _text_has_repost_keyword(text: str) -> bool:
     return "репост" in (text or "").lower()
 
 
-# Слово-маршрут → код области. Подстрока тем же приёмом, что «репост»:
-# «киров» ловит и «Киров», и «Кировская область», и «Кирово-Чепецк» — всё это
-# Кировская область и есть. «Казань» — город, но в сетке это имя Татарстана:
-# так сказал владелец, так и записано.
-SCOPE_KEYWORDS = {
-    "киров": "kirov_obl",
-    "казань": "tatarstan_obl",
-}
+def _state_with_freeze(frozen_until: int) -> Any:
+    """Состояние хаба: пусто, если заморозки нет; иначе — с временем её конца.
 
-
-def resolve_scope_codes(text: str, regions: List[Any]) -> Optional[Set[str]]:
-    """Коды регионов для рассылки по тексту хаб-поста. ``None`` = вся сеть.
-
-    Ровно одно слово-маршрут → область + все её потомки по ``parent_region_id``
-    (сама область входит: у неё своя стена). Ноль или оба сразу → ``None``:
-    оба поддерева вместе и есть вся сеть, а перечислять их кодами значит
-    потерять будущую третью область. Корня нет в списке регионов → пустое
-    множество (вызывающий закроет пост с варнингом, а не заклинит хаб).
+    Заморозка (21.11) переживает завершение разлёта: разлёт одного поста
+    закончился — а новые посты из хаба ещё не берём, пока не истекут 2 часа.
     """
-    body = (text or "").lower()
-    matched = {oblast for word, oblast in SCOPE_KEYWORDS.items() if word in body}
-    if len(matched) != 1:
-        return None
-    (oblast_code,) = sorted(matched)
-    root = None
-    children: Dict[Any, List[Any]] = {}
-    for reg in regions:
-        if reg.code == oblast_code:
-            root = reg
-        pid = getattr(reg, "parent_region_id", None)
-        if pid is not None:
-            children.setdefault(pid, []).append(reg)
-    if root is None:
-        return set()
-    scope = {root.code}
-    root_id = getattr(root, "id", None)
-    if root_id is None:
-        return scope
-    stack = [root_id]
-    while stack:
-        for child in children.pop(stack.pop(), ()):
-            if child.code not in scope:
-                scope.add(child.code)
-                child_id = getattr(child, "id", None)
-                if child_id is not None:
-                    stack.append(child_id)
-    return scope
+    return {"frozen_until": int(frozen_until)} if frozen_until else []
 
 
 def _mark_post_done(wt: Any, lip: str) -> None:
@@ -141,8 +112,10 @@ async def execute_copy_setka_network(
 ) -> Dict[str, Any]:
     from config.runtime import (
         copy_setka_disabled,
+        get_copy_setka_freeze_minutes,
         get_copy_setka_max_post_age_hours,
         get_copy_setka_max_regions_per_tick,
+        get_copy_setka_max_reposts_per_tick,
         get_copy_setka_post_interval_seconds,
         get_copy_setka_repost_message,
         get_copy_setka_source_owner_id,
@@ -259,11 +232,16 @@ async def execute_copy_setka_network(
     # тиках. Прогресс храним в work_tables.hash псевдо-региона copy/setka (для
     # него фото-дедуп не нужен) как {"lip", "done": [codes], "tries"}. Без
     # миграции. PENDING_MAX_TRIES — backstop от вечного застревания.
+    #
+    # Там же — «frozen_until»: заморозка новых постов после начала разлёта
+    # (заказ владельца 21.11, 2 часа). Разлёт идёт на своих тиках, а новый пост
+    # из хаба в это время не берём — иначе разлёт одного поста растягивается.
     candidate: Optional[Dict[str, Any]] = None
     done_codes: Set[str] = set()
     pending_tries = 0
 
     pending = wt.hash if isinstance(wt.hash, dict) else None
+    frozen_until = int((pending or {}).get("frozen_until") or 0)
     if pending and pending.get("lip"):
         plip = str(pending["lip"])
         pdone = {str(c) for c in (pending.get("done") or [])}
@@ -276,7 +254,7 @@ async def execute_copy_setka_network(
                 "copy-setka: pending-пост %s недоступен (удалён?) — снимаю pending",
                 plip,
             )
-            wt.hash = []
+            wt.hash = _state_with_freeze(frozen_until)
             await session.commit()
         else:
             candidate = cand
@@ -292,6 +270,21 @@ async def execute_copy_setka_network(
 
     # Нет pending к добору → берём свежий новый пост.
     if candidate is None:
+        if frozen_until > now_ts:
+            # Заморозка после разлёта (заказ владельца 21.11): новый пост из
+            # хаба сейчас не берём — разлёт текущего ещё не закончен.
+            logger.info(
+                "copy-setka: заморозка новых постов ещё %d мин (до %s)",
+                (frozen_until - now_ts) // 60,
+                time.strftime("%H:%M", time.localtime(frozen_until)),
+            )
+            return {
+                "success": True,
+                "message": "frozen after fan-out",
+                "posts_published": 0,
+                "frozen_until": frozen_until,
+                "stats": _empty_stats(),
+            }
         known: Set[str] = set(wt.lip or [])
         posts_sorted = sorted(posts, key=lambda p: p.get("date", 0), reverse=True)
         for p in posts_sorted:
@@ -307,6 +300,15 @@ async def execute_copy_setka_network(
                 continue
             candidate = p
             break
+        if candidate is not None:
+            # Разлёт начался — замораживаем выбор новых постов на freeze-окно.
+            freeze_minutes = get_copy_setka_freeze_minutes()
+            frozen_until = now_ts + freeze_minutes * 60
+            logger.info(
+                "copy-setka: начат разлёт поста %s, новые посты из хаба — %d мин",
+                lip_of_post(int(candidate.get("owner_id", source_owner_id)), int(candidate["id"])),
+                freeze_minutes,
+            )
 
     if candidate is None:
         return {
@@ -321,8 +323,9 @@ async def execute_copy_setka_network(
     src_lip = lip_of_post(src_oid, src_pid)
     body_text = candidate.get("text") or ""
 
-    # Целевые регионы (все активные, кроме псевдо-региона copy) — только
-    # теперь, когда известен текст: слово-маршрут сужает рассылку до области.
+    # Целевые регионы — ВСЕ активные, кроме псевдо-региона copy. Развилки по
+    # областям больше нет (заказ владельца 21.11): пост из хаба разносится по
+    # всей сети, независимо от слов в его тексте.
     region_filter = get_copy_setka_target_region_codes()
     rq = select(Region).where(
         Region.is_active.is_(True),
@@ -341,32 +344,6 @@ async def execute_copy_setka_network(
             "stats": _empty_stats(),
         }
 
-    scope_codes = resolve_scope_codes(body_text, regions)
-    if scope_codes is not None:
-        regions = [reg for reg in regions if reg.code in scope_codes]
-        if not regions:
-            logger.warning(
-                "copy-setka: слово-маршрут matched %s, но регионов в скоупе нет "
-                "(пост %s) — закрываю, чтобы не клинить хаб",
-                sorted(scope_codes),
-                src_lip,
-            )
-            _mark_post_done(wt, src_lip)
-            wt.hash = []
-            await session.commit()
-            return {
-                "success": False,
-                "error": "scope matched no regions",
-                "source_lip": src_lip,
-                "scope": sorted(scope_codes),
-                "stats": _empty_stats(),
-            }
-        logger.info(
-            "copy-setka: скоуп %s — шлём в %d регионов: %s",
-            sorted(scope_codes),
-            len(regions),
-            ", ".join(sorted(reg.code for reg in regions)),
-        )
     target_codes = {reg.code for reg in regions}
 
     # Pending мог закрыться ещё до сужения (все получившие — внутри скоупа,
@@ -374,14 +351,14 @@ async def execute_copy_setka_network(
     if done_codes and target_codes <= done_codes:
         logger.info("copy-setka: pending-пост %s уже доставлен всем — закрываю", src_lip)
         _mark_post_done(wt, src_lip)
-        wt.hash = []
+        wt.hash = _state_with_freeze(frozen_until)
         await session.commit()
         return {
             "success": True,
             "message": "pending post already delivered to scope",
             "posts_published": 0,
             "source_lip": src_lip,
-            "scope": sorted(scope_codes) if scope_codes is not None else "all",
+            "scope": "all",
             "stats": _empty_stats(),
         }
 
@@ -430,7 +407,17 @@ async def execute_copy_setka_network(
     # Потолок веера на тик: без него один пост уходил во все активные регионы
     # разом — 25–102 публикации в одну минуту (замер 15.11). Хвост не теряется:
     # его добирает следующий тик (механизм pending ниже).
+    #
+    # **Два потолка (21.11).** Репост-путь ограничен отдельно: `wall.repost`
+    # ВК принимает только с user-токена, весь веер идёт с ОДНОГО аккаунта, и
+    # капча бьёт именно по нему (10+ репостов за 7 с → captcha, замер 21.05).
+    # Его профиль (8 репостов, пауза 5 с) не трогаем — он держится месяцами без
+    # капчи. Копи-путь (`wall.post`) идёт токеном САМОЙ группы: по аккаунту
+    # публикаций не больше одной, капча на нём невозможна — там потолок общий.
     max_per_tick = get_copy_setka_max_regions_per_tick()
+    repost_cap = get_copy_setka_max_reposts_per_tick()
+    if use_api_repost and repost_cap > 0 and repost_cap < max_per_tick:
+        max_per_tick = repost_cap
     deferred = 0
     if max_per_tick > 0 and len(targets_remaining) > max_per_tick:
         deferred = len(targets_remaining) - max_per_tick
@@ -441,6 +428,11 @@ async def execute_copy_setka_network(
             max_per_tick,
             max_per_tick + deferred,
         )
+
+    # Пауза между вызовами ОДНОГО аккаунта. На репост-пути аккаунт общий, пауза
+    # обязательна; на копи-пути у каждой группы свой токен — ждать нечего, и
+    # пауза съедала бы минуты на пустом месте.
+    interval = interval if use_api_repost else 0.0
 
     newly_done: Set[str] = set()
     errors: List[str] = []
@@ -478,7 +470,7 @@ async def execute_copy_setka_network(
 
     if complete:
         _mark_post_done(wt, src_lip)
-        wt.hash = []
+        wt.hash = _state_with_freeze(frozen_until)
         logger.info("copy-setka: пост %s доставлен всем %d регионам", src_lip, len(target_codes))
     else:
         # Попытка считается, только если были реальные сбои публикации.
@@ -493,9 +485,14 @@ async def execute_copy_setka_network(
                 ", ".join(missing),
             )
             _mark_post_done(wt, src_lip)
-            wt.hash = []
+            wt.hash = _state_with_freeze(frozen_until)
         else:
-            wt.hash = {"lip": src_lip, "done": sorted(all_done), "tries": tries}
+            wt.hash = {
+                "lip": src_lip,
+                "done": sorted(all_done),
+                "tries": tries,
+                "frozen_until": frozen_until,
+            }
             logger.info(
                 "copy-setka: пост %s разослан частично (%d/%d), добор на след. тике; "
                 "осталось: %s%s",
@@ -512,7 +509,7 @@ async def execute_copy_setka_network(
         "posts_published": len(newly_done),
         "source_lip": src_lip,
         "mode": "wall.repost" if use_api_repost else "wall.post copy",
-        "scope": sorted(scope_codes) if scope_codes is not None else "all",
+        "scope": "all",
         "targets": len(targets_remaining),
         "complete": complete,
         "done_total": len(all_done),

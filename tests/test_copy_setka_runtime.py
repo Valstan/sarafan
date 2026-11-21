@@ -122,6 +122,8 @@ def _patch_copy_setka_deps(stack, *, parse_tokens, wall_by_token, publisher):
     stack.enter_context(_p("config.runtime.get_copy_setka_repost_message", return_value=""))
     stack.enter_context(_p("config.runtime.get_copy_setka_target_region_codes", return_value=None))
     stack.enter_context(_p("config.runtime.get_copy_setka_post_interval_seconds", return_value=0.0))
+    stack.enter_context(_p("config.runtime.get_copy_setka_max_reposts_per_tick", return_value=8))
+    stack.enter_context(_p("config.runtime.get_copy_setka_freeze_minutes", return_value=120))
     assert rt  # keep import used
 
     async def _fake_get_tokens(_session):
@@ -278,7 +280,8 @@ async def test_copy_setka_partial_then_retries_tail_next_tick(monkeypatch):
     assert out2["complete"] is True
     assert out2["posts_published"] == 1  # только MI (UR уже был)
     assert out2["targets"] == 1  # слали только недоставленному
-    assert wt.hash == []  # pending снят
+    # Заморозка переживает завершение разлёта (21.11).
+    assert isinstance(wt.hash, dict) and wt.hash.get("frozen_until", 0) > 0
     assert wt.lip == ["-167381590_555"]  # пост помечен полностью разосланным
     # UR не дёргали повторно на тике 2
     assert pub2.publish_bulletin.await_count == 1
@@ -358,7 +361,7 @@ async def test_copy_setka_gives_up_after_max_tries(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Слово-маршрут: «Киров»/«Казань» сужают рассылку до области (заказ 2026-09-28)
+# Разлёт по всей сети + заморозка новых постов (заказ владельца 21.11)
 # ---------------------------------------------------------------------------
 
 
@@ -373,39 +376,14 @@ def _scope_tree():
     ]
 
 
-def test_scope_kirov_is_oblast_plus_its_raions():
-    from modules.copy_setka_network import resolve_scope_codes
+async def test_copy_setka_post_goes_to_whole_network_whatever_the_words(monkeypatch):
+    """Развилки по областям больше нет: любое слово в тексте — вся сеть.
 
-    assert resolve_scope_codes("Новости Кировской области", _scope_tree()) == {
-        "kirov_obl",
-        "mi",
-        "vp",
-    }
-
-
-def test_scope_kazan_case_insensitive():
-    from modules.copy_setka_network import resolve_scope_codes
-
-    assert resolve_scope_codes("КАЗАНЬ зовёт", _scope_tree()) == {"tatarstan_obl", "elabuga"}
-
-
-def test_scope_both_or_neither_means_whole_network():
-    from modules.copy_setka_network import resolve_scope_codes
-
-    tree = _scope_tree()
-    assert resolve_scope_codes("Киров и Казань вместе", tree) is None
-    assert resolve_scope_codes("просто новость", tree) is None
-
-
-def test_scope_missing_root_returns_empty():
-    from modules.copy_setka_network import resolve_scope_codes
-
-    tree = [r for r in _scope_tree() if r.code != "kirov_obl"]
-    assert resolve_scope_codes("Киров", tree) == set()
-
-
-async def test_copy_setka_kirov_post_goes_only_to_kirov(monkeypatch):
-    """Пост со словом «Киров» — только область и её районы, Татарстан не трогаем."""
+    Заказ владельца 21.11: «без разницы, пишут в посте казань или киров или ещё
+    что-то, всё равно публикация разносится по всем входящим в сеть САРАФАН
+    нашим группам». Замер за день до заказа: 22 развеера подряд, все со
+    `scope='all'` — фильтр и не работал.
+    """
     from contextlib import ExitStack
     from unittest.mock import AsyncMock
 
@@ -425,70 +403,43 @@ async def test_copy_setka_kirov_post_goes_only_to_kirov(monkeypatch):
         out = await execute_copy_setka_network(_FakeSession([[_WorkTable()], _scope_tree()]))
 
     assert out["success"] is True
-    assert out["posts_published"] == 3
-    assert out["scope"] == ["kirov_obl", "mi", "vp"]
+    assert out["scope"] == "all"
+    assert out["posts_published"] == 5
     sent_gids = {c.kwargs["group_id"] for c in publisher.publish_bulletin.await_args_list}
-    assert sent_gids == {-1001, -1002, -1003}
+    assert sent_gids == {-1001, -1002, -1003, -1004, -1005}
 
 
-async def test_copy_setka_repost_kazan_reposts_only_tatarstan(monkeypatch):
-    """«репост» и слово-маршрут ортогональны: репост оригинала, но только Татарстан."""
+async def test_copy_setka_freezes_new_posts_after_fanout_starts(monkeypatch):
+    """После начала разлёта новые посты из хаба 2 часа не берём.
+
+    Заказ владельца 21.11: «после начала развеера нового поста прекратить
+    проверку новых постов на 2 часа». Разлёт текущего поста идёт на своих
+    тиках, а следующий пост ждёт — иначе разлёт растягивается, а хвост
+    очереди в хабе растёт.
+    """
     from contextlib import ExitStack
     from unittest.mock import AsyncMock
 
     from modules.copy_setka_network import execute_copy_setka_network
 
-    post = {
-        "owner_id": -167381590,
-        "id": 556,
-        "date": 999_990,
-        "text": "репост Казань",
-        "copy_history": [{"owner_id": -200, "id": 7}],
-    }
-    publisher = AsyncMock()
-    publisher.publish_repost.return_value = {"success": True, "url": "https://vk.com/wall-1_1"}
-
-    with ExitStack() as stack:
-        _patch_copy_setka_deps(
-            stack,
-            parse_tokens={"VALSTAN": "TOK_MEMBER"},
-            wall_by_token={"TOK_MEMBER": [post]},
-            publisher=publisher,
-        )
-        out = await execute_copy_setka_network(_FakeSession([[_WorkTable()], _scope_tree()]))
-
-    assert out["mode"] == "wall.repost"
-    assert out["scope"] == ["elabuga", "tatarstan_obl"]
-    sent_gids = {c.kwargs["group_id"] for c in publisher.publish_repost.await_args_list}
-    assert sent_gids == {-1004, -1005}
-    publisher.publish_bulletin.assert_not_called()
-
-
-async def test_copy_setka_scope_pending_completes_within_scope(monkeypatch):
-    """Pending со скоупом: добор идёт только внутри области, чужую не трогаем."""
-    from contextlib import ExitStack
-    from unittest.mock import AsyncMock
-
-    from modules.copy_setka_network import execute_copy_setka_network
-
-    post = {"owner_id": -167381590, "id": 557, "date": 999_990, "text": "Киров"}
+    post1 = {"owner_id": -167381590, "id": 555, "date": 999_990, "text": "первый"}
+    post2 = {"owner_id": -167381590, "id": 556, "date": 999_991, "text": "второй"}
     wt = _WorkTable()
-    MI = -1002
 
     pub1 = AsyncMock()
-    pub1.publish_bulletin.side_effect = _bulletin_side_effect({MI})
+    pub1.publish_bulletin.side_effect = _bulletin_side_effect(set())
     with ExitStack() as stack:
         _patch_copy_setka_deps(
             stack,
             parse_tokens={"VALSTAN": "TOK_MEMBER"},
-            wall_by_token={"TOK_MEMBER": [post]},
+            wall_by_token={"TOK_MEMBER": [post1]},
             publisher=pub1,
         )
-        out1 = await execute_copy_setka_network(_FakeSession([[wt], _scope_tree()]))
+        out1 = await execute_copy_setka_network(_FakeSession([[wt], [_Region("ur", -168170215)]]))
 
-    assert out1["complete"] is False
-    assert out1["missing"] == ["mi"]
-    assert wt.hash["done"] == ["kirov_obl", "vp"]
+    assert out1["posts_published"] == 1
+    # Заморозка переживает завершение разлёта.
+    assert isinstance(wt.hash, dict) and wt.hash["frozen_until"] > 0
 
     pub2 = AsyncMock()
     pub2.publish_bulletin.side_effect = _bulletin_side_effect(set())
@@ -496,11 +447,90 @@ async def test_copy_setka_scope_pending_completes_within_scope(monkeypatch):
         _patch_copy_setka_deps(
             stack,
             parse_tokens={"VALSTAN": "TOK_MEMBER"},
-            wall_by_token={"TOK_MEMBER": [post]},
+            wall_by_token={"TOK_MEMBER": [post2]},
             publisher=pub2,
         )
-        out2 = await execute_copy_setka_network(_FakeSession([[wt], _scope_tree()]))
+        out2 = await execute_copy_setka_network(_FakeSession([[wt], [_Region("ur", -168170215)]]))
 
-    assert out2["complete"] is True
-    assert out2["posts_published"] == 1
-    assert wt.hash == []
+    assert out2["posts_published"] == 0
+    assert out2["message"] == "frozen after fan-out"
+    pub2.publish_bulletin.assert_not_called()
+
+
+async def test_copy_setka_repost_path_is_capped_per_account(monkeypatch):
+    """Репост-путь ограничен отдельно: весь веер идёт с ОДНОГО аккаунта.
+
+    `wall.repost` ВК принимает только с user-токена (community-токен
+    отклоняет кодом 27, замер 21.05), а капча бьёт по аккаунту: 10+ репостов
+    за 7 с → «Captcha needed». Поэтому профиль 8 репостов на тик держим, даже
+    когда общий потолок веера шире.
+    """
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock, patch
+
+    from modules.copy_setka_network import execute_copy_setka_network
+
+    post = {
+        "owner_id": -167381590,
+        "id": 556,
+        "date": 999_990,
+        "text": "репост чего-то",
+        "copy_history": [{"owner_id": -200, "id": 7}],
+    }
+    regions = [_Region(f"r{i}", -1000 - i, id=i) for i in range(1, 13)]
+
+    pub = AsyncMock()
+    pub.publish_repost.return_value = {"success": True, "url": "https://vk.com/wall-1_1"}
+    with ExitStack() as stack:
+        _patch_copy_setka_deps(
+            stack,
+            parse_tokens={"VALSTAN": "TOK_MEMBER"},
+            wall_by_token={"TOK_MEMBER": [post]},
+            publisher=pub,
+        )
+        stack.enter_context(
+            patch("config.runtime.get_copy_setka_max_regions_per_tick", return_value=40)
+        )
+        out = await execute_copy_setka_network(_FakeSession([[_WorkTable()], regions]))
+
+    assert out["mode"] == "wall.repost"
+    assert out["posts_published"] == 8, "профиль 8 репостов с аккаунта не тронут"
+    assert len(out["missing"]) == 4
+
+
+async def test_copy_setka_copy_path_is_not_capped_by_the_account_limit(monkeypatch):
+    """Копи-путь идёт токеном САМОЙ группы — по аккаунту публикаций одна.
+
+    Капча бьёт по аккаунту, а не по IP: на копи-пути каждый аккаунт публикует
+    один раз, поэтому общий потолок веера применяется целиком.
+    """
+    from contextlib import ExitStack
+    from unittest.mock import AsyncMock, patch
+
+    from modules.copy_setka_network import execute_copy_setka_network
+
+    post = {"owner_id": -167381590, "id": 557, "date": 999_990, "text": "новость"}
+    regions = [_Region(f"r{i}", -1000 - i, id=i) for i in range(1, 13)]
+
+    pub = AsyncMock()
+    pub.publish_bulletin.side_effect = _bulletin_side_effect(set())
+    with ExitStack() as stack:
+        _patch_copy_setka_deps(
+            stack,
+            parse_tokens={"VALSTAN": "TOK_MEMBER"},
+            wall_by_token={"TOK_MEMBER": [post]},
+            publisher=pub,
+        )
+        stack.enter_context(
+            patch("config.runtime.get_copy_setka_max_regions_per_tick", return_value=40)
+        )
+        out = await execute_copy_setka_network(_FakeSession([[_WorkTable()], regions]))
+
+    assert out["mode"] == "wall.post copy"
+    assert out["posts_published"] == 12, "копи-путь ограничен только общим потолком"
+    assert out["complete"] is True
+
+
+# Развилки по областям («Киров»/«Казань») удалены 21.11 по заказу владельца:
+# пост из хаба разносится по всей сети. Их тесты — впереди, в блоке
+# «Разлёт по всей сети + заморозка новых постов».
