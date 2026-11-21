@@ -107,6 +107,38 @@ def test_alert_text_carries_numbers_reasons_and_the_money_brake():
     assert "du -sh" in text
 
 
+def test_paid_calls_without_minimax_attempts_do_not_alert():
+    """Платный трафик без единого вызова MiniMax — не поломка движка.
+
+    Ложная тревога, найденная переигровкой боевого журнала за 17–18.11
+    (здоровые дни): в окне, где MiniMax не звали вовсе, доля успехов считалась
+    как 0 %, и сторож поднимал тревогу на пустом месте. Платный трафик бывает
+    сам по себе — потоки, где бесплатный движок не нужен.
+    """
+    rows = [_row(i, engine="deepseek", ok=True) for i in range(20)]
+
+    stats = mw.summarise_window(rows, now=NOW)
+
+    assert stats["attempts"] == 0
+    assert stats["fail"] == 0
+    assert stats["paid"] == 20
+    assert mw.should_alert(stats) is False
+
+
+def test_rows_from_the_future_are_ignored():
+    """Строка позже текущего момента в окно не попадает (разбор журнала за сутки)."""
+    future = (NOW + timedelta(minutes=10)).isoformat()
+    rows = [
+        {"ts": future, "engine": "minimax", "ok": False, "reason": "exec_failed"},
+        {"ts": (NOW - timedelta(minutes=5)).isoformat(), "engine": "minimax", "ok": True},
+    ]
+
+    stats = mw.summarise_window(rows, now=NOW)
+
+    assert stats["attempts"] == 1
+    assert stats["ok"] == 1
+
+
 def test_watchdog_is_registered_in_the_beat_schedule():
     """Сторож без слота в расписании не существует — молчание возвращается."""
     from tasks.celery_app import app
