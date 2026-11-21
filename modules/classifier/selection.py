@@ -84,6 +84,7 @@ ALERT_COOLDOWN_SECONDS = 3600
 MODE_VERDICTS = "verdicts"  # отбор по меткам — норма
 MODE_SKIP_WAVE = "skip-wave"  # вердиктов нет, первая волна — молчим
 MODE_FALLBACK = "algorithmic-fallback"  # вердиктов нет вторую волну — алгоритмы
+MODE_NO_VERDICT = "no-verdict"  # движка НЕ звали — вердиктов нет, но это не его молчание
 
 
 async def fetch_publish_map(session, region_code: str) -> Dict[str, Optional[str]]:
@@ -675,6 +676,7 @@ async def apply_wave_selection(
     *,
     region_code: str,
     theme: str,
+    engine_state: Optional[str] = None,
 ) -> Tuple[list, str, int]:
     """Единственная точка входа отбора для волны публикации (звено 5, шаг 2).
 
@@ -683,6 +685,14 @@ async def apply_wave_selection(
     записывает вердикты, которые здесь читает ``fetch_publish_lips``. Обратный
     порядок оставил бы свежие посты без вердиктов, и отбор «только publish»
     выбрасывал бы их все.
+
+    ``engine_state`` — состояние движка из ``prepublish`` (``ENGINE_*``).
+    **Без него отбор путал «движок молчит» с «движка не звали».** Замер
+    21.11: 90 волн прошли мимо модели сознательно («меньше порога — не зовём»),
+    и ещё 52 увидели «ни одного вердикта» → политика деградации объявила
+    движок молчащим → 31 волна пропущена целиком, публикаций ноль, а движок
+    тем временем отдавал вердикты в фоновом классификаторе без единой ошибки.
+    Теперь молчанием считается только «звали, а не ответил» (``ENGINE_FAILED``).
 
     Redis и Telegram-конфиг добываются здесь, а не пробрасываются через волну:
     отказ любого из них деградирует политику (см. ``decide_mode``/``maybe_alert``),
@@ -693,7 +703,11 @@ async def apply_wave_selection(
         return list(posts), MODE_DISABLED, 0
 
     try:
-        from modules.classifier.prepublish import post_lip
+        from modules.classifier.prepublish import (
+            ENGINE_NOT_CONSULTED_FLOOR,
+            ENGINE_NOT_CONSULTED_GATE,
+            post_lip,
+        )
 
         publish_map = await fetch_publish_map(session, region_code)
         publish_lips = set(publish_map)
@@ -726,17 +740,44 @@ async def apply_wave_selection(
         )
         wave_unjudged = judged is not None and not judged
 
-        mode, need_alert = decide_mode(
-            publish_lips=set() if wave_unjudged else publish_lips,
-            region_code=region_code,
-            theme=theme,
-            redis_client=redis_client,
+        # Движка НЕ звали — порог по числу кандидатов, выключенный гейт или сбой
+        # ДО вызова. Молчания тут нет: вердиктов не будет и на следующей волне
+        # тоже, а политика деградации вычла бы волну целиком — и ноль
+        # публикаций. Значит это НЕ молчание движка: волна идёт по обычным
+        # фильтрам, гейт блокирует только осуждённое ранее.
+        engine_not_consulted = engine_state in (
+            ENGINE_NOT_CONSULTED_FLOOR,
+            ENGINE_NOT_CONSULTED_GATE,
         )
+
+        if wave_unjudged and engine_not_consulted:
+            mode, need_alert = MODE_NO_VERDICT, False
+            # Серия пропущенных волн прерывается: эта волна не пропущена.
+            if redis_client is not None:
+                try:
+                    redis_client.delete(_skip_key(region_code, theme))
+                except Exception:  # noqa: BLE001
+                    pass
+        else:
+            mode, need_alert = decide_mode(
+                publish_lips=set() if wave_unjudged else publish_lips,
+                region_code=region_code,
+                theme=theme,
+                redis_client=redis_client,
+            )
 
         # Префикс нарочно НЕ «classifier selection:»: этой строкой пользуются
         # grep'ы и тесты, ищущие итоговую строку волны; вторая строка с тем же
         # префиксом сбивала бы и их, и чтение лога глазами.
-        if wave_unjudged:
+        if wave_unjudged and engine_not_consulted:
+            logger.info(
+                "classifier: движка не звали (%s/%s, кандидатов=%d) — вердиктов нет,"
+                " но это не молчание: волна идёт по обычным фильтрам",
+                region_code,
+                theme,
+                len(posts),
+            )
+        elif wave_unjudged:
             logger.info(
                 "classifier: политика деградации — у кандидатов волны нет ни одного"
                 " вердикта (%s/%s, кандидатов=%d), режим=%s",

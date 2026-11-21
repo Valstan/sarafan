@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 from modules import telegram_http
-from modules.classifier import selection
+from modules.classifier import prepublish, selection
 
 
 class FakeRedis:
@@ -841,3 +841,161 @@ async def test_fetch_urgent_lips_is_fail_open(caplog):
 
     assert out == set()
     assert any("срочност" in r.getMessage().lower() for r in caplog.records)
+
+
+# ───────── «движка не звали» ≠ «движок молчит» (замер 21.11) ─────────
+#
+# 241 волна за сутки. 90 прошли мимо модели сознательно — кандидатов меньше
+# порога, экономия токенов. Ещё 52 увидели «ни одного вердикта», и политика
+# деградации объявила движок молчащим: 31 волна пропущена целиком,
+# публикаций ноль. Движок был жив — фоновый классификатор отдавал вердикты без
+# единой ошибки.
+#
+# Отсюда контракт: молчанием считается «звали, а не ответил». Не звали —
+# волна идёт по обычным фильтрам.
+
+
+@pytest.mark.asyncio
+async def test_engine_not_consulted_keeps_the_wave(monkeypatch):
+    """Модель не звали — волна обязана идти, а не вычитаться в ноль."""
+    monkeypatch.setenv("CLASSIFIER_SELECTION_ENABLED", "1")
+
+    async def fake_fetch(session, region_code):
+        return {}
+
+    async def fake_judged(session, lips, region_code):
+        return set()
+
+    async def fake_actions(session, lips, region_code):
+        return {}
+
+    def boom(**kw):
+        raise AssertionError("политика деградации не должна была сработать")
+
+    monkeypatch.setattr(selection, "fetch_publish_map", fake_fetch)
+    monkeypatch.setattr(selection, "fetch_wave_judged_lips", fake_judged)
+    monkeypatch.setattr(selection, "fetch_wave_actions", fake_actions)
+    monkeypatch.setattr(selection, "decide_mode", boom)
+    monkeypatch.setattr(selection, "maybe_alert", lambda **kw: "alert-sent")
+
+    posts = [_post(-100, 1), _post(-100, 2)]
+    out, mode, removed = await selection.apply_wave_selection(
+        None,
+        posts,
+        region_code="mi",
+        theme="novost",
+        engine_state=prepublish.ENGINE_NOT_CONSULTED_FLOOR,
+    )
+
+    assert [p["id"] for p in out] == [1, 2]
+    assert mode == selection.MODE_NO_VERDICT
+    assert removed == 0
+
+
+@pytest.mark.asyncio
+async def test_engine_not_consulted_sends_no_alert(monkeypatch):
+    """«ИИ-фильтр молчит» — неправда, если модель не звали. Алёрта быть не должно."""
+    monkeypatch.setenv("CLASSIFIER_SELECTION_ENABLED", "1")
+
+    async def fake_fetch(session, region_code):
+        return {}
+
+    async def fake_judged(session, lips, region_code):
+        return set()
+
+    async def fake_actions(session, lips, region_code):
+        return {}
+
+    alerts = []
+    monkeypatch.setattr(selection, "fetch_publish_map", fake_fetch)
+    monkeypatch.setattr(selection, "fetch_wave_judged_lips", fake_judged)
+    monkeypatch.setattr(selection, "fetch_wave_actions", fake_actions)
+    monkeypatch.setattr(selection, "maybe_alert", lambda **kw: alerts.append(kw) or "alert-sent")
+
+    posts = [_post(-100, 1)]
+    await selection.apply_wave_selection(
+        None,
+        posts,
+        region_code="mi",
+        theme="novost",
+        engine_state=prepublish.ENGINE_NOT_CONSULTED_GATE,
+    )
+
+    assert alerts == [], "алёрт о молчании движка здесь — ложь"
+
+
+@pytest.mark.asyncio
+async def test_engine_failure_still_triggers_degradation(monkeypatch):
+    """Звали, а движок не ответил — политика деградации обязана сработать.
+
+    Это тот случай, ради которого политика и написана: движок лежит, публиковать
+    без суда нельзя (за ретрансляцию рекламы банят аккаунт).
+    """
+    monkeypatch.setenv("CLASSIFIER_SELECTION_ENABLED", "1")
+
+    async def fake_fetch(session, region_code):
+        return {}
+
+    async def fake_judged(session, lips, region_code):
+        return set()
+
+    called = {}
+
+    def fake_decide(**kw):
+        called["yes"] = True
+        return selection.MODE_SKIP_WAVE, True
+
+    monkeypatch.setattr(selection, "fetch_publish_map", fake_fetch)
+    monkeypatch.setattr(selection, "fetch_wave_judged_lips", fake_judged)
+    monkeypatch.setattr(selection, "decide_mode", fake_decide)
+    monkeypatch.setattr(selection, "maybe_alert", lambda **kw: "alert-sent")
+
+    posts = [_post(-100, 1)]
+    out, mode, removed = await selection.apply_wave_selection(
+        None,
+        posts,
+        region_code="mi",
+        theme="novost",
+        engine_state=prepublish.ENGINE_FAILED,
+    )
+
+    assert called, "политика деградации обязана отработать"
+    assert out == []
+    assert mode == selection.MODE_SKIP_WAVE
+    assert removed == 1
+
+
+@pytest.mark.asyncio
+async def test_unknown_engine_state_keeps_previous_behaviour(monkeypatch):
+    """Состояние неизвестно — поведение прежнее: политика деградации решает.
+
+    Отсутствие состояния не должно молча переводить волны в «обычные фильтры»:
+    тогда сломанный вызов отбора тихо перестанет вычитать волны.
+    """
+    monkeypatch.setenv("CLASSIFIER_SELECTION_ENABLED", "1")
+
+    async def fake_fetch(session, region_code):
+        return {}
+
+    async def fake_judged(session, lips, region_code):
+        return set()
+
+    called = {}
+
+    def fake_decide(**kw):
+        called["yes"] = True
+        return selection.MODE_SKIP_WAVE, True
+
+    monkeypatch.setattr(selection, "fetch_publish_map", fake_fetch)
+    monkeypatch.setattr(selection, "fetch_wave_judged_lips", fake_judged)
+    monkeypatch.setattr(selection, "decide_mode", fake_decide)
+    monkeypatch.setattr(selection, "maybe_alert", lambda **kw: "alert-sent")
+
+    posts = [_post(-100, 1)]
+    out, mode, _removed = await selection.apply_wave_selection(
+        None, posts, region_code="mi", theme="novost"
+    )
+
+    assert called, "без состояния движка поведение прежнее"
+    assert mode == selection.MODE_SKIP_WAVE
+    assert out == []

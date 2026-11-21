@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import dataclass
 from typing import Any, Dict, List, Sequence, Set
 
 from config.opencode import get_publish_timeout_for_engine
@@ -49,6 +50,46 @@ from config.opencode import get_publish_timeout_for_engine
 from utils.post_utils import post_lip  # noqa: F401  (ре-экспорт)
 
 logger = logging.getLogger(__name__)
+
+# ─── Состояние движка в волне ───────────────────────────────────────────
+#
+# «Движок молчит» и «движка не звали» — разные вещи, и путать их дорого.
+# Замер 21.11 (сеть, 241 волна за день): 90 волн прошли мимо модели —
+# «меньше порога 5, модель не зовём», сознательная экономия токенов; ещё 52
+# волны увидели «ни одного вердикта» и попали под политику деградации, которая
+# объявила движок молчащим. Итог: 31 волна пропущена целиком, публикаций ноль,
+# алёрт «ИИ-фильтр молчит» в Telegram. Движок при этом был ЖИВ: фоновый
+# классификатор в 15:13 отдал 71 вердикт без единой ошибки.
+#
+# Молчание движка — это когда его ЗВАЛИ, а он не ответил. Не позвали — не
+# молчание, и волна не должна за это пропадать. Отсюда четыре состояния, а не
+# два: отбор читает их и знает, кого винить.
+
+ENGINE_CONSULTED = "consulted"
+"""Движка звали, вердикты получили."""
+
+ENGINE_NOT_CONSULTED_FLOOR = "not-consulted-floor"
+"""Не звали: кандидатов меньше порога (экономия токенов). Не сбой."""
+
+ENGINE_NOT_CONSULTED_GATE = "not-consulted-gate"
+"""Не звали: гейт ``CLASSIFIER_PREPUBLISH_ENABLED`` выключен. Не сбой."""
+
+ENGINE_FAILED = "failed"
+"""Звали, а движок не ответил. Вот это — молчание."""
+
+
+@dataclass(frozen=True)
+class PrepublishResult:
+    """Итог нейро-гейта волны: что заблокировано и что было с движком.
+
+    ``blocked`` — lip'ы под блокировку (движок осудил: delete/hold).
+    ``engine_state`` — одно из ``ENGINE_*`` выше. Отбор по меткам читает его,
+    чтобы отличить «движок молчит» (политика деградации) от «движка не звали»
+    (обычные фильтры, волна идёт).
+    """
+
+    blocked: Set[str]
+    engine_state: str
 
 
 def prepublish_enabled() -> bool:
@@ -103,19 +144,26 @@ def to_classifier_items(
     return items
 
 
-async def blocked_lips_before_publish(
+async def prepublish_candidates(
     session,
     posts: Sequence[Dict[str, Any]],
     *,
     region_code: str,
-) -> Set[str]:
+) -> PrepublishResult:
     """Доклассифицировать кандидатов волны и вернуть lip'ы под блокировку.
 
-    Возвращает пустой набор при любом отказе (fail-open, см. docstring модуля)
-    и при выключенном гейте.
+    Возвращает ``PrepublishResult``: заблокированные lip'ы + состояние движка.
+    Состояние — не украшение: отбор по меткам читает его, чтобы отличить
+    «движок молчит» (политика деградации: пропустить волну) от «движка не
+    звали» (обычные фильтры, волна идёт). Без этого различия волна
+    пропадала из-за сознательной экономии токенов, а не из-за сбоя (см.
+    :data:`ENGINE_CONSULTED` и комментарий выше).
+
+    Никакого отказа не бросаем наружу: fail-open, волна идёт по обычным
+    фильтрам (см. docstring модуля).
     """
     if not prepublish_enabled() or not posts or not region_code:
-        return set()
+        return PrepublishResult(blocked=set(), engine_state=ENGINE_NOT_CONSULTED_GATE)
 
     try:
         from config.classifier import (
@@ -126,14 +174,14 @@ async def blocked_lips_before_publish(
         )
 
         if classifier_disabled():
-            return set()
+            return PrepublishResult(blocked=set(), engine_state=ENGINE_NOT_CONSULTED_GATE)
 
         from modules.classifier import enforce, headless, rules, service
         from modules.secrets_bootstrap import ensure_secret
 
         items = to_classifier_items(posts, region_code=region_code)
         if not items:
-            return set()
+            return PrepublishResult(blocked=set(), engine_state=ENGINE_NOT_CONSULTED_GATE)
 
         # Уже размеченные не переклассифицируем: вердикт по ним применит
         # ``enforce`` тем же набором правил, а повторный вызов — деньги на ветер.
@@ -151,7 +199,8 @@ async def blocked_lips_before_publish(
                 len(items),
                 len(known & {i["lip"] for i in items}),
             )
-            return known
+            # Движок по этим постам УЖЕ высказался (вердикты есть) — это не молчание.
+            return PrepublishResult(blocked=known, engine_state=ENGINE_CONSULTED)
 
         # Порог «звать модель только на пачку». Стоимость вызова задают
         # постулаты, а не посты: один кандидат и десять стоят почти одинаково,
@@ -169,10 +218,28 @@ async def blocked_lips_before_publish(
                 floor,
                 len(known & {i["lip"] for i in items}),
             )
-            return known
+            # Ключевая строка всего фикса: модель НЕ звали, и это не её молчание.
+            # Отбор обязан знать это и не вычитать волну из-под политики деградации.
+            return PrepublishResult(blocked=known, engine_state=ENGINE_NOT_CONSULTED_FLOOR)
 
+        # Ключ дотягиваем, но его наличие НЕ решаемо здесь: нет ключа — модель
+        # просто не ответит, и это уже разберётся по её собственному отказу.
+        # Проверять ``ensure_secret`` заранее нельзя: в тестах и в сухом прогоне
+        # модель подставлена заглушкой, и ранняя проверка убила бы вызов.
         ensure_secret("DEEPSEEK_API_KEY")
-        postulates = await rules.render_effective_postulates(session)
+
+        try:
+            postulates = await rules.render_effective_postulates(session)
+        except Exception as e:  # noqa: BLE001 — до движения движка не дошли
+            # Постулаты читаются из БД: сбой тут ничего не говорит о движке.
+            # Приписывать ему молчание нельзя — волна идёт по обычным фильтрам.
+            logger.warning(
+                "classifier prepublish: постулаты не прочитаны (%s) — модель не зовём",
+                e,
+                exc_info=True,
+            )
+            return PrepublishResult(blocked=known, engine_state=ENGINE_NOT_CONSULTED_GATE)
+
         run = headless.classify_posts(
             fresh,
             postulates=postulates,
@@ -212,7 +279,13 @@ async def blocked_lips_before_publish(
                     else "движок молчит, волна идёт по обычным фильтрам"
                 ),
             )
-            return known
+            # Ответили, но судить было нечего — молчанием это не считаем.
+            # Ответили и промолчали (чанки отказали) — считаем: это и есть
+            # случай, на который задумана политика деградации.
+            return PrepublishResult(
+                blocked=known,
+                engine_state=ENGINE_CONSULTED if all_without_text else ENGINE_FAILED,
+            )
 
         await service.record_verdicts(
             session, run["verdicts"], source="headless", region_codes_fallback=[region_code]
@@ -230,10 +303,12 @@ async def blocked_lips_before_publish(
             len(blocked),
             run["tokens"],
         )
-        return known | blocked
+        return PrepublishResult(blocked=known | blocked, engine_state=ENGINE_CONSULTED)
     except Exception as e:  # noqa: BLE001 — усилитель, не точка отказа
         logger.error("classifier prepublish failed — fail-open: %s", e, exc_info=True)
-        return set()
+        # Сбой гейта — не доказательство молчания движка: к моменту сбоя модель
+        # могла и не зваться. Волна идёт по обычным фильтрам.
+        return PrepublishResult(blocked=set(), engine_state=ENGINE_NOT_CONSULTED_GATE)
 
 
 async def _lips_with_verdict(session, lips: Sequence[str], region_code: str) -> Set[str]:
@@ -256,8 +331,13 @@ async def _lips_with_verdict(session, lips: Sequence[str], region_code: str) -> 
 
 
 __all__ = [
-    "blocked_lips_before_publish",
+    "ENGINE_CONSULTED",
+    "ENGINE_FAILED",
+    "ENGINE_NOT_CONSULTED_FLOOR",
+    "ENGINE_NOT_CONSULTED_GATE",
+    "PrepublishResult",
     "post_lip",
+    "prepublish_candidates",
     "prepublish_enabled",
     "to_classifier_items",
 ]
