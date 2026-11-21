@@ -149,7 +149,7 @@ All crontab entries from old_postopus are now Celery Beat schedules:
 | ~~**Addons**~~ | снята 2026-09-22 | тема разбиралась волнами своих тем, см. `tasks/celery_app.py` |
 | **Proisshestviya** (strict) | 20:50 | `run_all_regions_theme('proisshestviya', strict=True)` |
 | **Tatarstan oblast** | 19:45 | `parse_and_publish_theme('tatarstan_obl', 'oblast')` |
-| **Copy Setka** | :07 и :47 в нечётных часах (7,9,…,21), :37 в чётных (8,10,…,22) | `parse_and_publish_theme('copy', 'setka')` |
+| **Copy Setka** | раз в 5 минут 07:00–23:00 (мин. 2, 7, 12, 17, 22, 32, 37, 42, 47, 52) | `parse_and_publish_theme('copy', 'setka')` |
 
 Источник правды — beat-расписание в [`tasks/celery_app.py`](../tasks/celery_app.py)
 (имена слотов `postopus-<тема>-<час>`); таблица выше переписана 21.11 по живому
