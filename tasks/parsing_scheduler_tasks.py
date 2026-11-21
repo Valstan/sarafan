@@ -506,14 +506,12 @@ def parse_and_publish_theme(
             #     парсит и сама же публикует. Измерено: за 14 дней ноль вердиктов
             #     раньше сбора и 10 743 позже. Здесь кандидаты доклассифицируются
             #     до публикации. Гейт CLASSIFIER_PREPUBLISH_ENABLED, fail-open.
-            from modules.classifier.prepublish import blocked_lips_before_publish, post_lip
+            from modules.classifier.prepublish import post_lip, prepublish_candidates
 
-            prepublish_blocked = await blocked_lips_before_publish(
-                session, posts, region_code=region_code
-            )
-            if prepublish_blocked:
+            prepublish = await prepublish_candidates(session, posts, region_code=region_code)
+            if prepublish.blocked:
                 before_prepublish = len(posts)
-                posts = [p for p in posts if post_lip(p) not in prepublish_blocked]
+                posts = [p for p in posts if post_lip(p) not in prepublish.blocked]
                 dropped_now = before_prepublish - len(posts)
                 if dropped_now:
                     parser_stats["posts_filtered_classifier_prepublish"] = dropped_now
@@ -534,7 +532,11 @@ def parse_and_publish_theme(
 
             posts, selection_mode, selection_removed = (
                 await classifier_selection.apply_wave_selection(
-                    session, posts, region_code=region_code, theme=theme
+                    session,
+                    posts,
+                    region_code=region_code,
+                    theme=theme,
+                    engine_state=prepublish.engine_state,
                 )
             )
             if selection_removed:

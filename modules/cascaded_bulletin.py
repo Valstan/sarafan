@@ -487,12 +487,12 @@ async def run_cascaded_bulletin(
     # Нейро-фильтр ДО публикации — то же, что в районной волне (заказ владельца
     # 2026-08-19): свежесобранный пост вердикта ещё не имеет, и `blocked_lips`
     # выше про него ничего не знает. Гейт CLASSIFIER_PREPUBLISH_ENABLED, fail-open.
-    from modules.classifier.prepublish import blocked_lips_before_publish, post_lip
+    from modules.classifier.prepublish import post_lip, prepublish_candidates
 
-    prepublish_blocked = await blocked_lips_before_publish(session, posts, region_code=region_code)
-    if prepublish_blocked:
+    prepublish = await prepublish_candidates(session, posts, region_code=region_code)
+    if prepublish.blocked:
         before_prepublish = len(posts)
-        posts = [p for p in posts if post_lip(p) not in prepublish_blocked]
+        posts = [p for p in posts if post_lip(p) not in prepublish.blocked]
         debug_counters["filtered_posts_classifier_prepublish"] = before_prepublish - len(posts)
 
     # Отбор В сводку по меткам (звено 5, шаг 2) — симметрично районной волне
@@ -501,7 +501,11 @@ async def run_cascaded_bulletin(
     from modules.classifier import selection as classifier_selection
 
     posts, selection_mode, selection_removed = await classifier_selection.apply_wave_selection(
-        session, posts, region_code=region_code, theme=theme
+        session,
+        posts,
+        region_code=region_code,
+        theme=theme,
+        engine_state=prepublish.engine_state,
     )
     if selection_removed:
         debug_counters["filtered_posts_selection"] = selection_removed

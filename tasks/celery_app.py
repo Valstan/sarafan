@@ -2474,11 +2474,53 @@ app.conf.beat_schedule = {
     # это указатель на группы соседей, а не перенос их постов.
     # Движок (modules.cascaded_bulletin.run_neighbor_bulletin) остался в коде:
     # вернуть обмен — одна строка в beat-расписании.
-    # Novost (news): 40 6,20 * * *  (сокращено 25.10: с 6 слотов до 3, утро/день/вечер;
-    # 26.10 снят дневной 12:40 — выход на волну 7.8 % против 63 % у утренней)
+    # Novost (news): 40 6,10,13,16,18,20 * * *  — ВОССТАНОВЛЕНО 21.11 по заказу
+    # владельца («публикации выходят не постоянно… хоть каждые полчаса»).
+    #
+    # История: 41 слот → 14 (PR #981, 25.10) → 3 → 2 (26.10). Причина реза —
+    # квота free-тира модели: «~1900 вызовов модели в сутки при квоте free-тира
+    # ~100–150» (тело PR #981). Сегодня движок живой и квоты не касается:
+    # за 21.11 — 307 вызовов DeepSeek (181 headless + 118 post), 0 отказов.
+    #
+    # Почему два слота было мало — измерено на проде 21.11 (сеть, 241 волна):
+    #   * кандидатов после отбора — 1 946 (novost 1 032, kultura 456, detsad 458);
+    #   * опубликовано — 225, и КАЖДАЯ публикация = ровно 1 пост
+    #     (потолок `max_posts_per_bulletin=1` + хедлайнер);
+    #   * ёмкость двух слотов — 2 волны × 2 поста = 4 поста на тему в сутки,
+    #     а материал даёт ~13 кандидатов на район. Остальное протухало
+    #     неопубликованным: окно свежести 24 ч, до следующей волны половина
+    #     пула не доживает.
+    # Шесть слотов дают 12 постов на тему в сутки — как раз по материалу.
+    #
+    # Про 24 ч окна — решение владельца 21.11: оставить (см. ADR-0018).
+    # Про разнос регионов на 50 мин — `CLASSIFIER_WAVE_REGION_SPREAD_SECONDS`.
     "postopus-novost-6": {
         "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
         "schedule": crontab(minute=40, hour=6),
+        "args": ("novost",),
+        "options": {"expires": 3600},
+    },
+    "postopus-novost-10": {
+        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
+        "schedule": crontab(minute=40, hour=10),
+        "args": ("novost",),
+        "options": {"expires": 3600},
+    },
+    "postopus-novost-13": {
+        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
+        "schedule": crontab(minute=40, hour=13),
+        "args": ("novost",),
+        "options": {"expires": 3600},
+    },
+    "postopus-novost-16": {
+        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
+        "schedule": crontab(minute=40, hour=16),
+        "args": ("novost",),
+        "options": {"expires": 3600},
+    },
+    "postopus-novost-18": {
+        "task": "tasks.parsing_scheduler_tasks.run_all_regions_theme",
+        "schedule": crontab(minute=40, hour=18),
         "args": ("novost",),
         "options": {"expires": 3600},
     },

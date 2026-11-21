@@ -129,8 +129,8 @@ async def test_spam_is_blocked_before_publication(db_session, monkeypatch):
         )
     await db_session.commit()
 
-    blocked = await prepublish.blocked_lips_before_publish(db_session, posts, region_code="mi")
-    assert blocked == {"1_1"}
+    result = await prepublish.prepublish_candidates(db_session, posts, region_code="mi")
+    assert result.blocked == {"1_1"}
 
     # Вердикты записаны — оператор увидит их в ленте, а следующие волны
     # переиспользуют, не тратя токены заново.
@@ -167,10 +167,10 @@ async def test_hold_is_blocked_too(db_session, monkeypatch):
     )
     await db_session.commit()
 
-    blocked = await prepublish.blocked_lips_before_publish(
+    result = await prepublish.prepublish_candidates(
         db_session, [_vk_post(-1, 3, "непонятно что")], region_code="mi"
     )
-    assert blocked == {"1_3"}
+    assert result.blocked == {"1_3"}
 
 
 @pytest.mark.asyncio
@@ -195,10 +195,10 @@ async def test_engine_failure_is_fail_open_and_loud(db_session, monkeypatch, cap
         },
     )
     with caplog.at_level(logging.ERROR, logger="modules.classifier.prepublish"):
-        blocked = await prepublish.blocked_lips_before_publish(
+        result = await prepublish.prepublish_candidates(
             db_session, [_vk_post(-1, 4, "текст")], region_code="mi"
         )
-    assert blocked == set()
+    assert result.blocked == set()
     assert "no_api_key" in caplog.text
 
 
@@ -206,10 +206,10 @@ async def test_engine_failure_is_fail_open_and_loud(db_session, monkeypatch, cap
 async def test_crash_inside_gate_does_not_break_the_wave(db_session, monkeypatch):
     """Классификатор — усилитель, не единая точка отказа."""
     monkeypatch.setattr("modules.classifier.rules.render_effective_postulates", _boom)
-    blocked = await prepublish.blocked_lips_before_publish(
+    result = await prepublish.prepublish_candidates(
         db_session, [_vk_post(-1, 5, "текст")], region_code="mi"
     )
-    assert blocked == set()
+    assert result.blocked == set()
 
 
 @pytest.mark.asyncio
@@ -217,10 +217,10 @@ async def test_disabled_gate_costs_nothing(db_session, monkeypatch):
     """Выключенный гейт не должен даже смотреть в сторону модели."""
     monkeypatch.setenv("CLASSIFIER_PREPUBLISH_ENABLED", "0")
     monkeypatch.setattr("modules.classifier.headless.classify_posts", _boom_sync)
-    blocked = await prepublish.blocked_lips_before_publish(
+    result = await prepublish.prepublish_candidates(
         db_session, [_vk_post(-1, 6, "текст")], region_code="mi"
     )
-    assert blocked == set()
+    assert result.blocked == set()
 
 
 async def _fake_postulates(session):
@@ -251,10 +251,10 @@ async def test_gate_reports_the_all_known_outcome(db_session, monkeypatch, caplo
     monkeypatch.setattr("modules.classifier.headless.classify_posts", _boom_sync)
 
     with caplog.at_level(logging.INFO, logger="modules.classifier.prepublish"):
-        blocked = await prepublish.blocked_lips_before_publish(
+        result = await prepublish.prepublish_candidates(
             db_session, [_vk_post(-1, 7, "текст")], region_code="mi"
         )
-    assert blocked == set()
+    assert result.blocked == set()
     assert "новых=0" in caplog.text
 
 
@@ -280,9 +280,7 @@ async def test_all_candidates_without_text_is_not_a_warning(db_session, monkeypa
         },
     )
     with caplog.at_level(logging.INFO, logger="modules.classifier.prepublish"):
-        await prepublish.blocked_lips_before_publish(
-            db_session, [_vk_post(-1, 8, "")], region_code="mi"
-        )
+        await prepublish.prepublish_candidates(db_session, [_vk_post(-1, 8, "")], region_code="mi")
     assert "все без текста" in caplog.text
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
@@ -305,7 +303,7 @@ async def test_silent_engine_with_text_still_warns(db_session, monkeypatch, capl
         },
     )
     with caplog.at_level(logging.INFO, logger="modules.classifier.prepublish"):
-        await prepublish.blocked_lips_before_publish(
+        await prepublish.prepublish_candidates(
             db_session, [_vk_post(-1, 9, "настоящий текст")], region_code="mi"
         )
     assert [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -342,13 +340,13 @@ async def test_small_wave_does_not_call_the_model(db_session, monkeypatch, caplo
     calls = _count_calls(monkeypatch)
 
     with caplog.at_level(logging.INFO, logger="modules.classifier.prepublish"):
-        blocked = await prepublish.blocked_lips_before_publish(
+        result = await prepublish.prepublish_candidates(
             db_session,
             [_vk_post(-1, 11, "раз"), _vk_post(-1, 12, "два")],
             region_code="mi",
         )
 
-    assert blocked == set(), "fail-open: без вердикта волна идёт по фильтрам"
+    assert result.blocked == set(), "fail-open: без вердикта волна идёт по фильтрам"
     assert calls == [], "модель не должна была вызываться"
     assert "меньше" in caplog.text and "порога 3" in caplog.text
 
@@ -364,13 +362,13 @@ async def test_threshold_is_about_fresh_candidates_only(db_session, monkeypatch)
     monkeypatch.setattr(prepublish, "_lips_with_verdict", _known_first)
     calls = _count_calls(monkeypatch)
 
-    blocked = await prepublish.blocked_lips_before_publish(
+    result = await prepublish.prepublish_candidates(
         db_session,
         [_vk_post(-1, 21, "уже размечен"), _vk_post(-1, 22, "новый")],
         region_code="mi",
     )
 
-    assert blocked == set()
+    assert result.blocked == set()
     assert calls == [], "свежих один — ниже порога, хотя кандидатов два"
 
 
@@ -385,7 +383,7 @@ async def test_wave_at_threshold_calls_the_model(db_session, monkeypatch):
     monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "3")
     calls = _count_calls(monkeypatch)
 
-    await prepublish.blocked_lips_before_publish(
+    await prepublish.prepublish_candidates(
         db_session,
         [_vk_post(-1, 31, "а"), _vk_post(-1, 32, "б"), _vk_post(-1, 33, "в")],
         region_code="mi",
@@ -406,3 +404,131 @@ def test_min_candidates_env_bounds(monkeypatch):
     assert get_prepublish_min_candidates() == 40
     monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "не число")
     assert get_prepublish_min_candidates() == 15
+
+
+# ───────── состояние движка: «не звали» ≠ «молчит» (замер 21.11) ─────────
+#
+# 90 волн в сутки прошли мимо модели сознательно — кандидатов меньше порога,
+# экономия токенов. Ещё 52 волны увидели «ни одного вердикта» и попали под
+# политику деградации, которая объявила движок молчащим: 31 волна пропущена
+# целиком, публикаций ноль. Движок при этом был ЖИВ — фоновый классификатор
+# отдавал вердикты без единой ошибки. Различие обязано быть в данных, а не в
+# догадке отбора: иначе система врёт о собственном здоровье и убивает ленту.
+
+
+@pytest.mark.asyncio
+async def test_below_floor_reports_engine_not_consulted(db_session, monkeypatch):
+    """Кандидатов меньше порога — модель НЕ звали, и это не её молчание."""
+    monkeypatch.setenv("CLASSIFIER_PREPUBLISH_MIN_CANDIDATES", "3")
+    calls = _count_calls(monkeypatch)
+
+    result = await prepublish.prepublish_candidates(
+        db_session,
+        [_vk_post(-1, 41, "раз"), _vk_post(-1, 42, "два")],
+        region_code="mi",
+    )
+
+    assert calls == [], "модель не звали"
+    assert result.engine_state == prepublish.ENGINE_NOT_CONSULTED_FLOOR
+    assert result.engine_state != prepublish.ENGINE_FAILED, "порог — не сбой движка"
+
+
+@pytest.mark.asyncio
+async def test_silent_engine_reports_failed(db_session, monkeypatch):
+    """Звали, а ответа нет — вот это молчание, и его ловит политика деградации."""
+    monkeypatch.setattr("modules.classifier.rules.render_effective_postulates", _fake_postulates)
+    monkeypatch.setattr(
+        "modules.classifier.headless.classify_posts",
+        lambda items, **kw: {
+            "verdicts": [],
+            "failures": ["boom"],
+            "problems": [],
+            "chunks": 1,
+            "tokens": 0,
+            "skipped_no_text": 0,
+        },
+    )
+
+    result = await prepublish.prepublish_candidates(
+        db_session, [_vk_post(-1, 43, "текст")], region_code="mi"
+    )
+
+    assert result.engine_state == prepublish.ENGINE_FAILED
+
+
+@pytest.mark.asyncio
+async def test_answered_engine_reports_consulted(db_session, monkeypatch):
+    """Движок ответил — состояние «звали», и никакой политики деградации."""
+    monkeypatch.setattr("modules.classifier.rules.render_effective_postulates", _fake_postulates)
+    monkeypatch.setattr(
+        "modules.classifier.headless.classify_posts",
+        lambda items, **kw: {
+            "verdicts": [
+                ClassifierVerdict(lip="1_44", theme="новости", action="publish", region_code="mi")
+            ],
+            "failures": [],
+            "problems": [],
+            "chunks": 1,
+            "tokens": 100,
+        },
+    )
+
+    result = await prepublish.prepublish_candidates(
+        db_session, [_vk_post(-1, 44, "новость")], region_code="mi"
+    )
+
+    assert result.engine_state == prepublish.ENGINE_CONSULTED
+
+
+@pytest.mark.asyncio
+async def test_nothing_to_judge_is_not_engine_silence(db_session, monkeypatch):
+    """Судить было нечего (посты без текста) — движок ответил, молчания нет."""
+    monkeypatch.setattr("modules.classifier.rules.render_effective_postulates", _fake_postulates)
+    monkeypatch.setattr(
+        "modules.classifier.headless.classify_posts",
+        lambda items, **kw: {
+            "verdicts": [],
+            "failures": [],
+            "problems": [],
+            "chunks": 0,
+            "tokens": 0,
+            "skipped_no_text": len(items),
+        },
+    )
+
+    result = await prepublish.prepublish_candidates(
+        db_session, [_vk_post(-1, 45, "")], region_code="mi"
+    )
+
+    assert result.engine_state == prepublish.ENGINE_CONSULTED
+
+
+@pytest.mark.asyncio
+async def test_disabled_gate_reports_not_consulted(db_session, monkeypatch):
+    """Выключенный гейт — модель не звали, и это не её молчание."""
+    monkeypatch.setenv("CLASSIFIER_PREPUBLISH_ENABLED", "0")
+
+    result = await prepublish.prepublish_candidates(
+        db_session, [_vk_post(-1, 46, "текст")], region_code="mi"
+    )
+
+    assert result.engine_state == prepublish.ENGINE_NOT_CONSULTED_GATE
+    assert result.engine_state != prepublish.ENGINE_FAILED
+
+
+@pytest.mark.asyncio
+async def test_postulates_read_failure_is_not_engine_silence(db_session, monkeypatch):
+    """Сбой чтения постулатов — локальная беда, а не молчание движка.
+
+    Постулаты читаются из БД. Если сбой приписывать движку, то волны будут
+    вычитаться из-под политики деградации одна за другой — и лента умрёт
+    целиком при живом движке.
+    """
+    monkeypatch.setattr("modules.classifier.rules.render_effective_postulates", _boom)
+
+    result = await prepublish.prepublish_candidates(
+        db_session, [_vk_post(-1, 47, "текст")], region_code="mi"
+    )
+
+    assert result.engine_state == prepublish.ENGINE_NOT_CONSULTED_GATE
+    assert result.engine_state != prepublish.ENGINE_FAILED
