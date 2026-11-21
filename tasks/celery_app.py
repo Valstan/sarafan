@@ -1026,6 +1026,49 @@ def check_classifier_heartbeat():
         return {"success": False, "error": str(e)}
 
 
+@app.task(name="tasks.celery_app.check_minimax_engine_heartbeat")
+def check_minimax_engine_heartbeat():
+    """Сторож «MiniMax молчит — трафик идёт в платный Дипсик».
+
+    Инцидент 19–21.11: MiniMax не отвечал двое суток, и **продукт выглядел
+    здоровым** — посты публиковались (платная страховка), сервисы были ``active``,
+    health 200, сторож сводок молчал (сводки выходили). Ни один существующий сигнал
+    об этом не говорил: сломан был бесплатный движок, а платил владелец. Замер:
+    941 отказ MiniMax = 942 платных вызова Дипсика, успешных вызовов MiniMax 4 из
+    958.
+
+    Сигнал — **общий журнал вызовов нейросетей** по полю ``engine``: видно, кто
+    работал в окне. Тревога не на «отказы» (аккаунты с нулевым балансом дают отказ и
+    успех следом), а на **деньги**: платные вызовы идут, а доля успешных вызовов
+    бесплатного движка упала.
+    """
+    try:
+        from config.runtime import TELEGRAM_ALERT_CHAT_ID, TELEGRAM_TOKENS
+        from modules import neural_usage
+        from modules.minimax_watchdog import maybe_alert_minimax_dead, summarise_window
+
+        records = neural_usage.read_records(days=1, max_bytes=8 * 1024 * 1024)
+        stats = summarise_window(records)
+        status = maybe_alert_minimax_dead(
+            stats=stats,
+            telegram_token=(TELEGRAM_TOKENS.get("VALSTANBOT") or TELEGRAM_TOKENS.get("ALERT")),
+            chat_id=TELEGRAM_ALERT_CHAT_ID,
+        )
+        logger.info(
+            "minimax engine watchdog: %s (окно %s мин, вызовов MiniMax %s, успешных %s, "
+            "платных %s)",
+            status,
+            stats.get("window_minutes"),
+            stats.get("attempts"),
+            stats.get("ok"),
+            stats.get("paid"),
+        )
+        return {"success": True, "status": status, **stats}
+    except Exception as e:
+        logger.error("check_minimax_engine_heartbeat failed: %s", e, exc_info=True)
+        return {"success": False, "error": str(e)}
+
+
 @app.task(name="tasks.celery_app.check_telegram_bot_identity")
 def check_telegram_bot_identity():
     """Сторож целостности Telegram-ботов: имя, описание, вебхук (2026-08-12).
@@ -2787,6 +2830,16 @@ app.conf.beat_schedule = {
         "task": "tasks.celery_app.check_classifier_heartbeat",
         "schedule": crontab(minute=5, hour="*/2"),
         "options": {"expires": 3600, "catchup": False},
+    },
+    # Сторож «MiniMax молчит — трафик идёт в платный Дипсик»: раз в 30 минут на
+    # :13 и :43. Продукт в это время выглядит здоровым (публикация идёт через
+    # платную страховку), поэтому сигнал берётся из журнала вызовов по полю engine,
+    # а не из «свежести продукта» — инцидент 19–21.11 (два суток платного трафика)
+    # не заметил ни один существующий сторож.
+    "minimax-engine-watchdog": {
+        "task": "tasks.celery_app.check_minimax_engine_heartbeat",
+        "schedule": crontab(minute="13,43"),
+        "options": {"expires": 1800, "catchup": False},
     },
     "classifier-distill-weekly": {
         "task": "tasks.celery_app.distill_classifier_rules",
