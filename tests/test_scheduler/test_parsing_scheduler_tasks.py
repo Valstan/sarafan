@@ -100,6 +100,72 @@ def test_run_all_regions_theme_spreads_regions_over_the_window():
         assert result["regions"] == ["mi", "or", "ur"]
 
 
+def _wave_dispatch(regions):
+    """Прогоняет волну и возвращает список (регион, очередь) задач.
+
+    Общий каркас двух тестов ниже: модуль целиком подменяет ``celery`` (в
+    тестовой среде его нет), а ``apply_async`` волны — заглушкой, которая
+    запоминает, в какую очередь ушла задача.
+    """
+    celery_stub = types.ModuleType("celery")
+    celery_stub.shared_task = lambda *a, **k: (a[0] if a and callable(a[0]) else (lambda f: f))
+    dispatched = []
+
+    def _fake_apply_async(args=None, countdown=None, expires=None, queue=None, **kwargs):
+        region_code, theme = args
+        task = MagicMock()
+        task.id = f"task-{region_code}-{theme}"
+        dispatched.append((region_code, theme, queue))
+        return task
+
+    with patch.dict(sys.modules, {"celery": celery_stub}):
+        from tasks import parsing_scheduler_tasks as scheduler_tasks
+
+        parse_task_mock = MagicMock()
+        parse_task_mock.apply_async = MagicMock(side_effect=_fake_apply_async)
+
+        def _fake_run_coro(coro):
+            coro.close()
+            return list(regions)
+
+        with patch("tasks.parsing_scheduler_tasks.run_coro", side_effect=_fake_run_coro):
+            with patch("tasks.parsing_scheduler_tasks.parse_and_publish_theme", parse_task_mock):
+                with patch.object(scheduler_tasks, "_wave_region_spread_seconds", lambda: 0.0):
+                    scheduler_tasks.run_all_regions_theme("novost")
+
+    return dispatched
+
+
+def test_wave_regions_go_to_the_wave_queue():
+    """Веер волны уходит в отдельную очередь (P233, ADR-0020).
+
+    На общей очереди 81 задача занимает **голову** списка Redis, и всё, что
+    beat отправляет позже, стоит за ней. Замер 21.11 (волна 16:40):
+    `dispatch_ad_reposts` не выполнился ни разу за час (16:41–17:40) при том,
+    что beat отправлял его каждую минуту, а сторож сводок опоздал на
+    20 минут.
+    """
+    dispatched = _wave_dispatch(["mi", "ur"])
+
+    assert dispatched == [
+        ("mi", "novost", "wave"),
+        ("ur", "novost", "wave"),
+    ]
+
+
+def test_wave_queue_name_comes_from_env_for_a_one_line_rollback(monkeypatch):
+    """Имя очереди живёт в env: откат на проде — одна строка, без отката кода.
+
+    ``SETKA_WAVE_QUEUE=celery`` возвращает веер в дефолтную очередь; юнит
+    воркера продолжает слушать обе (лишняя очередь без задач просто пуста).
+    """
+    monkeypatch.setenv("SETKA_WAVE_QUEUE", "celery")
+
+    dispatched = _wave_dispatch(["mi"])
+
+    assert dispatched == [("mi", "novost", "celery")]
+
+
 class _CapturingSession:
     """Async session double that records executed statements."""
 

@@ -1245,7 +1245,14 @@ def run_all_regions_theme(theme: str, strict: bool = False):
     минуту: сорок bulletins подряд — всплеск в ленте и пачка заданий движка.
     Теперь у каждого региона свой слот внутри окна, поэтому выход идёт
     равномерно, а движок получает работу порциями.
+
+    **Задачи регионов уходят в отдельную очередь** (``SETKA_WAVE_QUEUE``,
+    по умолчанию ``wave``) — см. ADR-0020
+    (`docs/adr/0020-ochered-volny-i-periodika.md`).
+    На общей очереди веер занимал голову списка, и мелкая периодика ждала его
+    до часа.
     """
+    from config.runtime import get_wave_queue
     from database.connection import AsyncSessionLocal
     from modules.wave_targets import select_regions
 
@@ -1269,6 +1276,11 @@ def run_all_regions_theme(theme: str, strict: bool = False):
                 countdown=countdown,
                 # Задача не должна протухнуть, пока ждёт свой слот.
                 expires=countdown + 3600,
+                # Веер волны — в отдельную очередь (P233). На общей очереди
+                # 81 задача занимает голову списка, и мелкая периодика
+                # (репосты рекламы, сторож сводок) уезжает за ними на час.
+                # Имя очереди — в env: откат одной строкой, без правки кода.
+                queue=get_wave_queue(),
             )
         )
     logger.info(
