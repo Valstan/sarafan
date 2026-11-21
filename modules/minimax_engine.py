@@ -1009,12 +1009,17 @@ def _reset_cli_state(data_dir: Path) -> None:
     а его ключ выводится из **пути** (``token_store_key``) — поэтому путь
     области менять нельзя, чистим содержимое. ``config.yaml`` тоже не трогаем
     (он root-owned, а движку он не нужен: модель и режим передаются флагами).
+
+    Если что-то снести не удалось (файл под root — в старом состоянии такие
+    были, 18.11) — **это не молчит**: остаток пишем в лог, иначе сторож
+    будет тихо сбрасывать не всё и через сутки упрётся в тот же OOM.
     """
     keep = {"auth", "config.yaml"}
     try:
         entries = list(data_dir.iterdir())
     except OSError:
         return
+    left = []
     for entry in entries:
         if entry.name in keep:
             continue
@@ -1023,8 +1028,15 @@ def _reset_cli_state(data_dir: Path) -> None:
                 shutil.rmtree(entry, ignore_errors=True)
             else:
                 entry.unlink()
+            if entry.exists():
+                left.append(entry.name)
         except OSError:
-            continue
+            left.append(entry.name)
+    if left:
+        logger.warning(
+            "minimax: состояние CLI сброшено частично — не удалось убрать: %s",
+            ", ".join(sorted(left)[:10]),
+        )
 
 
 def _ensure_cli_state_bounded(account: MinimaxAccount) -> None:
