@@ -92,6 +92,75 @@ sudo systemctl restart setka-celery-worker
 sudo systemctl restart setka-celery-beat
 ```
 
+#### ⚙️ Юнит воркера: очереди (P233, [ADR-0020](adr/0020-ochered-volny-i-periodika.md))
+
+Воркер слушает **две** очереди: дефолтную `celery` (мелкая периодика) и `wave`
+(веер волны публикации). Без `--queues` в ExecStart воркер слушает только
+`celery`, и волны, ушедшие в `wave`, **останутся в очереди**.
+
+```ini
+ExecStart=/home/valstan/SETKA/venv/bin/celery -A celery_app worker \
+    --loglevel=info --logfile=/home/valstan/SETKA/logs/celery-worker.log \
+    --queues=celery,wave
+```
+
+**Порядок выката обязателен: сначала юнит, потом рестарт с новым кодом.**
+Обратный порядок (новый код, старый юнит) останавливает волны: код отправляет
+веер в `wave`, а слушает её только старый воркер, который её не слушает.
+
+```bash
+# 1) обновить ExecStart (см. выше) и перечитать юниты
+sudo systemctl daemon-reload
+# 2) выкатить код и перезапустить воркер (обычный шаг деплоя)
+cd ~/SETKA && git pull origin main
+sudo systemctl restart setka-celery-worker
+# 3) убедиться, что обе очереди слушаются
+./venv/bin/celery -A celery_app inspect active_queues
+```
+
+**Откат — одна строка, без отката кода:** вернуть веер в дефолтную очередь.
+
+```bash
+sudo sed -i 's/^SETKA_WAVE_QUEUE=.*/SETKA_WAVE_QUEUE=celery/' /etc/setka/setka.env
+sudo systemctl restart setka-celery-worker
+```
+
+Юнит при этом остаётся `--queues=celery,wave`: лишняя очередь без задач просто
+пуста, и волны возвращаются в общую очередь.
+
+**Второй воркер (изоляция по процессам) — подготовлен, но не включается.**
+Настоящая изоляция «периодика не ждёт волну никогда» требует отдельного
+процесса, а на боксе (1536 МБ, swap = 0) он не помещается: свободно ~270 МБ в
+волну, а воркер стоит ~280 МБ, и первым убьётся движок MiniMax. Вопрос памяти —
+за владельцем (P163/P164: RAM/vSwap у провайдера). Когда решение будет, юнит:
+
+```ini
+[Unit]
+Description=SETKA Celery Worker (очередь волны)
+After=network.target redis.service postgresql.service
+
+[Service]
+EnvironmentFile=-/etc/setka/setka.env
+EnvironmentFile=/etc/setka/secrets-token.env
+Type=simple
+User=valstan
+Group=valstan
+WorkingDirectory=/home/valstan/SETKA
+Environment="PATH=/home/valstan/SETKA/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=/home/valstan/SETKA"
+ExecStart=/home/valstan/SETKA/venv/bin/celery -A celery_app worker \
+    --loglevel=info --logfile=/home/valstan/SETKA/logs/celery-wave.log \
+    --queues=wave --hostname=wave@%h
+Restart=on-failure
+RestartSec=10s
+
+[Install]
+WantedBy=multi-user.target
+```
+
+Имя узла `wave@%h` — **обязательно**: без него два воркера назывались бы одинаково
+(`celery@host`), и `celery inspect`/`status` показывали бы только один из них.
+
 ### Step 5: Verify
 
 ```bash
