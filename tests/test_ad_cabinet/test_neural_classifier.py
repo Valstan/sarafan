@@ -106,6 +106,30 @@ class TestJudge:
         assert seen["task"] == neural.AD_TASK_TEXT
         assert seen["user"] == "хочу разместить рекламу, сколько стоит?"
 
+    async def test_engine_call_carries_flow_label(self, monkeypatch):
+        """Вызов судьи идёт с меткой потока — иначе его трафик не виден в панели.
+
+        Замер 20.11: 96 вызовов судьи ушли в журнал расхода «без метки», их
+        платная страховка — под дефолтной меткой «deepseek», и в разбивке
+        «куда уходят деньги» этого трафика не было (около десятой части
+        платного расхода за сутки).
+        """
+        from modules.classifier import headless
+
+        seen = {}
+
+        def fake_chat(**kw):
+            seen.update(kw)
+            return {
+                "ok": True,
+                "content": '{"is_ad": true, "confidence": 92, "reason": "просит прайс"}',
+            }
+
+        monkeypatch.setattr(headless, "chat", fake_chat)
+        await neural.judge("хочу разместить рекламу, сколько стоит?")
+
+        assert seen["label"] == "ad_judge"
+
 
 class TestJudgedMarker:
     """Скан перечитывает все предложки 28 раз в сутки — судья должен звать движок
