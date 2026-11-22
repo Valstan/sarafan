@@ -767,6 +767,145 @@ def _read_store_record(store_path: Path, key: str) -> Dict[str, Any]:
     return record if isinstance(record, dict) else {}
 
 
+#: Файл состояния сессии CLI — рядом с токен-стором, в той же папке.
+CLI_SESSION_STATE_NAME = "auth-state.json"
+
+
+def cli_session_state_path(data_dir: Path) -> Path:
+    """Путь файла состояния сессии CLI (рантайм MiniMax Code)."""
+    return data_dir / "auth" / "prod" / "en" / TOKEN_CLIENT_ID / CLI_SESSION_STATE_NAME
+
+
+def cli_session_generation(data_dir: Path, fallback: int = 1) -> int:
+    """Номер поколения сессии CLI — не ниже того, что CLI уже видел.
+
+    CLI считает поколения и отбрасывает запись, которая выглядит старше
+    текущей (защита от отката входа). Поэтому, когда мы пишем токен, поколение
+    берём максимум из прежней записи и из файла состояния.
+    """
+    generation = int(fallback or 1)
+    try:
+        data = json.loads(cli_session_state_path(data_dir).read_text(encoding="utf-8"))
+        generation = max(generation, int(data.get("generation") or 0))
+    except (OSError, ValueError, TypeError):
+        pass
+    return max(1, generation)
+
+
+def write_cli_session_state(data_dir: Path, expires_at_ms: int, generation: int = 1) -> bool:
+    """Записать состояние сессии CLI как «вход есть» (живая проверка 22.11).
+
+    **Зачем это нужно.** Рантайм CLI держит сессию в этом файле, и `status`
+    решает всё: при `anonymous` CLI на любой запрос отвечает «Sign in to
+    MiniMax to use Agent features» — **даже когда access-токен живой**
+    (проверено 22.11: панель вендора по тому же токену отвечает, сеть в
+    порядке, а CLI просит войти). Обратно: при `authenticated` CLI берёт
+    access из токен-стора и работает.
+
+    Карман отдаёт access-токен, а не сессию CLI, поэтому состояние пишем мы —
+    тем же форматом, что пишет сам CLI после успешного входа.
+
+    ⚠️ Срок честный: `expiresAtMs` = срок access-токена. Раньше расхождение
+    с записью токена заставляло CLI считать сессию протухшей.
+    """
+    path = cli_session_state_path(data_dir)
+    payload = {
+        "schemaVersion": 2,
+        "status": "authenticated",
+        "storeKind": "file",
+        "clientId": TOKEN_CLIENT_ID,
+        "scopes": ["agent.default"],
+        "audience": "agent-backend",
+        "buildEnv": "prod",
+        "region": "en",
+        "generation": max(1, int(generation or 1)),
+        "expiresAtMs": int(expires_at_ms),
+    }
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("minimax: состояние сессии CLI не записано (%s)", exc)
+        return False
+    return True
+
+
+def write_access_token(
+    account: MinimaxAccount,
+    access_token: str,
+    expires_at_ms: int,
+    refresh_token: str = "",
+) -> bool:
+    """Положить access-токен в токен-стор рабочей области и поднять сессию CLI.
+
+    Запись токена и состояние сессии пишутся **вместе**: токен без состояния
+    «authenticated» рантайм не примет (живая проверка 22.11 — «Sign in to
+    MiniMax» при живом токене).
+    """
+    store_path = account.auth_path
+    auth_home = account.data_dir / "auth"
+    key = token_store_key(auth_home.resolve())
+    previous = _read_store_record(store_path, key)
+    generation = max(
+        int(previous.get("generation") or 1),
+        cli_session_generation(account.data_dir, 1),
+    )
+    record = {
+        "schemaVersion": 1,
+        "accessToken": access_token,
+        "tokenType": "Bearer",
+        "clientId": TOKEN_CLIENT_ID,
+        "scopes": ["agent.default"],
+        "audience": "agent-backend",
+        "expiresAtMs": int(expires_at_ms),
+        "generation": generation,
+        "loginEpoch": str(uuid.uuid4()),
+        "refreshToken": refresh_token or previous.get("refreshToken") or REFRESH_PLACEHOLDER,
+    }
+    store = {"schemaVersion": 1, "records": {key: record}}
+    try:
+        store_path.parent.mkdir(parents=True, exist_ok=True)
+        store_path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
+    except OSError as exc:
+        logger.warning("minimax: токен в рабочую область не записан (%s)", exc)
+        return False
+    write_cli_session_state(account.data_dir, int(expires_at_ms), generation)
+    return True
+
+
+def renew_account_token(account: MinimaxAccount) -> bool:
+    """Продлить вход **того же** аккаунта (Карман отдаёт свежий access).
+
+    **Зачем.** Отказ «Sign in to MiniMax» — это не «аккаунт мёртв»: по тому же
+    access-токену панель вендора отвечает (живая проверка 22.11), сломана
+    СЕССИЯ CLI. Новый аккаунт тут не помогает — он умирает так же, и пул
+    выедается (замер 22.11: 118 аккаунтов за сутки, 0 успешных вызовов, трафик
+    в платный Дипсик). Продление же возвращает свежий access того же
+    аккаунта: refresh-цепочка у Кармана своя, новый вход владельцу не нужен.
+    """
+    account_id = account.karman_id
+    if account_id is None:
+        return False
+    try:
+        renewed = karman_minimax.renew_account(account_id)
+    except RuntimeError as exc:
+        logger.warning("minimax: Карман не продлил аккаунт %s (%s)", account_id, exc)
+        return False
+    access = str(renewed.get("access_token") or "")
+    if not access:
+        logger.warning("minimax: Карман продлил аккаунт %s без токена", account_id)
+        return False
+    expires_at_ms = int(renewed.get("expires_at_ms") or (time.time() * 1000 + DEFAULT_TOKEN_TTL_MS))
+    if not write_access_token(account, access, expires_at_ms):
+        return False
+    logger.info(
+        "minimax: вход аккаунта %s продлён (до %s)",
+        account_id,
+        datetime.fromtimestamp(expires_at_ms / 1000).isoformat(),
+    )
+    return True
+
+
 def materialize_leased_profile(
     account_id: Any, offer: Any, accounts_dir: Optional[str] = None
 ) -> Optional[MinimaxAccount]:
@@ -799,44 +938,28 @@ def materialize_leased_profile(
         return None
     area_name = (os.getenv(ENV_WORK_AREA) or DEFAULT_WORK_AREA).strip() or DEFAULT_WORK_AREA
     root = accounts_root(accounts_dir) / area_name
-    auth_home = root / "data" / "auth"
-    store_path = auth_home / "prod" / "en" / TOKEN_CLIENT_ID / "auth.json"
     expires_at_ms = getattr(offer, "expires_at_ms", None)
     # Поля ``generation`` и ``loginEpoch`` — обязательные для рантайма MiniMax
     # Code: без них CLI отвергает запись («stored OAuth credential record is
     # invalid», замерено 14.11 на боксе). ``loginEpoch`` — метка входа: новый
     # токен = новый вход, поэтому epoch всегда свежий; ``generation`` наследуем
-    # из прежней записи.
-    previous = _read_store_record(store_path, token_store_key(auth_home.resolve()))
-    record = {
-        "schemaVersion": 1,
-        "accessToken": access_token,
-        "tokenType": "Bearer",
-        "clientId": TOKEN_CLIENT_ID,
-        "scopes": ["agent.default"],
-        "audience": "agent-backend",
-        "expiresAtMs": int(expires_at_ms or (time.time() * 1000 + DEFAULT_TOKEN_TTL_MS)),
-        "generation": int(previous.get("generation") or 1),
-        "loginEpoch": str(uuid.uuid4()),
-    }
-    if refresh_token:
-        record["refreshToken"] = refresh_token
-    else:
-        # Поле обязательно по контракту рантайма (см. докстринг выше): без
-        # непустой строки CLI считает запись битой и отказывается работать.
-        # Заглушка честно помечена: продлить вход ею нельзя — после истечения
-        # access мы просто берём у Кармана следующий аккаунт.
-        record["refreshToken"] = REFRESH_PLACEHOLDER
-    store = {
-        "schemaVersion": 1,
-        "records": {token_store_key(auth_home.resolve()): record},
-    }
-    try:
-        store_path.parent.mkdir(parents=True, exist_ok=True)
-        (root / "config").mkdir(parents=True, exist_ok=True)
-        store_path.write_text(json.dumps(store, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError as exc:
-        logger.warning("minimax: токен в рабочую область не записан (%s)", exc)
+    # из прежней записи и из состояния сессии CLI.
+    #
+    # Запись токена и состояние сессии CLI пишутся **вместе** (``write_access_token``):
+    # токен без состояния «authenticated» рантайм не примет — на живой проверке
+    # 22.11 CLI отвечал «Sign in to MiniMax» при живом токене.
+    account = MinimaxAccount(
+        name=root.name,
+        root=root,
+        email=str((getattr(offer, "account", None) or {}).get("email") or ""),
+        karman_id=account_id,
+    )
+    if not write_access_token(
+        account,
+        access_token,
+        int(expires_at_ms or (time.time() * 1000 + DEFAULT_TOKEN_TTL_MS)),
+        refresh_token,
+    ):
         return None
     # Кто сейчас в области — для проб и для владельца.
     try:
@@ -1888,6 +2011,57 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
     # Кармана заново не просим.
     current = _work_area_account(accounts)
 
+    def _call_model(account: MinimaxAccount) -> Tuple[bool, str, Dict[str, Any]]:
+        """Один вызов модели на аккаунте + запись в журнал расхода."""
+        ok, content, details = run_classification(
+            account,
+            system=system,
+            user=user,
+            timeout=kwargs.get("timeout"),
+            task=task_text_for(str(kwargs.get("label") or ""), str(kwargs.get("task") or "")),
+        )
+        record_usage(
+            account,
+            ok=ok,
+            reason="" if ok else str(details.get("reason") or "engine_failed"),
+            detail="" if ok else str(details.get("detail") or ""),
+            points=int(details.get("points") or 0),
+            posts=int(kwargs.get("posts") or 0),
+            usage=details.get("usage"),
+            duration_ms=int(details.get("elapsed_ms") or 0),
+            label=str(kwargs.get("label") or ""),
+            attempts=len(tried),
+        )
+        return ok, content, details
+
+    def _ok_result(
+        account: MinimaxAccount, content: str, details: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Успешный ответ: пул жив, общие паузы снимаем."""
+        # Пул жив: серия пустых аккаунтов обнуляется, общая пауза не нужна,
+        # «пул мёртв» снимается. Список мёртвых id остаётся — мёртвый аккаунт
+        # мёртв.
+        _write_shared_meta(
+            {
+                META_DRY_FAILURES: 0,
+                META_PAUSE_UNTIL: 0,
+                META_KARMAN_DOWN_UNTIL: 0,
+                META_DOWN_SINCE: 0,
+                META_POOL_DEAD_UNTIL: 0,
+            }
+        )
+        return {
+            "ok": True,
+            "content": content,
+            "model": details.get("model") or os.getenv(ENV_MODEL) or DEFAULT_MODEL,
+            "usage": details.get("usage") or {},
+            "account": account.name,
+            "leased": True,
+            "karman_account_id": account.karman_id,
+            "attempts": len(tried),
+            "duration_ms": int(details.get("elapsed_ms") or 0),
+        }
+
     for _attempt in range(max_leases + 1):
         if current is not None:
             # ── 1. Работаем на текущем аккаунте ──
@@ -1901,63 +2075,11 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                 # взяли, а не в те дни, когда мы в нём работали.
                 _report_activation_once(current)
                 tried.append(current.name)
-                ok, content, details = run_classification(
-                    current,
-                    system=system,
-                    user=user,
-                    timeout=kwargs.get("timeout"),
-                    task=task_text_for(
-                        str(kwargs.get("label") or ""), str(kwargs.get("task") or "")
-                    ),
-                )
+                ok, content, details = _call_model(current)
                 if ok:
-                    record_usage(
-                        current,
-                        ok=True,
-                        points=int(details.get("points") or 0),
-                        posts=int(kwargs.get("posts") or 0),
-                        usage=details.get("usage"),
-                        duration_ms=int(details.get("elapsed_ms") or 0),
-                        label=str(kwargs.get("label") or ""),
-                        attempts=len(tried),
-                    )
-                    # Пул жив: серия пустых аккаунтов обнуляется, общая пауза не
-                    # нужна, «пул мёртв» снимается. Список мёртвых id остаётся —
-                    # мёртвый аккаунт мёртв.
-                    _write_shared_meta(
-                        {
-                            META_DRY_FAILURES: 0,
-                            META_PAUSE_UNTIL: 0,
-                            META_KARMAN_DOWN_UNTIL: 0,
-                            META_DOWN_SINCE: 0,
-                            META_POOL_DEAD_UNTIL: 0,
-                        }
-                    )
-                    return {
-                        "ok": True,
-                        "content": content,
-                        "model": details.get("model") or os.getenv(ENV_MODEL) or DEFAULT_MODEL,
-                        "usage": details.get("usage") or {},
-                        "account": current.name,
-                        "leased": True,
-                        "karman_account_id": current.karman_id,
-                        "attempts": len(tried),
-                        "duration_ms": int(details.get("elapsed_ms") or 0),
-                    }
+                    return _ok_result(current, content, details)
                 last_reason = str(details.get("reason") or "engine_failed")
                 last_detail = str(details.get("detail") or "")
-                record_usage(
-                    current,
-                    ok=False,
-                    reason=last_reason,
-                    detail=last_detail,
-                    points=int(details.get("points") or 0),
-                    posts=int(kwargs.get("posts") or 0),
-                    usage=details.get("usage"),
-                    duration_ms=int(details.get("elapsed_ms") or 0),
-                    label=str(kwargs.get("label") or ""),
-                    attempts=len(tried),
-                )
                 if last_reason not in ("quota_exhausted", "auth_expired"):
                     return {
                         "ok": False,
@@ -1965,11 +2087,35 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
                         "detail": last_detail,
                         "tried_accounts": tried,
                     }
+                # «Sign in to MiniMax» — это НЕ «аккаунт мёртв».
+                #
+                # Живая проверка 22.11: по тому же access-токену панель вендора
+                # отвечает (7 клеток), сеть в порядке — сломана СЕССИЯ CLI.
+                # Новый аккаунт тут не помогает: он умирает так же, и пул
+                # выедается (замер 22.11: 118 аккаунтов за сутки, 0 успешных
+                # вызовов, трафик ушёл в платный Дипсик). Помогает ПРОДЛЕНИЕ
+                # ТОГО ЖЕ аккаунта — ручка renew у Кармана (refresh-цепочка его,
+                # новый вход владельцу не нужен).
+                if last_reason == "auth_expired" and renew_account_token(current):
+                    tried.append(current.name)
+                    ok, content, details = _call_model(current)
+                    if ok:
+                        return _ok_result(current, content, details)
+                    last_reason = str(details.get("reason") or "engine_failed")
+                    last_detail = str(details.get("detail") or "")
+                    if last_reason not in ("quota_exhausted", "auth_expired"):
+                        return {
+                            "ok": False,
+                            "reason": last_reason,
+                            "detail": last_detail,
+                            "tried_accounts": tried,
+                        }
                 # Очки кончились — или протух вход: за следующим аккаунтом.
                 if last_reason == "quota_exhausted":
                     # Очки кончились сегодня — до завтра этот аккаунт не трогаем
                     # (и не тратим на него вызовы).
                     _remember_exhausted(current)
+
                 # Аккаунт умер, **не потратив ни токена**: это не «наш аккаунт
                 # кончился» (тогда бы токены потратились), а «баланс ноль».
                 #

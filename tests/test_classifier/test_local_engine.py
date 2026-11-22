@@ -699,23 +699,38 @@ def test_minimax_summary_counts_success_and_reasons():
 
 
 def test_minimax_summary_splits_moscow_day_boundary():
-    """Стык суток: 23:30 МСК и 02:30 МСК — разные дни, а не один.
+    """Стык суток: 23:30 МСК и 00:30 МСК — разные дни, а не один.
 
     Раньше счётчик «за сутки» брал последние 24 часа, и на границе московской
     ночи в него попадали вызовы двух разных суток.
+
+    ⚠️ Даты — **относительно текущего момента**: жёстко зашитые даты рано или
+    поздно выпадают из окна в 7 московских суток, и тест падает сам по себе
+    (случилось 23.11 — зашитые 16–17.11 ушли за окно).
     """
     from modules.classifier import engine_panel
 
+    msk = timezone(timedelta(hours=3))
+    now = datetime.now(msk)
+    late = (now - timedelta(days=1)).replace(hour=23, minute=30, second=0, microsecond=0)
+    early = now.replace(hour=0, minute=30, second=0, microsecond=0)
     rows = [
-        {"ts": "2026-11-16T20:30:00+00:00", "ok": True, "usage": {"totalTokens": 10}},
-        {"ts": "2026-11-16T21:30:00+00:00", "ok": True, "usage": {"totalTokens": 20}},
+        {"ts": late.astimezone(timezone.utc).isoformat(), "ok": True, "usage": {"totalTokens": 10}},
+        {
+            "ts": early.astimezone(timezone.utc).isoformat(),
+            "ok": True,
+            "usage": {"totalTokens": 20},
+        },
     ]
-    # 20:30 UTC = 23:30 МСК 16-го, 21:30 UTC = 00:30 МСК 17-го.
-    assert engine_panel.msk_day(datetime.fromisoformat(rows[0]["ts"])) == "2026-11-16"
-    assert engine_panel.msk_day(datetime.fromisoformat(rows[1]["ts"])) == "2026-11-17"
-    # В сутки 17-го попадает только второй вызов.
+    # 23:30 МСК вчера и 00:30 МСК сегодня — разные московские сутки.
+    assert engine_panel.msk_day(datetime.fromisoformat(rows[0]["ts"])) == engine_panel.msk_day(late)
+    assert engine_panel.msk_day(datetime.fromisoformat(rows[1]["ts"])) == engine_panel.msk_day(
+        early
+    )
+    assert engine_panel.msk_day(early) != engine_panel.msk_day(late)
+    # В сегодняшние сутки попадает только второй вызов.
     picked = engine_panel.minimax_summary(rows, 1)
-    assert picked["calls"] in (0, 1)  # зависит от того, какой сегодня день
+    assert picked["calls"] == 1
     seven = engine_panel.minimax_summary(rows, 7)
     assert seven["calls"] == 2
 

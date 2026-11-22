@@ -1277,17 +1277,25 @@ def test_account_ran_out_of_points_is_not_a_dry_failure(monkeypatch, tmp_path):
 
 
 def test_consumer_headers_mark_audit(monkeypatch):
-    """Разметка потребителя в аудите Кармана (запрос мозга D-220, 15.11)."""
+    """Разметка потребителя в аудите Кармана (запрос мозга D-220, 15.11).
+
+    ⚠️ Проект в заголовке — **имя комнаты** (`SARAFAN`), а не «setka»: журнальный
+    проект выдачи становится владельцем аккаунта (`accounts_account.used_project_id`),
+    а ручка `renew` продлевает аккаунт только той комнате, чей журнальный проект
+    совпал с её собственным. При «setka» продление отклонялось бы с 409
+    («аккаунт за другой комнатой») — движок не смог бы починить вход, не взяв
+    новый аккаунт (живая находка 22.11).
+    """
     monkeypatch.setenv(km.ENV_API_URL, "https://karman.invalid/api/minimax")
     monkeypatch.setenv(km.ENV_TOKEN, "room-token")
     calls, call = _call_recorder([(200, OFFER)])
     km.take_account(call=call)
-    assert calls[0]["headers"]["X-MiniMax-Project"] == "setka"
+    assert calls[0]["headers"]["X-MiniMax-Project"] == "SARAFAN"
     assert calls[0]["headers"]["X-MiniMax-Area"]
 
     calls, call = _call_recorder([(200, {"account_id": 67})])
     km.report_activation(67, points=400, activation_index=1, call=call)
-    assert calls[0]["headers"]["X-MiniMax-Project"] == "setka"
+    assert calls[0]["headers"]["X-MiniMax-Project"] == "SARAFAN"
     assert calls[0]["headers"]["X-MiniMax-Area"]
 
 

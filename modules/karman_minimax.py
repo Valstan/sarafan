@@ -216,8 +216,16 @@ def consumer_headers() -> Dict[str, str]:
     и под что брал. В журнал они не пишутся — журнальный проект всегда
     комната-потребитель (так расход Сарафана и расход панели программирования
     не смешиваются). Запросил мозг 15.11 (D-220) — добавляем оба заголовка.
+
+    ⚠️ **Проект в заголовке должен совпадать с именем комнаты** (живая находка
+    22.11). Журнальный проект выдачи становится «владельцем» аккаунта
+    (``accounts_account.used_project_id``), а ручка ``renew`` продлевает
+    аккаунт только той комнате, чей журнальный проект совпал с её
+    собственным (``caller.projectId``). При заголовке «setka» продление
+    отклонялось бы с 409 («аккаунт за другой комнатой») — и движок не смог бы
+    починить вход, не взяв новый аккаунт.
     """
-    project = (os.getenv("MINIMAX_PROJECT") or "setka").strip() or "setka"
+    project = (os.getenv("MINIMAX_PROJECT") or "SARAFAN").strip() or "SARAFAN"
     area = (os.getenv("MINIMAX_AREA") or os.getenv("MINIMAX_WORK_AREA") or "work").strip() or "work"
     return {"X-MiniMax-Project": project, "X-MiniMax-Area": area}
 
@@ -330,6 +338,41 @@ def report_activation(
     return payload
 
 
+def renew_account(account_id: Any, *, call=_call) -> Dict[str, Any]:
+    """Продлить вход **того же** аккаунта (ручка Кармана ``POST /api/minimax/renew``).
+
+    **Зачем это нам.** Отказ «Sign in to MiniMax» — это НЕ «аккаунт мёртв»:
+    по тому же access-токену панель вендора отвечает (живая проверка 22.11 —
+    7 клеток), сеть в порядке, сломана СЕССИЯ CLI. Новый аккаунт тут не
+    помогает — он умирает так же, и пул выедается (замер 22.11: 118 аккаунтов
+    за сутки, 0 успешных вызовов, трафик в платный Дипсик).
+
+    Продление возвращает свежий access **того же** аккаунта: refresh-цепочка у
+    Кармана своя (мандат владельца 14.11 — наружу уходит только access), и
+    новый вход владельцу не нужен.
+
+    Ответ: ``{account_id, email, access_token, expires_at_ms, renewed}``.
+    Отказы: 409 — аккаунт за другой комнатой или цепочка оборвана; 404 — нет
+    такого аккаунта; 403 — токен только для чтения.
+    """
+    base = api_base()
+    token_value = token()
+    if not base or not token_value:
+        raise RuntimeError("ручки пула не настроены (адрес или токен не задан)")
+    status, payload = call(
+        "POST",
+        "%s/renew" % base,
+        token_value,
+        body={"account_id": int(account_id)},
+        headers=consumer_headers(),
+    )
+    if status != 200:
+        raise RuntimeError(
+            "Карман не продлил аккаунт: %s %s" % (status, str(payload.get("error") or "")[:200])
+        )
+    return payload
+
+
 def account_identity(account: Optional[Dict[str, Any]]) -> str:
     """Человекочитаемое имя аккаунта для логов (без токенов и паролей)."""
     if not isinstance(account, dict):
@@ -350,6 +393,7 @@ __all__: Sequence[str] = (
     "api_base",
     "enabled",
     "moscow_today",
+    "renew_account",
     "report_activation",
     "take_account",
     "token",
