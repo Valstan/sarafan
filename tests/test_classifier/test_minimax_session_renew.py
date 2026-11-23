@@ -218,6 +218,115 @@ def test_renew_failure_falls_back_to_next_account(monkeypatch, tmp_path):
     assert result["reason"] == "karman_unavailable"
 
 
+# --- «панель не прочиталась» ≠ «очков нет» -----------------------------------
+
+
+def _panel_with_points():
+    """Панель, где сегодняшняя клетка уже забрана (status 3) — очки есть."""
+    return {
+        "data": {
+            "days": [
+                {"day_no": no, "status": status, "points": points, "is_today": is_today}
+                for (no, status, points, is_today) in [
+                    (1, 3, 400, True),
+                    (2, 1, 400, False),
+                    (3, 1, 400, False),
+                    (4, 1, 1000, False),
+                    (5, 1, 400, False),
+                    (6, 1, 400, False),
+                    (7, 1, 1000, False),
+                ]
+            ]
+        },
+        "base_resp": {"status_code": 0, "status_msg": "ok"},
+    }
+
+
+def test_unreadable_panel_renews_same_account(monkeypatch, tmp_path):
+    """Протух токен → панель не читается (401) → это НЕ «очков нет».
+
+    Движок обязан сначала продлить вход ТОГО ЖЕ аккаунта, а не взять новый:
+    иначе пул выедается на каждом истечении access-токена.
+    """
+    account = _account(tmp_path)
+    state = {"renew": 0, "lease": 0}
+
+    def _panel(acc, **kw):
+        if state["renew"] == 0:
+            acc.panel = None  # панель не прочиталась (вендер отвечает 401)
+            return None
+        return _panel_with_points()
+
+    def _renew(account_id, **kwargs):
+        state["renew"] += 1
+        return {
+            "account_id": account_id,
+            "access_token": "tok-fresh",
+            "expires_at_ms": 4202444800000,
+        }
+
+    def _take(**kwargs):
+        state["lease"] += 1
+        raise AssertionError("новый аккаунт брать нельзя — вход того же можно продлить")
+
+    monkeypatch.setattr(mx, "signin_panel", _panel)
+    monkeypatch.setattr(mx.karman_minimax, "renew_account", _renew)
+    monkeypatch.setattr(mx.karman_minimax, "take_account", _take)
+    monkeypatch.setattr(mx, "_work_area_account", lambda accounts: account)
+    monkeypatch.setattr(
+        mx,
+        "run_classification",
+        lambda acc, **kw: (True, json.dumps({"verdicts": []}), {"model": "MiniMax-M3.1-Flash"}),
+    )
+    monkeypatch.setattr(mx, "_report_activation_once", lambda acc: None)
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(mx, "_write_shared_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mx, "_remember_exhausted", lambda acc: None)
+    monkeypatch.setattr(mx, "_note_dead_account", lambda account_id: None)
+    monkeypatch.setattr(mx, "_note_dry_failure", lambda: 0)
+    monkeypatch.setattr(mx, "_dead_streak_limit", lambda: 10)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    result = mx._chat_leased([account], system="S", user="U", label="headless")
+    assert result["ok"] is True
+    assert state["renew"] == 1
+    assert state["lease"] == 0
+
+
+def test_unreadable_panel_without_renew_takes_next_account(monkeypatch, tmp_path):
+    """Продление не вышло и панель не читается — тогда уже берём следующий."""
+    account = _account(tmp_path)
+    state = {"lease": 0}
+
+    def _panel(acc, **kw):
+        acc.panel = None
+        return None
+
+    def _take(**kwargs):
+        state["lease"] += 1
+        raise RuntimeError("Карман не ответил")
+
+    monkeypatch.setattr(mx, "signin_panel", _panel)
+    monkeypatch.setattr(
+        mx.karman_minimax,
+        "renew_account",
+        lambda account_id, **kwargs: (_ for _ in ()).throw(RuntimeError("409")),
+    )
+    monkeypatch.setattr(mx.karman_minimax, "take_account", _take)
+    monkeypatch.setattr(mx, "_work_area_account", lambda accounts: account)
+    monkeypatch.setattr(mx, "run_classification", lambda acc, **kw: (True, "{}", {}))
+    monkeypatch.setattr(mx, "_report_activation_once", lambda acc: None)
+    monkeypatch.setattr(mx, "record_usage", lambda *a, **k: None)
+    monkeypatch.setattr(mx, "_write_shared_meta", lambda *a, **k: None)
+    monkeypatch.setattr(mx, "_remember_exhausted", lambda acc: None)
+    monkeypatch.setattr(mx, "_note_dead_account", lambda account_id: None)
+    monkeypatch.setattr(mx, "_note_dry_failure", lambda: 0)
+    monkeypatch.setattr(mx, "_dead_streak_limit", lambda: 10)
+    monkeypatch.setenv(mx.ENV_ACCOUNTS_DIR, str(tmp_path))
+    result = mx._chat_leased([account], system="S", user="U", label="headless")
+    assert result["ok"] is False
+    assert state["lease"] == 1
+
+
 # --- заголовок проекта ------------------------------------------------------
 
 
