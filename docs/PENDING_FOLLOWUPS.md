@@ -54,7 +54,7 @@
 - **P225** [⏳ Пилот единого профиля жителя (#386): слой условий услуг + ассистент — шаг 1 выкачен 11.11, шаг 3 собран 19.11](pending/P225-pilot-386-usloviya-uslug-i-assistent.md) · `⏱ 2026-11-11 · snooze 0 · fresh`
 - **P227** [⏳ Контур MiniMax: пул и подбор — в Кармане, весь трафик на MiniMax](pending/P227-minimax-kontur-pul-ak-kuntov-avtochekin.md) · `⏱ 2026-11-23 · snooze 0 · fresh`
 - **P228** [⏳ Минимакс-контур: замер доли трафика и ответ Кармана про аккаунты с нулевым балансом](pending/P228-minimax-ves-trahf-i-otchet-karmanu.md) · `⏱ 2026-11-23 · snooze 0 · fresh`
-- **P235** [🟡 Аудит discovery: MiniMax, три молчаливые поломки](pending/P235-discovery-audit.md) · `⏱ 2026-11-23 · snooze 0 · fresh`
+- **P235** [🟡 Аудит discovery: MiniMax, три молчаливые поломки; разбор 964 «сменили категорию» — все чужие доноры, AI прав в 665, но категория = тема](pending/P235-discovery-audit.md) · `⏱ 2026-11-23 · snooze 0 · fresh`
 
 
 
@@ -100,6 +100,7 @@
 
 ## 🟡 Техдолги
 
+- **P236** [🟡 Дубли доноров между регионами: 71 VK-группа заведена в нескольких районах (116 лишних регистраций; 35 — закамский клон-пул)](pending/P236-dubl-donorov-mezhdu-regionami.md) · `⏱ 2026-11-23 · snooze 0 · fresh`
 - **P226** [🟡 Полный прогон падает в двух проверках `test_token_policy.py` — порядок кандидатов плавает (найдено 2026-11-11)](pending/P226-testy-ne-germetichny-poryadok-kandidatov.md) · `⏱ 2026-11-11 · snooze 0 · fresh`
 - **P224** [🟡 Расход DeepSeek: единица экономии — длина префикса (10,3K/вызов; 3 931/пост) → сжатие базы + мост к локальному движку (решение владельца 10.11: сначала правилник, потом мост)](pending/P224-rashod-deepseek-edinica-ekonomii-i-most-lokalnomu-dvizhku.md) · `⏱ 2026-11-10 · snooze 0 · fresh`
 
