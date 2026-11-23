@@ -52,7 +52,7 @@
 
 - **P230** [🟡 MAX-канал рекламных заявок: карточка с фото и кнопкой ответа + нейросетевой судья](pending/P230-max-kanal-reklamnyh-zayavok.md) · `⏱ 2026-11-20 · snooze 0 · fresh`
 - **P225** [⏳ Пилот единого профиля жителя (#386): слой условий услуг + ассистент — шаг 1 выкачен 11.11, шаг 3 собран 19.11](pending/P225-pilot-386-usloviya-uslug-i-assistent.md) · `⏱ 2026-11-11 · snooze 0 · fresh`
-- **P227** [⏳ Контур MiniMax: пул и подбор — в Кармане, весь трафик на MiniMax](pending/P227-minimax-kontur-pul-ak-kuntov-avtochekin.md) · `⏱ 2026-11-23 · snooze 0 · fresh`
+- **P227** [⏳ Контур MiniMax: пул и подбор — в Кармане, весь трафик на MiniMax; **продление входа сработало в бою 23.11 17:02** (тот же аккаунт #3, +12 ч, без 409)](pending/P227-minimax-kontur-pul-ak-kuntov-avtochekin.md) · `⏱ 2026-11-23 · snooze 0 · fresh`
 - **P228** [⏳ Минимакс-контур: замер доли трафика и ответ Кармана про аккаунты с нулевым балансом (срез по МСК-суткам: 23.11 — 99,6 % ok, ни одного auth_expired/exec_failed)](pending/P228-minimax-ves-trahf-i-otchet-karmanu.md) · `⏱ 2026-11-23 · snooze 0 · fresh`
 - **P235** [🟡 Аудит discovery: MiniMax, три молчаливые поломки; разбор 964 «сменили категорию» — все чужие доноры, AI прав в 665, но категория = тема](pending/P235-discovery-audit.md) · `⏱ 2026-11-23 · snooze 0 · fresh`
 
