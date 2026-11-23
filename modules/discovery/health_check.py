@@ -38,7 +38,6 @@ from typing import Any, Dict, Optional
 
 from database.models import Community
 from modules.discovery.ai_categorizer import categorize_candidate
-from modules.discovery.ai_categorizer import usage_tokens as _usage_tokens
 from modules.vk_monitor.vk_client import VKClient
 
 
@@ -50,13 +49,23 @@ def ai_tokens_kwargs(ai_result: dict) -> dict:
     Поле в структуре при этом ``int``, поэтому ``None`` становится нулём, а рядом
     ставится ``tokens_known=False`` — иначе «не измерено» и «ноль» слились бы в
     одно число и занизили цену прогона (P001).
+
+    ⚠️ **Читаем именно поля результата категоризатора** (``tokens_prompt`` /
+    ``tokens_completion``), а не сырой ``usage`` клиента: в результате
+    категоризатора ключа ``usage`` нет — он разобран на месте вызова. Чтение
+    ``usage`` отсюда давало «не измерено» на **каждом** вызове, и отчёт о цене
+    прогона (единственный ответ на вопрос «сколько это стоит») уезжал пустым:
+    замер 23.11 — ``tokens_prompt: 0, tokens_measured: False`` по всем 81
+    регионам, при 2,29 млн реально потраченных prompt-токенов.
     """
-    prompt, completion = _usage_tokens(ai_result)
-    known = prompt is not None and completion is not None
+    prompt = ai_result.get("tokens_prompt")
+    completion = ai_result.get("tokens_completion")
+    known = isinstance(prompt, (int, float)) and isinstance(completion, (int, float))
     return {
         "tokens_prompt": int(prompt or 0),
         "tokens_completion": int(completion or 0),
         "tokens_known": known,
+        "engine": str(ai_result.get("engine") or ""),
     }
 
 
@@ -125,6 +134,10 @@ class CommunityHealth:
     tokens_prompt: int = 0
     tokens_completion: int = 0
     tokens_known: bool = True
+    #: На каком движке посчитали (``minimax`` / ``deepseek``). Нужен, чтобы
+    #: «сколько стоит прогон» читалось по сети, а не по одному общему числу:
+    #: бесплатный free-тир и платный Дипсик — разные деньги.
+    engine: str = ""
 
 
 def _extract_last_post_dt(items: list) -> Optional[datetime]:

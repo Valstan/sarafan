@@ -1,6 +1,6 @@
 """Unit tests for modules/discovery/ai_categorizer.py.
 
-Движок — DeepSeek через общий ``modules.deepseek_client`` (D-024, 2026-08-12).
+Движок по умолчанию — MiniMax (free-тир, переключено 23.11), а Дипсик остался
 Подменяется ровно одна точка — ``ac.chat``, — потому что модуль импортирует её
 в своё пространство имён. Раньше подменялся целый фальшивый пакет ``groq`` в
 ``sys.modules``: SDK импортировался лениво внутри функции, и дотянуться до него
@@ -14,6 +14,17 @@ import json
 import pytest
 
 import modules.discovery.ai_categorizer as ac
+
+
+@pytest.fixture(autouse=True)
+def _pin_engine(monkeypatch):
+    """Движок закреплён на Дипсике: этот файл проверяет его форму запроса.
+
+    По умолчанию движок — MiniMax (free-тир), а Дипсик остался платной
+    страховкой; без закрепления тесты ушли бы в MiniMax и подмены ``ac.chat``
+    не хватало бы.
+    """
+    monkeypatch.setenv(ac.ENV_ENGINE, "deepseek")
 
 
 def _install_chat(monkeypatch, result):

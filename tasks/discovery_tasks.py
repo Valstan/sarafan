@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Sequence
@@ -36,6 +37,13 @@ from modules.discovery.vk_search import DiscoveredGroup, discover_for_region
 from modules.vk_monitor.vk_client import VKClient
 
 logger = logging.getLogger(__name__)
+
+#: На сколько ночных срезов делится обход регионов. Каждый регион проверяется
+#: раз в 7 дней, но за ночь воркер занимается ~1/7 сети, а не всей: на MiniMax
+#: полный прогон растягивается на ~2 часа и наезжает на утреннюю волну
+#: (ADR-0020, P233). Переопределяется ``DISCOVERY_RECHECK_SLICES``.
+DEFAULT_RECHECK_SLICES = 7
+ENV_RECHECK_SLICES = "DISCOVERY_RECHECK_SLICES"
 
 
 async def _pick_parse_token() -> Optional[str]:
@@ -546,21 +554,30 @@ async def recheck_communities_for_region_async(
 
 
 def _tokens_of_health(results: Sequence[CommunityHealth]) -> Dict[str, Any]:
-    """Сумма токенов AI-классификации по результатам recheck.
+    """Сумма токенов AI-классификации по результатам recheck + разбивка по движкам.
 
     ``tokens_measured=False`` означает, что хотя бы часть вызовов не вернула
     счётчиков (``tokens_known=False``), и сумма — нижняя оценка: читать её как
     полный расход нельзя. Флаг, а не эвристика «ноль бывает только у мёртвых
     стен»: у стены с текстом, но без счётчиков от провайдера, ноль — обман.
+
+    ``engines`` — сколько вызовов ушло на каждый движок: free-тир MiniMax и
+    платный Дипсик — разные деньги, и «сколько это стоит» без разбивки
+    вводит в заблуждение (замер 23.11: 2 701 платный вызов за один прогон).
     """
     prompt = sum(int(getattr(r, "tokens_prompt", 0) or 0) for r in results)
     completion = sum(int(getattr(r, "tokens_completion", 0) or 0) for r in results)
     unmeasured = sum(1 for r in results if not getattr(r, "tokens_known", True))
+    engines: Dict[str, int] = {}
+    for r in results:
+        engine = str(getattr(r, "engine", "") or "unknown")
+        engines[engine] = engines.get(engine, 0) + 1
     return {
         "tokens_prompt": prompt,
         "tokens_completion": completion,
         "tokens_measured": unmeasured == 0,
         "tokens_unmeasured_calls": unmeasured,
+        "engines": engines,
     }
 
 
@@ -569,14 +586,31 @@ async def recheck_all_active_regions_async(
     posts_sample: int = DEFAULT_POSTS_SAMPLE,
     max_concurrent_per_region: int = 4,
     send_telegram: bool = True,
+    slices: int = 1,
+    slice_index: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Health-check по всем `Region.is_active=True`, последовательно.
+    """Health-check по регионам, последовательно.
 
     Между регионами — последовательно, чтобы не разрывать rate-limit одного
     VK-токена. Внутри региона — параллельно (Semaphore=4).
 
     По итогам прогона отправляет агрегированный Telegram-alert (если
     есть non-active изменения и настроены TELEGRAM_TOKENS/CHAT_ID).
+
+    **Разбивка по ночам (``slices``).** Регионы делятся на ``slices`` срезов,
+    и за ночь проверяется один срез: так каждый регион всё так же проверяется
+    раз в неделю, но воркер не занимается всей сетью за одну ночь.
+
+    ⚠️ **Зачем это понадобилось.** На Дипсике (замер 23.11) прогон всех
+    81 региона занял **32 минуты** (2 701 вызов, ~1,4 вызова/с при четырёх
+    параллельных). На MiniMax Code вызов стоит ~10 с вместо ~1,7 с — тот же
+    прогон растянется на **~2 часа** и упрётся в утреннюю волну (ADR-0020,
+    P233: «волна забирает воркер»). Семь ночных срезов по ~11 регионов дают
+    ~30 минут на ночь и не трогают волну.
+
+    Номер среза — по календарному дню (``tm_yday % slices``): за 7 ночей
+    проходятся все регионы, и пропуск одной ночи не оставляет сеть без
+    проверки надолго (в отличие от «всё в одну ночь»).
     """
     async with AsyncSessionLocal() as session:
         region_ids = [
@@ -592,6 +626,14 @@ async def recheck_all_active_regions_async(
 
     if not region_ids:
         return {"success": True, "regions": [], "total_regions": 0}
+
+    total_regions = len(region_ids)
+    slices = max(1, int(slices or 1))
+    if slice_index is None:
+        slice_index = datetime.utcnow().timetuple().tm_yday % slices
+    slice_index = int(slice_index) % slices
+    if slices > 1:
+        region_ids = region_ids[slice_index::slices]
 
     reports: List[Dict[str, Any]] = []
     for rid in region_ids:
@@ -610,7 +652,10 @@ async def recheck_all_active_regions_async(
 
     return {
         "success": True,
-        "total_regions": len(region_ids),
+        "total_regions": total_regions,
+        "regions_checked": len(reports),
+        "slices": slices,
+        "slice_index": slice_index,
         "regions": reports,
         # Сумма по всем регионам: недельный прогон recheck — самая крупная
         # статья расхода в модуле discovery, и без числа в отчёте её не видно
@@ -618,7 +663,25 @@ async def recheck_all_active_regions_async(
         "tokens_prompt": sum(int(r.get("tokens_prompt") or 0) for r in reports),
         "tokens_completion": sum(int(r.get("tokens_completion") or 0) for r in reports),
         "tokens_measured": all(bool(r.get("tokens_measured")) for r in reports),
+        "engines": _merge_engines(reports),
     }
+
+
+def _merge_engines(reports: Sequence[Dict[str, Any]]) -> Dict[str, int]:
+    """Свести счётчики движков по регионам в один словарь."""
+    out: Dict[str, int] = {}
+    for report in reports:
+        for engine, count in (report.get("engines") or {}).items():
+            out[engine] = out.get(engine, 0) + int(count or 0)
+    return out
+
+
+def _recheck_slices() -> int:
+    """Сколько ночных срезов: из env или дефолт (7)."""
+    try:
+        return max(1, int(os.getenv(ENV_RECHECK_SLICES) or DEFAULT_RECHECK_SLICES))
+    except (TypeError, ValueError):
+        return DEFAULT_RECHECK_SLICES
 
 
 def _has_interesting_findings(reports: List[Dict[str, Any]]) -> bool:
@@ -683,12 +746,47 @@ def _format_recheck_message(reports: List[Dict[str, Any]]) -> str:
     return "\n".join(lines)
 
 
+#: Потолок одного сообщения Telegram — 4096 символов; берём с запасом.
+TELEGRAM_MAX_CHARS = 4000
+
+
+def _split_telegram_text(text: str) -> List[str]:
+    """Разрезать текст на части по 4000 символов — по границам строк.
+
+    Строка длиннее потолка режется сама (её некуда спрятать), но такие строки
+    в отчётах не встречаются: все они — перечисления регионов.
+    """
+    parts: List[str] = []
+    current: List[str] = []
+    length = 0
+    for line in (text or "").splitlines():
+        piece = line + "\n"
+        if length + len(piece) > TELEGRAM_MAX_CHARS and current:
+            parts.append("".join(current).rstrip())
+            current = []
+            length = 0
+        while len(piece) > TELEGRAM_MAX_CHARS:
+            parts.append(piece[:TELEGRAM_MAX_CHARS])
+            piece = piece[TELEGRAM_MAX_CHARS:]
+        current.append(piece)
+        length += len(piece)
+    if current:
+        parts.append("".join(current).rstrip())
+    return parts or [""]
+
+
 def _send_telegram_html(text: str, *, log_prefix: str) -> None:
     """Send an HTML message to TELEGRAM_ALERT_CHAT_ID.
 
     Общий паттерн alert-рассылок discovery (тот же, что в
     ``tasks.celery_app._maybe_send_telegram_notifications_alert``):
     pick первого работающего бот-токена + ``TELEGRAM_ALERT_CHAT_ID``.
+
+    Длинный текст режется на части: Telegram отвергает сообщение длиннее
+    4096 символов (код 400 «message is too long»), а отчёт recheck'а при 81
+    регионе ровно такой длины. Замер 23.11: алёрт **не ушёл целиком**, владелец
+    не получил ничего, в логе осталась одна строка WARNING. Молчаливая потеря
+    отчёта — худший вид отказа.
     """
     try:
         from config.runtime import TELEGRAM_ALERT_CHAT_ID, TELEGRAM_TOKENS
@@ -708,27 +806,29 @@ def _send_telegram_html(text: str, *, log_prefix: str) -> None:
         logger.info("%s: telegram not configured, skipping alert", log_prefix)
         return
 
-    try:
-        resp = tg_http.post(
-            f"https://api.telegram.org/bot{bot_token}/sendMessage",
-            json={
-                "chat_id": TELEGRAM_ALERT_CHAT_ID,
-                "text": text,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": True,
-            },
-        )
-        if resp.status_code != 200:
-            logger.warning(
-                "%s: telegram sendMessage failed: %s %s",
-                log_prefix,
-                resp.status_code,
-                resp.text[:300],
+    for part_index, part in enumerate(_split_telegram_text(text), start=1):
+        try:
+            resp = tg_http.post(
+                f"https://api.telegram.org/bot{bot_token}/sendMessage",
+                json={
+                    "chat_id": TELEGRAM_ALERT_CHAT_ID,
+                    "text": part,
+                    "parse_mode": "HTML",
+                    "disable_web_page_preview": True,
+                },
             )
-        else:
-            logger.info("%s: telegram alert sent", log_prefix)
-    except Exception as e:  # pragma: no cover
-        logger.warning("%s: telegram send error: %s", log_prefix, e)
+            if resp.status_code != 200:
+                logger.warning(
+                    "%s: telegram sendMessage failed (часть %d): %s %s",
+                    log_prefix,
+                    part_index,
+                    resp.status_code,
+                    resp.text[:300],
+                )
+            else:
+                logger.info("%s: telegram alert sent (часть %d)", log_prefix, part_index)
+        except Exception as e:  # pragma: no cover
+            logger.warning("%s: telegram send error (часть %d): %s", log_prefix, part_index, e)
 
 
 def _maybe_send_recheck_telegram_alert(reports: List[Dict[str, Any]]) -> None:
@@ -1148,8 +1248,13 @@ try:
         time_limit=3 * 3600,
     )
     def recheck_all_active_regions():
-        """Celery beat task: weekly recheck по всем активным регионам."""
-        return _run_coro(recheck_all_active_regions_async())
+        """Celery beat task: ночной срез обхода активных регионов.
+
+        Каждый регион попадает в срез раз в 7 дней (номер среза — по календарному
+        дню), поэтому недельный охват сети сохраняется, а за ночь воркер
+        занимается ~1/7 регионов.
+        """
+        return _run_coro(recheck_all_active_regions_async(slices=_recheck_slices()))
 
     @_celery_app.task(name="tasks.discovery_tasks.discover_rolling_one_region")
     def discover_rolling_one_region():
