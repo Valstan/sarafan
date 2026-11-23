@@ -2066,10 +2066,32 @@ def _chat_leased(accounts: List[MinimaxAccount], **kwargs: Any) -> Dict[str, Any
         if current is not None:
             # ── 1. Работаем на текущем аккаунте ──
             if not _ensure_points(current):
-                last_reason = "accounts_exhausted"
-                last_detail = "у аккаунта %s сегодня нет очков" % current.name
-                current = None
-            else:
+                # «Панель не прочиталась» — это НЕ «очков нет».
+                #
+                # Живая проверка 23.11: при протухшем access-токене вендор
+                # отвечает на панель 401, а движок делал вывод «очков нет» и
+                # брал следующий аккаунт — пул выедался. Сначала продлеваем
+                # вход ТОГО ЖЕ аккаунта (ручка renew у Кармана); и только
+                # если панель всё равно не читается — считаем, что очков нет.
+                name = current.name
+                panel_unknown = current.panel is None
+                if panel_unknown and renew_account_token(current):
+                    # Панель после продления читаем заново: прежняя кэш-
+                    # строка могла остаться от протухшего токена.
+                    current.panel = None
+                    if not _ensure_points(current):
+                        current = None
+                else:
+                    current = None
+                if current is None:
+                    last_reason = "accounts_exhausted"
+                    last_detail = (
+                        "панель аккаунта %s не читается, вход не продлился" % name
+                        if panel_unknown
+                        else "у аккаунта %s сегодня нет очков" % name
+                    )
+            # Вход продлился и панель прочиталась — работаем на нём же.
+            if current is not None:
                 # Активация в журнале Кармана — раз в сутки на аккаунт: иначе
                 # его статистика видела бы нас только в тот день, когда мы его
                 # взяли, а не в те дни, когда мы в нём работали.
