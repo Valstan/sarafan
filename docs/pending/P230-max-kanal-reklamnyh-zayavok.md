@@ -330,3 +330,7 @@ ssh sarafan 'sudo -n chmod 600 /etc/setka/setka.env'
 - [P229](P229-radar-video-reposty-mimo-relay.md) — видео-репосты радара через
   relay (соседняя правка отправки).
 - План пилота #386 — `brain_matrica/docs/plans/profident-zhitelya.md` (read-only).
+
+## Состояние на 23.11.2026 (перенесено из индекса при ротации)
+
+**канал включён 20.11** (подписка, чат выучен, TLS починен); осталась приёмка тапом

@@ -284,3 +284,7 @@ beat-расписания** (`tasks/celery_app.py`), а не оценка «ча
 - [P207](P207-utrenniy-vsplesk-voln-upiraetsya-v-odin-slot-vorkera.md) — волны и
   движок (там же замер по темам);
 - [docs/adr/0013-predohranitel-dvizhka-i-byudzhet-puti-publikacii.md](../adr/0013-predohranitel-dvizhka-i-byudzhet-puti-publikacii.md).
+
+## Состояние на 23.11.2026 (перенесено из индекса при ротации)
+
+320 мин/сутки на все 51 задачу (замер по логу завышал); новый кандидат check_telegram_bot_identity 33.8 мин/сут; classify_pending_posts 89 мин/сут — самый дорогой; за владельцем: RAM для второго слота ИЛИ баланс DeepSeek
