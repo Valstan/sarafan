@@ -81,6 +81,9 @@ MARK_RENEWED_TAIL = "продлён"
 MARK_RENEW_FAILED = "Карман не продлил аккаунт"
 MARK_NEW_ACCOUNT = "Карман выбрал аккаунт"
 MARK_ROTATED = "больше не работает"
+#: Панель не прочиталась — на протухшем access-токене вендор отвечает 401.
+#: Это **след** того, что токен истёк, даже если продление не вызывалось.
+MARK_PANEL_UNAVAILABLE = "недоступна"
 
 #: Начало строки лога Celery: ``[2026-11-23 10:12:00,006: …]``.
 LOG_TS_RE = re.compile(r"^\[(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}),(\d{3})")
@@ -267,6 +270,7 @@ def scan_worker_log(paths: Iterable[Path], since: float) -> Dict[str, Any]:
     renew_failed: List[float] = []
     new_accounts: List[float] = []
     rotated: List[float] = []
+    panel_unavailable: List[float] = []
     samples: List[str] = []
 
     for path in paths:
@@ -287,7 +291,14 @@ def scan_worker_log(paths: Iterable[Path], since: float) -> Dict[str, Any]:
                     new_accounts.append(stamp)
                 elif MARK_ROTATED in line:
                     rotated.append(stamp)
-                if MARK_RENEWED in line or MARK_RENEW_FAILED in line or MARK_NEW_ACCOUNT in line:
+                elif MARK_PANEL_UNAVAILABLE in line:
+                    panel_unavailable.append(stamp)
+                if (
+                    MARK_RENEWED in line
+                    or MARK_RENEW_FAILED in line
+                    or MARK_NEW_ACCOUNT in line
+                    or MARK_PANEL_UNAVAILABLE in line
+                ):
                     samples.append(line.strip()[:220])
                     # Держим **последние** образцы: первые 40 строк окна давно
                     # неинтересны — смотреть надо на свежие.
@@ -299,8 +310,10 @@ def scan_worker_log(paths: Iterable[Path], since: float) -> Dict[str, Any]:
         "renew_failed": len(renew_failed),
         "new_accounts": len(new_accounts),
         "rotated": len(rotated),
+        "panel_unavailable": len(panel_unavailable),
         "last_renewed_at": max(renewed) if renewed else 0.0,
         "last_new_account_at": max(new_accounts) if new_accounts else 0.0,
+        "last_panel_unavailable_at": max(panel_unavailable) if panel_unavailable else 0.0,
         "samples": samples,
     }
 
@@ -480,6 +493,11 @@ def _print(data: Dict[str, Any]) -> None:
         "  аренда: сутки %s, активация %s"
         % (account["leased_day"] or "—", account["activation_day"] or "—")
     )
+    if account["updated_at_ms"]:
+        print(
+            "  рабочая область переведена на этот аккаунт: %s МСК"
+            % _fmt_moment(account["updated_at_ms"] / 1000)
+        )
     print("  мёртвых аккаунтов в exclude: %d" % len(account["dead_account_ids"]))
 
     print("=== ВХОД (access-токен) ===")
@@ -506,9 +524,15 @@ def _print(data: Dict[str, Any]) -> None:
     print("  продлений входа: %d" % log["renewed"])
     print("  отказов продления: %d" % log["renew_failed"])
     print("  новых выдач аккаунтов: %d" % log["new_accounts"])
+    print("  панель не прочиталась (след протухшего токена): %d" % log["panel_unavailable"])
     print(
-        "  после истечения токена: продлений %d, отказов %d, новых выдач %d"
-        % (after["renewed"], after["renew_failed"], after["new_accounts"])
+        "  после истечения токена: продлений %d, отказов %d, новых выдач %d, панель-401 %d"
+        % (
+            after["renewed"],
+            after["renew_failed"],
+            after["new_accounts"],
+            after["panel_unavailable"],
+        )
     )
     for line in log["samples"][-10:]:
         print("  · %s" % line)

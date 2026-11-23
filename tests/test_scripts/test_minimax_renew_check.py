@@ -178,6 +178,20 @@ class TestScanWorkerLog:
         assert scan["rotated"] == 1
         assert scan["samples"]
 
+    def test_panel_unavailable_is_counted(self, tmp_path: Path) -> None:
+        """Панель-401 — след протухшего токена, даже если продление не вызывалось."""
+        log = tmp_path / "celery-worker.log"
+        lines = [
+            "[2026-11-23 11:24:00,000: WARNING] minimax: панель аккаунта work недоступна (401)",
+            "[2026-11-23 11:25:00,000: INFO] minimax: Карман выбрал аккаунт 3 — свободен",
+        ]
+        _write(log, "\n".join(lines) + "\n")
+        scan = check.scan_worker_log([log], NOW - 3600)
+        assert scan["panel_unavailable"] == 1
+        assert scan["new_accounts"] == 1
+        assert scan["renewed"] == 0
+        assert scan["renew_failed"] == 0
+
     def test_samples_keep_the_newest(self, tmp_path: Path) -> None:
         """Образцы — последние в окне, а не первые: смотреть надо на свежие."""
         log = tmp_path / "celery-worker.log"
