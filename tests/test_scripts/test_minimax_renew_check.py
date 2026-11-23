@@ -230,6 +230,43 @@ class TestVerdict:
         result = check.verdict(calls_after_expiry=5, renewed=0, renew_failed=0, new_accounts=0)
         assert result["code"] == "no_trace"
 
+    def test_live_token_with_renewal_is_success_without_calls(self) -> None:
+        """Живой случай 23.11 17:02: вход продлён, срок уехал в будущее.
+
+        Вызовов «после истечения» нет и быть не может — истечение в будущем.
+        Раньше прибор на этом отвечал «не проверено», то есть не видел собственный
+        успех. Теперь продление при живом токене — доказательство само по себе.
+        """
+        result = check.verdict(
+            calls_after_expiry=0,
+            renewed=1,
+            renew_failed=0,
+            new_accounts=0,
+            token_valid=True,
+        )
+        assert result["code"] == "renewed"
+
+    def test_live_token_with_renewal_and_rotation(self) -> None:
+        result = check.verdict(
+            calls_after_expiry=0,
+            renewed=1,
+            renew_failed=0,
+            new_accounts=1,
+            token_valid=True,
+        )
+        assert result["code"] == "renewed_with_rotation"
+
+    def test_renewal_without_live_token_is_not_success(self) -> None:
+        """Продление было, но токен всё равно истёк — успехом это не назовём."""
+        result = check.verdict(
+            calls_after_expiry=5,
+            renewed=1,
+            renew_failed=0,
+            new_accounts=0,
+            token_valid=False,
+        )
+        assert result["code"] == "renewed"
+
 
 class TestCollect:
     def _logs(self, app: Path, worker_lines: List[str], usage_rows: List[Dict[str, Any]]) -> None:
@@ -313,3 +350,48 @@ class TestCollect:
         )
         assert data["verdict"]["code"] == "renew_rejected"
         assert data["log_after_expiry"]["new_accounts"] == 1
+
+    def test_renewal_while_token_alive_is_detected(self, tmp_path: Path) -> None:
+        """Живой случай 23.11: вход продлён, срок токена уехал в будущее.
+
+        Прибор обязан назвать это успехом, а не «не проверено»: после продления
+        вызовов «после истечения» нет по определению.
+        """
+        tree = _tree(tmp_path, expires_at=NOW + 12 * 3600)
+        self._logs(
+            tree["app"],
+            [
+                "[2026-11-23 11:58:00,000: INFO] minimax: вход аккаунта 197 продлён",
+            ],
+            [{"ts": _iso(NOW - 120), "ok": True, "reason": ""}],
+        )
+        data = check.collect(
+            accounts_dir=tree["accounts"],
+            work_area="work",
+            app_root=tree["app"],
+            window_hours=24,
+            now=NOW,
+        )
+        assert data["token_valid"] is True
+        assert data["verdict"]["code"] == "renewed"
+        assert data["renew_event_at"] > 0
+
+    def test_new_account_after_renewal_is_reported(self, tmp_path: Path) -> None:
+        """Продление сработало, но аккаунт всё равно взяли — это другой вердикт."""
+        tree = _tree(tmp_path, expires_at=NOW + 12 * 3600)
+        self._logs(
+            tree["app"],
+            [
+                "[2026-11-23 11:58:00,000: INFO] minimax: вход аккаунта 197 продлён",
+                "[2026-11-23 12:05:00,000: INFO] minimax: Карман выбрал аккаунт 198 — свободен",
+            ],
+            [{"ts": _iso(NOW - 120), "ok": True, "reason": ""}],
+        )
+        data = check.collect(
+            accounts_dir=tree["accounts"],
+            work_area="work",
+            app_root=tree["app"],
+            window_hours=24,
+            now=NOW,
+        )
+        assert data["verdict"]["code"] == "renewed_with_rotation"

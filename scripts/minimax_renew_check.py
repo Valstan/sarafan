@@ -312,6 +312,7 @@ def scan_worker_log(paths: Iterable[Path], since: float) -> Dict[str, Any]:
         "rotated": len(rotated),
         "panel_unavailable": len(panel_unavailable),
         "last_renewed_at": max(renewed) if renewed else 0.0,
+        "last_renew_failed_at": max(renew_failed) if renew_failed else 0.0,
         "last_new_account_at": max(new_accounts) if new_accounts else 0.0,
         "last_panel_unavailable_at": max(panel_unavailable) if panel_unavailable else 0.0,
         "samples": samples,
@@ -338,24 +339,39 @@ def verdict(
     renewed: int,
     renew_failed: int,
     new_accounts: int,
+    token_valid: bool = False,
 ) -> Dict[str, str]:
     """Вердикт проверки: что с продлением входа.
 
-    Порядок важнее формулировок: **нет вызовов после истечения** — значит
-    проверить было нечего (вердикт «не проверено»), и никакие следы
-    продления в этом случае не считаются ни успехом, ни провалом.
+    **Продление — доказательство само по себе.** Раньше ветка «продление сработало»
+    стояла ПОСЛЕ проверки «были ли вызовы после истечения токена», и потому
+    успешное продление опознать было нечем: после продления срок токена уезжает
+    **в будущее**, вызовов после него ещё нет — и вердикт всегда выходил
+    «не проверено», даже когда продление только что сработало (живой случай
+    23.11 17:02: вход аккаунта 3 продлён до 24.11 05:02, а прибор сказал «не
+    проверено»).
+
+    Поэтому: если в журнале есть **продление** и токен после него **жив**
+    (``token_valid``) — это и есть успех, и порядок проверок меняется.
+
+    ``token_valid`` — «срок токена сейчас в будущем», то есть продление держит.
     """
-    if calls_after_expiry <= 0:
+    if renewed > 0 and token_valid:
+        if new_accounts == 0:
+            return {
+                "code": "renewed",
+                "text": "продление сработало: вход продлён, новый аккаунт не брали",
+            }
         return {
-            "code": "not_checked",
-            "text": "не проверено: после истечения токена вызовов ещё не было",
-        }
-    if renewed > 0 and new_accounts == 0:
-        return {
-            "code": "renewed",
-            "text": "продление сработало: вход продлён, новый аккаунт не брали",
+            "code": "renewed_with_rotation",
+            "text": "продление сработало, но новый аккаунт всё равно брали",
         }
     if renewed > 0:
+        if new_accounts == 0:
+            return {
+                "code": "renewed",
+                "text": "продление сработало: вход продлён, новый аккаунт не брали",
+            }
         return {
             "code": "renewed_with_rotation",
             "text": "продление сработало, но новый аккаунт всё равно брали",
@@ -364,6 +380,11 @@ def verdict(
         return {
             "code": "renew_rejected",
             "text": "Карман отклонил продление (обычно 409) — движок взял другой аккаунт",
+        }
+    if calls_after_expiry <= 0:
+        return {
+            "code": "not_checked",
+            "text": "не проверено: после истечения токена вызовов ещё не было",
         }
     if new_accounts > 0:
         return {
@@ -405,21 +426,42 @@ def collect(
     usage = read_usage(usage_log, since)
     calls_after = usage_calls_after(usage_log, expires_at)
 
-    log_scan = scan_worker_log(worker_log_paths(app_root), since)
+    log_paths = worker_log_paths(app_root)
+    log_scan = scan_worker_log(log_paths, since)
     # Новые выдачи считаем и после истечения токена: именно они показывают,
     # что движок ушёл на другой аккаунт вместо продления.
-    after_log = scan_worker_log(worker_log_paths(app_root), expires_at)
+    after_log = scan_worker_log(log_paths, expires_at)
     # Каждое из этих событий (продление, отказ продления, уход на другой
     # аккаунт) случилось **в ответ на вызов** — значит, вызов после истечения
     # точно был, даже если журнал расхода недоступен.
     proof_of_calls = after_log["renewed"] + after_log["renew_failed"] + after_log["rotated"]
     calls_after = max(calls_after, proof_of_calls)
 
+    # **Продление держится ДО истечения.** После успешного продления срок токена
+    # уезжает в будущее, поэтому искать продление «после срока» бессмысленно —
+    # там пусто, и прибор вечно отвечал «не проверено» (живой случай 23.11 17:02).
+    # Поэтому при живом токене смотрим окно, а «новый аккаунт» считаем от
+    # последнего события продления: взяли аккаунт после продления — значит
+    # продление не удержало.
+    token_valid = expires_at > now_ts
+    if token_valid and log_scan["renewed"] > 0:
+        renewed = 1
+        renew_failed = 1 if log_scan["last_renew_failed_at"] > log_scan["last_renewed_at"] else 0
+        after_renewal = scan_worker_log(log_paths, log_scan["last_renewed_at"])
+        new_accounts = after_renewal["new_accounts"]
+        renew_event_at = log_scan["last_renewed_at"]
+    else:
+        renewed = after_log["renewed"]
+        renew_failed = after_log["renew_failed"]
+        new_accounts = after_log["new_accounts"]
+        renew_event_at = log_scan["last_renewed_at"]
+
     result = verdict(
         calls_after_expiry=calls_after,
-        renewed=after_log["renewed"],
-        renew_failed=after_log["renew_failed"],
-        new_accounts=after_log["new_accounts"],
+        renewed=renewed,
+        renew_failed=renew_failed,
+        new_accounts=new_accounts,
+        token_valid=token_valid,
     )
 
     return {
@@ -435,6 +477,8 @@ def collect(
         "log": log_scan,
         "log_after_expiry": after_log,
         "calls_after_expiry": calls_after,
+        "token_valid": token_valid,
+        "renew_event_at": renew_event_at,
         "verdict": result,
     }
 
@@ -525,6 +569,14 @@ def _print(data: Dict[str, Any]) -> None:
     print("  отказов продления: %d" % log["renew_failed"])
     print("  новых выдач аккаунтов: %d" % log["new_accounts"])
     print("  панель не прочиталась (след протухшего токена): %d" % log["panel_unavailable"])
+    if data.get("renew_event_at"):
+        print(
+            "  последнее продление: %s%s"
+            % (
+                _fmt_moment(data["renew_event_at"]),
+                " (токен после него жив)" if data.get("token_valid") else "",
+            )
+        )
     print(
         "  после истечения токена: продлений %d, отказов %d, новых выдач %d, панель-401 %d"
         % (
