@@ -48,6 +48,7 @@ import argparse
 import json
 import os
 import re
+import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -108,7 +109,7 @@ def parse_log_timestamp(line: str) -> Optional[float]:
 def read_json(path: Path) -> Dict[str, Any]:
     """JSON-файл как словарь (пустой словарь, если файла нет или он битый)."""
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
     except (OSError, ValueError):
         return {}
     return data if isinstance(data, dict) else {}
@@ -125,13 +126,24 @@ def token_state(work_root: Path) -> Dict[str, Any]:
     session = read_json(auth_dir / SESSION_STATE_NAME)
 
     expires_at_ms = 0
+    generation = 0
     for record in (store.get("records") or {}).values():
         if not isinstance(record, dict):
             continue
         try:
             expires_at_ms = max(expires_at_ms, int(record.get("expiresAtMs") or 0))
         except (TypeError, ValueError):
-            continue
+            pass
+        try:
+            generation = max(generation, int(record.get("generation") or 0))
+        except (TypeError, ValueError):
+            pass
+    if not generation:
+        # Поколение лежит в записи токен-стора; верхний уровень — запасной путь.
+        try:
+            generation = int(store.get("generation") or 0)
+        except (TypeError, ValueError):
+            generation = 0
 
     session_expires_ms = 0
     try:
@@ -144,7 +156,7 @@ def token_state(work_root: Path) -> Dict[str, Any]:
         "token_expires_at_ms": expires_at_ms,
         "session_expires_at_ms": session_expires_ms,
         "session_status": str(session.get("status") or ""),
-        "generation": int(store.get("generation") or 0) if isinstance(store, dict) else 0,
+        "generation": generation,
         "store_present": bool(store),
         "session_present": bool(session),
     }
@@ -175,7 +187,7 @@ def read_usage(path: Path, since: float) -> Dict[str, Any]:
     fail_by_reason: Counter = Counter()
     last_call_at = 0.0
     try:
-        handle = Path(path).open("r", encoding="utf-8", errors="replace")
+        handle = Path(path).open("r", encoding="utf-8-sig", errors="replace")
     except OSError:
         return {
             "exists": False,
@@ -227,7 +239,7 @@ def usage_calls_after(path: Path, expires_at: float) -> int:
         return 0
     calls = 0
     try:
-        handle = Path(path).open("r", encoding="utf-8", errors="replace")
+        handle = Path(path).open("r", encoding="utf-8-sig", errors="replace")
     except OSError:
         return 0
     with handle:
@@ -259,7 +271,7 @@ def scan_worker_log(paths: Iterable[Path], since: float) -> Dict[str, Any]:
 
     for path in paths:
         try:
-            handle = Path(path).open("r", encoding="utf-8", errors="replace")
+            handle = Path(path).open("r", encoding="utf-8-sig", errors="replace")
         except OSError:
             continue
         with handle:
@@ -417,6 +429,26 @@ def collect(
 # --- вывод -------------------------------------------------------------------
 
 
+def _configure_output() -> None:
+    """Кодировка вывода: перенаправленный stdout ждёт UTF-8, консоль — свою.
+
+    На Windows stdout, ушедший в конвейер, кодируется по локали (cp866/cp1251),
+    а читают его обычно как UTF-8 — русский текст превращается в кракозябры.
+    Консоль при этом остаётся в своей кодировке: там всё видно и так.
+    """
+    stream = sys.stdout
+    try:
+        is_tty = bool(stream.isatty())
+    except (AttributeError, ValueError):
+        is_tty = False
+    if is_tty or not hasattr(stream, "reconfigure"):
+        return
+    try:
+        stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
+
 def _fmt_moment(stamp: float) -> str:
     """Время в локальной зоне бокса (МСК) — так же, как в логе воркера."""
     if not stamp:
@@ -486,6 +518,7 @@ def _print(data: Dict[str, Any]) -> None:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    _configure_output()
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
         "--accounts-dir",

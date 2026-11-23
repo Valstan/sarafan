@@ -104,6 +104,7 @@ class TestTokenState:
         state = check.token_state(tree["work"])
         assert state["token_expires_at_ms"] == int((NOW + 3600) * 1000)
         assert state["session_status"] == "authenticated"
+        assert state["generation"] == 4
         assert state["store_present"] is True
         assert state["session_present"] is True
 
