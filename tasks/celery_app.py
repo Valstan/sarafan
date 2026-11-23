@@ -2634,14 +2634,19 @@ app.conf.beat_schedule = {
     # у темы не было ни в одном регионе). Кругозор делает krugozor-broadcast.
     # Имя темы остаётся ключом переопределений; снят только запуск. Разбор —
     # docs/pending/P180.
-    # Discovery health-recheck — еженедельно (ПН 04:00 MSK).
-    # Обходит все Region.is_active=True; для каждого Community.is_active=True
+    # Discovery health-recheck — ЕЖЕДНЕВНО в 04:00 MSK, но по срезам: за ночь
+    # проверяется 1/7 регионов (DISCOVERY_RECHECK_SLICES), так что каждый регион
+    # всё так же обходится раз в неделю, а воркер не занимается всей сетью за
+    # одну ночь. Обход всех регионов разом на MiniMax занимал бы ~2 часа
+    # (вызов через CLI ~10 с против ~1,7 с у Дипсика) и наезжал бы на утреннюю
+    # волну (ADR-0020, P233). На Дипсике тот же прогон 23.11 занял 32 минуты.
+    # Обходит Region.is_active=True; для каждого Community.is_active=True
     # делает wall.get + AI-категоризацию, обновляет health_status / last_post_at
     # / checked_at / suggested_category. По итогам — Telegram-alert (если есть
     # dead / dormant / changed_category). См. modules/discovery/health_check.py.
-    "discovery-recheck-weekly": {
+    "discovery-recheck-nightly": {
         "task": "tasks.discovery_tasks.recheck_all_active_regions",
-        "schedule": crontab(hour=4, minute=0, day_of_week="mon"),
+        "schedule": crontab(hour=4, minute=0),
         "options": {
             "expires": 3600,
             "catchup": False,

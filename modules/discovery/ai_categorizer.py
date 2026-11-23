@@ -9,15 +9,25 @@ empty answer) returns ``{success: False, error}`` and never raises. The caller
 stores ``ai_category=None`` and lets the moderator pick the category by hand in
 the UI.
 
-**Движок — DeepSeek** (мандат brain 2026-08-10, решение владельца D-024). Был
-Groq через его SDK; ключ Groq вдобавок оказался скомпрометирован и держался
-рабочим только ради двух потребителей, из которых этот — один. Перевод снимает
-и мандат, и техдолг разом: после него ключ отзывается, а не ротируется.
+**Движок — MiniMax** (переключено 23.11 по заказу владельца). Раньше здесь был
+DeepSeek: еженедельный recheck платил 2 701 вызов и 2,29 млн prompt-токенов за
+один прогон — а классификация и переписывание уже живут на бесплатном free-тире
+MiniMax. Дипсик остался **платной страховкой**: если бесплатный движок не
+ответил, категоризация всё равно выполняется (задача не должна молча перестать
+проверять сеть), и это видно в отчёте прогона — по числу вызовов на каждом
+движке.
 
-Разбор ответа остался терпимым к обёрткам (```json, текст вокруг), хотя
-DeepSeek зовётся в режиме строгого JSON: режим гарантирует синтаксис, а не то,
-что модель не добавит пояснение. Терпимость к СОДЕРЖИМОМУ по-прежнему нулевая —
-категория вне списка схлопывается в ``other``.
+⚠️ **Цена переключения — время, а не деньги.** Вызов через CLI MiniMax занимает
+~10 с против ~1,7 с у Дипсика: еженедельный прогон всех регионов разом
+растягивается с 32 минут до нескольких часов и начинает забирать воркер у
+утренней волны (ADR-0020, P233). Поэтому recheck разложен по ночам
+(``DISCOVERY_RECHECK_SLICES``): каждый регион всё так же проверяется раз в
+неделю, но сеть не проверяется вся за одну ночь.
+
+Разбор ответа остался терпимым к обёрткам (```json, текст вокруг): MiniMax Code
+не умеет строгий JSON-схемой, поэтому JSON ловится из текста. Терпимость к
+СОДЕРЖИМОМУ по-прежнему нулевая — категория вне списка схлопывается в
+``other``.
 """
 
 from __future__ import annotations
@@ -25,12 +35,23 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from typing import Any, Dict, Iterable, List, Optional
 
+#: Импорт на уровне модуля — не только для красоты: тесты подменяют именно
+#: ``ai_categorizer.chat`` (точка подмены одна и общая для обоих движков).
 from modules.deepseek_client import chat
 
 logger = logging.getLogger(__name__)
+
+#: Движок категоризации: ``minimax`` (бесплатный free-тир, по умолчанию) или
+#: ``deepseek`` (платный). Переопределяется переменной окружения.
+ENV_ENGINE = "DISCOVERY_ENGINE"
+DEFAULT_ENGINE = "minimax"
+#: Платный фолбэк на Дипсик, если бесплатный движок не ответил.
+ENV_PAID_FALLBACK = "DISCOVERY_PAID_FALLBACK"
+DEFAULT_PAID_FALLBACK = "1"
 
 _TEMPERATURE = 0.2  # категоризация — задача с одним «правильным» ответом
 _MAX_TOKENS = 300
@@ -156,6 +177,46 @@ def _normalise(parsed: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _engine_name() -> str:
+    """Какой движок звать: ``minimax`` (по умолчанию) или ``deepseek``."""
+    name = (os.getenv(ENV_ENGINE) or DEFAULT_ENGINE).strip().lower()
+    return name or DEFAULT_ENGINE
+
+
+def _paid_fallback_enabled() -> bool:
+    """Разрешён ли платный фолбэк на Дипсик, если бесплатный движок не ответил."""
+    raw = (os.getenv(ENV_PAID_FALLBACK) or DEFAULT_PAID_FALLBACK).strip().lower()
+    return raw not in ("0", "false", "no", "off")
+
+
+def _call_minimax(prompt: str) -> Dict[str, Any]:
+    """Вызов MiniMax Code (free-тир). Контракт тот же, что у Дипсика."""
+    from modules.minimax_engine import chat as _minimax_chat
+
+    # ``label`` задаёт и метку в журнале расхода, и текст задания для CLI
+    # (у discovery он свой — см. ``TASK_BY_LABEL`` в minimax_engine).
+    return _minimax_chat(user=prompt, label="discovery")
+
+
+def _call_deepseek(prompt: str) -> Dict[str, Any]:
+    """Вызов платного Дипсика (страховка и режим ``DISCOVERY_ENGINE=deepseek``)."""
+    return chat(
+        user=prompt,
+        temperature=_TEMPERATURE,
+        max_tokens=_MAX_TOKENS,
+        json_object=True,
+        label="discovery",
+    )
+
+
+def _call_engine(engine: str, prompt: str) -> Dict[str, Any]:
+    if engine == "minimax":
+        return _call_minimax(prompt)
+    if engine == "deepseek":
+        return _call_deepseek(prompt)
+    raise RuntimeError("неизвестный движок категоризации: %s" % engine)
+
+
 async def categorize_candidate(
     *,
     name: str,
@@ -164,11 +225,11 @@ async def categorize_candidate(
     recent_posts: Optional[List[str]] = None,
     region_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Run DeepSeek categorisation. Always returns a dict — never raises.
+    """Categorise via the configured engine. Always returns a dict — never raises.
 
     Success: ``{success: True, category, confidence, is_info_page, reasoning,
-              model}``.
-    Failure: ``{success: False, error}``.
+              model, engine}``.
+    Failure: ``{success: False, error, engine}``.
     """
     if not (name or "").strip():
         return {"success": False, "error": "name is empty"}
@@ -181,21 +242,34 @@ async def categorize_candidate(
         region_name=region_name,
     )
 
-    # Клиент синхронный (urllib) — уводим в поток, чтобы не блокировать event loop.
-    result = await asyncio.to_thread(
-        chat,
-        user=prompt,
-        temperature=_TEMPERATURE,
-        max_tokens=_MAX_TOKENS,
-        json_object=True,
-        label="discovery",
-    )
+    engine = _engine_name()
+    # Движки синхронные (urllib / CLI) — уводим в поток, чтобы не блокировать
+    # event loop.
+    try:
+        result = await asyncio.to_thread(_call_engine, engine, prompt)
+    except RuntimeError as exc:
+        return {"success": False, "error": str(exc), "engine": engine}
+
+    if not result.get("ok") and engine != "deepseek" and _paid_fallback_enabled():
+        reason = str(result.get("reason") or "unknown")
+        detail = str(result.get("detail") or "")[:160]
+        logger.warning(
+            "discovery: %s не ответил (%s%s) — закрываем платным Дипсиком",
+            engine,
+            reason,
+            (" %s" % detail) if detail else "",
+        )
+        result = await asyncio.to_thread(_call_engine, "deepseek", prompt)
+        engine = "deepseek"
+
     if not result.get("ok"):
         reason = str(result.get("reason") or "unknown")
         detail = result.get("detail")
-        logger.warning("DeepSeek categorize failed: %s%s", reason, f" ({detail})" if detail else "")
+        logger.warning(
+            "%s categorize failed: %s%s", engine, reason, f" ({detail})" if detail else ""
+        )
         error = "DEEPSEEK_API_KEY is not configured" if reason == "no_api_key" else reason
-        return {"success": False, "error": error}
+        return {"success": False, "error": error, "engine": engine}
 
     content = str(result.get("content") or "")
     parsed = _parse_response(content)
@@ -204,10 +278,12 @@ async def categorize_candidate(
             "success": False,
             "error": "AI response is not valid JSON",
             "raw": content[:300],
+            "engine": engine,
         }
 
     out = _normalise(parsed)
     out["success"] = True
+    out["engine"] = engine
     # Имя модели — фактическое из ответа клиента, а не константа модуля: оно
     # ложится в БД рядом с вердиктом, и «какой моделью размечено» должно быть
     # правдой, даже если DEEPSEEK_MODEL переопределён через env.
@@ -224,18 +300,29 @@ def usage_tokens(result: Dict[str, Any]) -> tuple[Optional[int], Optional[int]]:
     Иначе сумма расхода по прогону тихо занижается, и решение «включать ли
     авто-подбор» принимается по неверной цене (P001).
 
+    Имена полей у движков разные: Дипсик — ``prompt_tokens``/``completion_tokens``,
+    MiniMax Code — ``inputTokens``/``outputTokens``. Здесь берётся любое из
+    известных начертаний: «движок сменился» не должно обнулять учёт расхода.
+
     Отдельной функцией потому, что ``usage`` кладёт в результат клиент, а
     разбирают его два независимых потребителя (отбор кандидатов и recheck).
     """
     usage = result.get("usage")
     if not isinstance(usage, dict):
         return None, None
-    return _usage_int(usage, "prompt_tokens"), _usage_int(usage, "completion_tokens")
+    return (
+        _usage_int(usage, "prompt_tokens", "inputTokens"),
+        _usage_int(usage, "completion_tokens", "outputTokens"),
+    )
 
 
-def _usage_int(usage: Dict[str, Any], field: str) -> Optional[int]:
-    value = usage.get(field)
-    return int(value) if isinstance(value, (int, float)) else None
+def _usage_int(usage: Dict[str, Any], *names: str) -> Optional[int]:
+    """Первое из известных начертаний поля, которое есть и число."""
+    for name in names:
+        value = usage.get(name)
+        if isinstance(value, (int, float)):
+            return int(value)
+    return None
 
 
 def sum_ai_tokens(results: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
