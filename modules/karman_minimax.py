@@ -209,6 +209,12 @@ def _call(
         return 0, {"error": ("%s: %s" % (type(exc).__name__, exc))[:300]}
 
 
+#: Журнальный проект комнаты. Он же **владелец** аккаунтов в пуле Кармана:
+#: ручка ``renew`` продлевает аккаунт только той комнате, чей журнальный
+#: проект совпал с проектом выдачи (иначе 409). По умолчанию — имя комнаты.
+ROOM_PROJECT = "SARAFAN"
+
+
 def consumer_headers() -> Dict[str, str]:
     """Разметка потребителя для аудита Кармана.
 
@@ -225,7 +231,7 @@ def consumer_headers() -> Dict[str, str]:
     отклонялось бы с 409 («аккаунт за другой комнатой») — и движок не смог бы
     починить вход, не взяв новый аккаунт.
     """
-    project = (os.getenv("MINIMAX_PROJECT") or "SARAFAN").strip() or "SARAFAN"
+    project = (os.getenv("MINIMAX_PROJECT") or ROOM_PROJECT).strip() or ROOM_PROJECT
     area = (os.getenv("MINIMAX_AREA") or os.getenv("MINIMAX_WORK_AREA") or "work").strip() or "work"
     return {"X-MiniMax-Project": project, "X-MiniMax-Area": area}
 

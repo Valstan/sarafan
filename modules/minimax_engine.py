@@ -906,6 +906,31 @@ def renew_account_token(account: MinimaxAccount) -> bool:
     return True
 
 
+def _log_journal_project(area_name: str) -> None:
+    """Написать в лог фактический журнальный проект, под которым берём аккаунты.
+
+    Значение приходит из ``MINIMAX_PROJECT`` (по умолчанию — имя комнаты).
+    Переопределение переменной — не ошибка само по себе, но если оно разошлось
+    с именем комнаты, продление входа будет отклоняться с 409, и узнать об
+    этом можно только здесь.
+    """
+    headers = karman_minimax.consumer_headers()
+    project = str(headers.get("X-MiniMax-Project") or "?")
+    expected = (karman_minimax.ROOM_PROJECT or "").strip()
+    if expected and project != expected:
+        logger.warning(
+            "minimax: журнальный проект %s не совпадает с проектом комнаты %s — "
+            "продление входа может отклоняться (409)",
+            project,
+            expected,
+        )
+    logger.info(
+        "minimax: аренда у Кармана под журнальным проектом %s (область %s)",
+        project,
+        area_name,
+    )
+
+
 def materialize_leased_profile(
     account_id: Any, offer: Any, accounts_dir: Optional[str] = None
 ) -> Optional[MinimaxAccount]:
@@ -992,6 +1017,12 @@ def materialize_leased_profile(
             "но продлить его автоматически нечем"
         )
     logger.info("minimax: рабочая область %s переведена на новый аккаунт", root.name)
+    # Журнальный проект, под которым мы берём аккаунт, — это **владелец**
+    # аккаунта для Кармана: ручка ``renew`` продлевает аккаунт только той
+    # комнате, чей проект совпал с проектом выдачи, и отказ приходит молча
+    # (409). Поэтому фактическое значение заголовка пишем в лог — иначе
+    # «продление не сработало» нечем диагностировать, кроме чтения env.
+    _log_journal_project(root.name)
     # Данные аккаунта — из выдачи Кармана: они нужны журналу активаций
     # (клетка серии, почта, id) и не должны теряться при переезде токена.
     offered = getattr(offer, "account", None) or {}
