@@ -299,3 +299,7 @@ probe_digest_attachments.py` — сколько фото реально ушло
 - `modules/ad_cabinet/vk_photo_upload.py` — готовый загрузчик (для ЛС; для стены
   понадобился свой `photos.getWallUploadServer`).
 - `modules/publisher/bulletin_builder.py` — как медиа прикрепляются в обычной ленте.
+
+## Состояние на 23.11.2026 (перенесено из индекса при ротации)
+
+09.11: троттлинг ВК вскрыт пробой (три лица отказа, лечит пауза 70 с), починка PR #1045; осталось — приёмка глазами (размер и заметность знака), kill-switch DAILY_DIGEST_PHOTOS=0
