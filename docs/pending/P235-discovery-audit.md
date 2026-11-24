@@ -311,6 +311,21 @@ discovery на MiniMax», 24.11 выяснилось, что он ни разу 
 а не про путь: `engines.minimax > 0` в отчёте, `tokens_measured: True`, ноль строк
 `system.md is empty`. Строка в TICKLER на 25.11.
 
+**Чем проверять дальше.** Проба пути стала инструментом:
+[`scripts/minimax_discovery_probe.py`](../../scripts/minimax_discovery_probe.py) —
+тот же путь, что и ночной срез, на синтетической карточке, без БД и без VK.
+Проверен на проде 24.11: `success: true`, `engine: minimax`, `admin`/93, токены
+14 780/159. Запуск:
+
+```bash
+ssh sarafan "sudo bash -c 'set -a; . /etc/setka/setka.env; . /etc/setka/secrets-token.env; set +a;
+  cd /home/valstan/SETKA && ./venv/bin/python scripts/minimax_discovery_probe.py'"
+```
+
+Пла́тная страховка Дипсика в пробе **выключена** намеренно: отказ MiniMax должен
+быть виден, а не замаскирован платным вызовом — именно так 24.11 откат на
+Дипсик остался незамеченным.
+
 ## Что осталось за владельцем
 
 1. **964 сообщества (29 % сети) числятся как «сменившие категорию»** — разбор сделан
