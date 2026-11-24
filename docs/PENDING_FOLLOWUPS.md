@@ -100,6 +100,7 @@
 
 ## 🟡 Техдолги
 
+- **P237** [🟡 Татарстан, 14-я порция: Бавлинский + Дрожжановский + Тукаевский — область закрыта 43/43; хвост за владельцем: COMM-ключи трёх групп и оформление](pending/P237-tatarstan-14-ya-porciya-bavlinskiy-drozhzhanovskiy-tukayevskiy.md) · `⏱ 2026-11-24 · snooze 0 · fresh`
 - **P236** [🟡 Дубли доноров между регионами: 71 VK-группа заведена в нескольких районах (116 лишних регистраций; 35 — закамский клон-пул)](pending/P236-dubl-donorov-mezhdu-regionami.md) · `⏱ 2026-11-23 · snooze 0 · fresh`
 - **P226** [🟡 Полный прогон падает в двух проверках `test_token_policy.py` — порядок кандидатов плавает (найдено 2026-11-11)](pending/P226-testy-ne-germetichny-poryadok-kandidatov.md) · `⏱ 2026-11-11 · snooze 0 · fresh`
 - **P224** [🟡 Расход DeepSeek: единица экономии — длина префикса (10,3K/вызов; 3 931/пост) → сжатие базы + мост к локальному движку (решение владельца 10.11: сначала правилник, потом мост)](pending/P224-rashod-deepseek-edinica-ekonomii-i-most-lokalnomu-dvizhku.md) · `⏱ 2026-11-10 · snooze 0 · fresh`
