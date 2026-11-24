@@ -34,6 +34,7 @@ headless- и браузерный пути не разошлись.
 
 from __future__ import annotations
 
+import asyncio
 import re
 from collections import Counter, defaultdict
 from typing import Any, Dict, Iterable, List, Optional, Sequence
@@ -400,6 +401,98 @@ async def collect_candidates(
         "slotted_themes": list(SLOTTED_THEMES),
         "no_slot_themes": list(NO_SLOT_THEMES),
     }
+
+
+async def fetch_vk_info(vk_ids: Sequence[int], main_group_ids: Sequence[int]) -> Dict[str, Any]:
+    """Города и описания групп из VK (``groups.getById fields=city,description``).
+
+    Без VK разбор не падает: часть правил просто не срабатывает, и решение
+    уходит человеку.
+    """
+    cities: Dict[int, str] = {}
+    descriptions: Dict[int, str] = {}
+    error = ""
+    if not vk_ids and not main_group_ids:
+        return {"cities": cities, "descriptions": descriptions, "error": "нет групп для опроса"}
+    try:
+        from database.connection import AsyncSessionLocal
+        from modules.vk_monitor.vk_client import VKClient
+        from modules.vk_token_router import pick_healthy_read_token
+
+        async with AsyncSessionLocal() as session:
+            candidate = await pick_healthy_read_token(session)
+        token = getattr(candidate, "token", None) if candidate else None
+        if not token:
+            from config.runtime import VK_TOKENS
+
+            token = next(iter(VK_TOKENS.values()), None)
+        if not token:
+            return {"cities": cities, "descriptions": descriptions, "error": "нет VK-токена"}
+
+        client = VKClient(token=token)
+
+        def _read(infos: List[Any]) -> None:
+            for info in infos or []:
+                city = (info or {}).get("city") or {}
+                gid = abs(int((info or {}).get("id") or 0))
+                if city.get("title"):
+                    cities[gid] = str(city.get("title"))
+                if (info or {}).get("description"):
+                    descriptions[gid] = str((info or {}).get("description"))
+
+        if main_group_ids:
+            _read(
+                await asyncio.to_thread(
+                    client.get_groups_by_ids, list(main_group_ids), fields="city"
+                )
+            )
+        if vk_ids:
+            _read(
+                await asyncio.to_thread(
+                    client.get_groups_by_ids, list(vk_ids), fields="city,description"
+                )
+            )
+    except Exception as exc:  # noqa: BLE001 — без VK разбор не падает
+        error = "%s: %s" % (type(exc).__name__, exc)
+    return {"cities": cities, "descriptions": descriptions, "error": error}
+
+
+async def collect_with_vk(session: Any) -> Dict[str, Any]:
+    """Полный разбор: общие группы + молчащие доноры + рекомендации.
+
+    Один и тот же вход и для скрипта, и для страницы разбора.
+    """
+    from sqlalchemy import select
+
+    from database.models import Community, Region
+
+    regions = {int(r.id): r for r in (await session.execute(select(Region))).scalars().all()}
+    rows = list(
+        (await session.execute(select(Community).where(Community.is_active.is_(True))))
+        .scalars()
+        .all()
+    )
+
+    regions_by_vk: Dict[int, set] = {}
+    for row in rows:
+        regions_by_vk.setdefault(abs(int(row.vk_id or 0)), set()).add(int(row.region_id))
+    shared_vk = sorted(vk for vk, rids in regions_by_vk.items() if vk and len(rids) > 1)
+    main_ids = sorted({abs(int(r.vk_group_id)) for r in regions.values() if r.vk_group_id})
+
+    vk = await fetch_vk_info(shared_vk, main_ids)
+    region_cities = {
+        rid: vk["cities"].get(abs(int(r.vk_group_id)), "")
+        for rid, r in regions.items()
+        if getattr(r, "vk_group_id", None)
+    }
+    report = await collect_candidates(
+        session,
+        group_cities=vk["cities"],
+        region_cities=region_cities,
+        group_descriptions=vk["descriptions"],
+    )
+    report["vk_error"] = vk["error"]
+    return report
 
 
 async def apply_decisions(session: Any, decisions: Dict[str, Any]) -> Dict[str, Any]:
