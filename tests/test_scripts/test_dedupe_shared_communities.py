@@ -1,10 +1,10 @@
 """Unit-тесты для ``scripts/dedupe_shared_communities.py`` — план чистки общих групп.
 
-**Зачем.** P236: 71 группа заведена в нескольких районах (116 лишних регистраций).
-Правило «где группа своя» — area-guard (область группы против области региона), и
-оно **не должно гадать**: неизвестная область = оставить как есть. Скрипт —
-CLI-утилита вне пакета, грузим через importlib; БД и VK в тестах не трогаем —
-проверяются чистые функции.
+**Зачем.** P236: группа, заведенная в нескольких районах, кормит ленты нескольких
+районов. Правило «где группа своя» — географическое: город региона (город его
+главной группы) против города группы. Оно **не должно гадать**: неизвестный город
+= оставить как есть. Скрипт — CLI-утилита вне пакета, грузим через importlib; БД и
+VK в тестах не трогаем — проверяются чистые функции.
 """
 
 from __future__ import annotations
@@ -71,35 +71,28 @@ def test_duplicate_survivor_is_the_row_with_history():
     assert dedupe.pick_duplicate_survivor([tie_b, tie_a]) is tie_b
 
 
-def test_area_match_keeps_one_and_drops_the_rest():
-    """Область группы — «Кировская»: регистрация в Татарстане лишняя."""
-    rows = [
-        _row(id_=1, vk_id=-100, region_id=1),
-        _row(id_=2, vk_id=-100, region_id=2),
-        _row(id_=3, vk_id=-100, region_id=3),
-    ]
+def test_city_match_keeps_its_region_and_drops_the_other():
+    """Город группы совпал с городом одного региона — он и остаётся."""
+    rows = [_row(id_=1, vk_id=-100, region_id=1), _row(id_=2, vk_id=-100, region_id=2)]
     plan = dedupe.decide_shared(
         {100: rows},
-        region_areas={1: "Кировская область", 2: "Татарстан", 3: "Кировская область"},
-        group_areas={100: "Кировская область"},
+        group_cities={100: "Котельнич"},
+        region_cities={1: "Котельнич", 2: "Даровской"},
         own_region_groups={},
     )
 
     assert plan[100]["status"] == "ok"
-    # Регион 2 — другая область → лишний. Регионы 1 и 3 — своей области не
-    # различаем (область одна), оба остаются: какой из них «настоящий» —
-    # area-guard не решает.
+    assert plan[100]["keep"] == [1]
     assert plan[100]["drop"] == [2]
-    assert sorted(plan[100]["keep"]) == [1, 3]
 
 
-def test_area_mismatch_drops_the_foreign_registration():
-    """Область региона не совпала с областью группы — регистрация лишняя."""
+def test_city_mismatch_drops_the_foreign_registration():
+    """Города известны и не совпали — регистрация лишняя."""
     rows = [_row(id_=1, vk_id=-100, region_id=1), _row(id_=2, vk_id=-100, region_id=2)]
     plan = dedupe.decide_shared(
         {100: rows},
-        region_areas={1: "Кировская область", 2: "Татарстан"},
-        group_areas={100: "Кировская область"},
+        group_cities={100: "Котельнич"},
+        region_cities={1: "Котельнич", 2: "Свеча"},
         own_region_groups={},
     )
 
@@ -107,13 +100,13 @@ def test_area_mismatch_drops_the_foreign_registration():
     assert plan[100]["keep"] == [1]
 
 
-def test_unknown_area_is_not_guessed():
-    """Область неизвестна — «не знаю» ≠ «чужая»: оставляем как есть."""
+def test_unknown_city_is_not_guessed():
+    """Город неизвестен — «не знаю» ≠ «чужая»: оставляем как есть."""
     rows = [_row(id_=1, vk_id=-100, region_id=1), _row(id_=2, vk_id=-100, region_id=2)]
     plan = dedupe.decide_shared(
         {100: rows},
-        region_areas={1: None, 2: None},
-        group_areas={100: None},
+        group_cities={100: ""},
+        region_cities={1: "", 2: ""},
         own_region_groups={},
     )
 
@@ -123,16 +116,15 @@ def test_unknown_area_is_not_guessed():
 
 
 def test_group_that_is_nowhere_its_own_is_left_alone():
-    """Нет ни одной регистрации в области группы — это не «лишняя», а чужая.
+    """Своего региона не нашлось — это не «лишняя», а «нигде не своя».
 
-    Такое area-guard не разбирает (это другой класс — чужие доноры), поэтому
-    скрипт такие группы не трогает, а отдаёт в отчёт.
+    Деревня или областной центр: чистить нельзя, группа идёт на разбор.
     """
     rows = [_row(id_=1, vk_id=-100, region_id=1), _row(id_=2, vk_id=-100, region_id=2)]
     plan = dedupe.decide_shared(
         {100: rows},
-        region_areas={1: "Кировская область", 2: "Татарстан"},
-        group_areas={100: "Москва"},
+        group_cities={100: "Казань"},
+        region_cities={1: "Малмыж", 2: "Тужа"},
         own_region_groups={},
     )
 
@@ -145,10 +137,19 @@ def test_our_own_main_group_is_never_dropped():
     rows = [_row(id_=1, vk_id=-100, region_id=1), _row(id_=2, vk_id=-100, region_id=2)]
     plan = dedupe.decide_shared(
         {100: rows},
-        region_areas={1: "Кировская область", 2: "Татарстан"},
-        group_areas={100: "Татарстан"},
+        group_cities={100: "Малмыж"},
+        region_cities={1: "Малмыж", 2: "Тужа"},
         own_region_groups={1: 100},
     )
 
     assert 1 in plan[100]["keep"]
     assert 1 not in plan[100]["drop"]
+
+
+def test_city_names_are_normalized():
+    """«г. Котельнич», «Котельнич», «город Котельнич» — это один город."""
+    assert dedupe.norm_city("г. Котельнич") == "котельнич"
+    assert dedupe.norm_city("Котельнич") == "котельнич"
+    assert dedupe.norm_city("город Котельнич") == "котельнич"
+    assert dedupe.norm_city("Слободской") == "слободской"
+    assert dedupe.norm_city(None) == ""
