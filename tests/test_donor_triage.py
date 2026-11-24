@@ -103,6 +103,20 @@ def test_generic_words_do_not_pick_a_region():
     assert set(index.regions_mentioned("Малые Кабаны")) == {5}
 
 
+def test_generic_adjective_does_not_match_other_regions():
+    """«Старые Ерыклы» не должен ловить «Старое Дрожжаное» из чужого района.
+
+    Живой случай 24.11: корень «стар» тянул полтора десятка чужих деревень
+    («Старое Дрожжаное», «Старые Нары», …), и группа из одного района
+    выглядела многорайонной.
+    """
+    index = donor_triage.LocalityIndex()
+    index.add_locality(10, "Старое Дрожжаное")
+    index.add_locality(20, "Старые Ерыклы")
+    assert set(index.regions_mentioned("Старые Ерыклы")) == {20}
+    assert 10 not in index.regions_mentioned("Старые Ерыклы")
+
+
 def test_short_region_name_is_matched_exactly():
     """«Арск» — слово из четырёх букв: сравниваем точно, а не по началу."""
     index = _index()
