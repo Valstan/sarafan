@@ -227,6 +227,131 @@ def test_without_any_signal_the_decision_is_humans():
 
 
 # ---------------------------------------------------------------------------
+# район, названный в описании (живой случай 24.11)
+# ---------------------------------------------------------------------------
+
+
+def _named_reg(
+    *, row_id: int, region_id: int, region_code: str, region_name: str, posts_count: int = 0
+) -> dict[str, Any]:
+    return {
+        "row_id": row_id,
+        "region_id": region_id,
+        "region_code": region_code,
+        "region_name": region_name,
+        "posts_count": posts_count,
+        "publications": 0,
+        "created_at": "2026-10-02",
+        "is_own_main": False,
+    }
+
+
+def test_district_named_in_description_beats_ambiguous_village_in_name():
+    """Описание — официальный адрес: «Верхнеуслонского района» сильнее названия.
+
+    Живой случай: «МБДОУ Кураловский детский сад» заведён и в Спасском, и в
+    Верхнеуслонском. Название называет деревню, одинаково названную в обоих
+    районах, а описание — конкретный район. Оставлять надо Верхнеуслонский.
+    """
+    regs = [
+        _named_reg(row_id=1, region_id=10, region_code="spassky", region_name="СПАССКИЙ - ИНФО"),
+        _named_reg(
+            row_id=2, region_id=11, region_code="verhniy_uslon", region_name="ВЕРХНИЙ УСЛОН - ИНФО"
+        ),
+    ]
+    index = donor_triage.LocalityIndex()
+    index.add_region(10, "СПАССКИЙ - ИНФО")
+    index.add_locality(10, "Куралово")
+    index.add_region(11, "ВЕРХНИЙ УСЛОН - ИНФО")
+    index.add_locality(11, "Куралово")
+
+    rec = donor_triage.recommend_shared(
+        regs,
+        group_name='МБДОУ "Кураловский детский сад"',
+        group_description=(
+            "Муниципальное бюджетное дошкольное образовательное учреждение "
+            "«Кураловский детский сад» Верхнеуслонского муниципального района "
+            "Республики Татарстан. Адрес: с. Куралово, ул. Пионерская"
+        ),
+        group_city="Куралово",
+        region_cities={},
+        index=index,
+    )
+    assert rec["action"] == "keep_region"
+    assert rec["keep_region_ids"] == [11]
+    assert rec["confidence"] == "high"
+    assert rec["drop_row_ids"] == [1]
+
+
+def test_school_stays_in_the_district_named_in_its_description():
+    """Школа «Малоелгинская СОШ» — описание прямо называет Лаишевский район."""
+    regs = [
+        _named_reg(
+            row_id=1,
+            region_id=20,
+            region_code="rybnaya_sloboda",
+            region_name="РЫБНАЯ СЛОБОДА - ИНФО",
+        ),
+        _named_reg(row_id=2, region_id=21, region_code="laishevo", region_name="ЛАИШЕВО - ИНФО"),
+    ]
+    index = donor_triage.LocalityIndex()
+    index.add_region(20, "РЫБНАЯ СЛОБОДА - ИНФО")
+    index.add_region(21, "ЛАИШЕВО - ИНФО")
+
+    rec = donor_triage.recommend_shared(
+        regs,
+        group_name="МБОУ «Малоелгинская СОШ»",
+        group_description=(
+            "Муниципальное бюджетное общеобразовательное учреждение "
+            "«Малоелгинская средняя общеобразовательная школа» "
+            "Лаишевского муниципального района Республики Татарстан"
+        ),
+        group_city="Малая Елга",
+        region_cities={},
+        index=index,
+    )
+    assert rec["action"] == "keep_region"
+    assert rec["keep_region_ids"] == [21]
+
+
+def test_description_of_a_foreign_district_does_not_decide():
+    """Описание про чужой район (Казань) — не повод выбрать регион."""
+    regs = _regs(_row(id_=1, vk_id=-100, region_id=1), _row(id_=2, vk_id=-100, region_id=2))
+    rec = donor_triage.recommend_shared(
+        regs,
+        group_name="Объявления",
+        group_description="Республика Татарстан, г. Казань",
+        group_city="Казань",
+        region_cities={},
+        index=_index(),
+    )
+    assert rec["action"] == "decide"
+
+
+def test_locality_in_description_keeps_that_region():
+    """Название молчит, но в описании — наш НП."""
+    regs = _regs(_row(id_=1, vk_id=-100, region_id=1), _row(id_=2, vk_id=-100, region_id=2))
+    rec = donor_triage.recommend_shared(
+        regs,
+        group_name="Объявления",
+        group_description="Объявления п. Луговой Елабужского района",
+        group_city="",
+        region_cities={},
+        index=_index(),
+    )
+    assert rec["action"] == "keep_region"
+    assert rec["keep_region_ids"] == [1]
+    assert rec["confidence"] == "medium"
+
+
+def test_district_markers_ignore_generic_prefixes():
+    """«Верхний» — слово из десятков наших районов: в маркер оно не годится."""
+    assert donor_triage.district_markers("ВЕРХНИЙ УСЛОН - ИНФО") == ["услон"]
+    assert donor_triage.district_markers("ТУЖА, Кировская область") == []
+    assert donor_triage.district_markers("ЛАИШЕВО - ИНФО") == ["лаише"]
+
+
+# ---------------------------------------------------------------------------
 # правила для молчащих доноров
 # ---------------------------------------------------------------------------
 
