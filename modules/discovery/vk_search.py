@@ -21,15 +21,22 @@ Strategy (2026-05-25 rework: localities-driven, см. PR feat/discovery-localiti
 4. **Dedup** — по ``id``. ``discovered_via`` фиксирует первый источник
    (info_repost имеет приоритет — он шаг 0).
 5. **Enrichment** — один ``groups.getById(group_ids=…, fields=…)`` для всех
-   уникальных id.
-6. **Hard relevance filter** — многокомпонентный (см. ``_passes_relevance``):
+   уникальных id (в fields — ещё и ``city``: VK-город группы, по которому
+   area-guard определяет «своя область или чужая»).
+6. **Area guard** — группы, чей VK-город лежит в **чужой области**, выбрасываются
+   (см. ``_drop_foreign_area``). Это то, чего не делает ``city_id`` в запросе:
+   ``groups.search(q="Москва")`` без ``city_id`` возвращает московские паблики,
+   и никакой фильтр по названию их не отличит (см. P235, звено 2).
+7. **Hard relevance filter** — многокомпонентный (см. ``_passes_relevance``):
    центральный стем (``Тужа``→``туж``) пропускает безусловно; одного матча
    по дочернему локалитету недостаточно (омонимные стемы «Коробки»/«Соболи»/
    «Лоскуты»/«Чугуны»/«Фомино» дают много false-positive — инцидент tuzha
    2026-05-25); крупные группы (>50k members) требуют строго центральный
-   стем. Это режет 90%+ мусора без AI.
-7. **Sort** — ``(matched_localities_count desc, members_count desc)`` — паблик
-   с тремя топонимами района обгонит «Море Парк Киров» с 90k подписчиками.
+   стем. Это режет 90%+ мусора без AI. **Fail-closed:** если у региона нет
+   списка нп, фильтр не выключается, а требует центральный стем (иначе у 62
+   регионов из 81 в очередь попадало всё подряд — P235, звено 3).
+8. **Sort** — ``(matched_localities_count desc, members_count desc)`` —
+   паблик с тремя топонимами района обгонит «Море Парк Киров» с 90k подписчиками.
 
 Recent posts (``wall.get`` per group) тянет уже async-обвязка
 ``tasks.discovery_tasks._ai_categorize_all``.
@@ -72,7 +79,8 @@ CATEGORY_KEYWORDS: Dict[str, List[str]] = {
 }
 
 # Какие fields'ы запрашиваем у groups.getById для enrichment.
-_ENRICH_FIELDS = "description,members_count,activity,status,screen_name,photo_200"
+# ``city`` — VK-город группы (нужен area-guard'у: чужой город → чужая область).
+_ENRICH_FIELDS = "description,members_count,activity,status,screen_name,photo_200,city"
 
 # Минимальная длина корня после стема (защита от слишком коротких корней
 # вроде «У» из «Уя» — они дают много false-positive).
@@ -110,10 +118,40 @@ class DiscoveredGroup:
     # Сколько локалитетов района нашлось в name+description. Используется
     # для сортировки и debug-логирования; в БД не пишется.
     matched_localities: int = 0
+    # VK-город группы (id + название). Приходит из ``groups.getById`` fields=city.
+    # Используется area-guard'ом: город → область → «наша область или нет».
+    city_id: Optional[int] = None
+    city_title: Optional[str] = None
+
+
+def _extract_city(item: Dict) -> tuple[Optional[int], Optional[str]]:
+    """Достать (city_id, city_title) из ответа VK.
+
+    Формат менялся: у групп есть и объект ``city`` ({id, title}), и плоские
+    ``city_id``/``city_title``. Берём оба — чтобы не зависеть от версии API.
+    """
+    city = item.get("city")
+    city_id: Optional[int] = None
+    city_title: Optional[str] = None
+    if isinstance(city, dict):
+        try:
+            city_id = int(city.get("id") or 0) or None
+        except (TypeError, ValueError):
+            city_id = None
+        city_title = (city.get("title") or "").strip() or None
+    if not city_id:
+        try:
+            city_id = int(item.get("city_id") or 0) or None
+        except (TypeError, ValueError):
+            city_id = None
+    if not city_title:
+        city_title = (item.get("city_title") or "").strip() or None
+    return city_id, city_title
 
 
 def _normalize_search_item(item: Dict) -> DiscoveredGroup:
     """Convert raw groups.search/groups.getById item to DiscoveredGroup."""
+    city_id, city_title = _extract_city(item)
     return DiscoveredGroup(
         vk_id=int(item.get("id") or 0),
         name=(item.get("name") or "").strip(),
@@ -121,6 +159,8 @@ def _normalize_search_item(item: Dict) -> DiscoveredGroup:
         photo_url=item.get("photo_200") or None,
         description=(item.get("description") or "").strip() or None,
         members_count=item.get("members_count"),
+        city_id=city_id,
+        city_title=city_title,
     )
 
 
@@ -258,6 +298,78 @@ def _build_search_plan(
 
 DEFAULT_MAX_CANDIDATES = 150
 
+
+def _resolve_own_area(client: VKClient, own_area_city_id: Optional[int]) -> Optional[str]:
+    """Область нашего региона — по VK-id города области (или города-центра).
+
+    Возвращает название области как его знает VK («Кировская область»,
+    «Татарстан», «Москва») либо ``None``, если определить не удалось.
+    ``None`` означает «guard выключен» — честнее, чем угадывать область и
+    выбрасывать половину сети.
+    """
+    if not own_area_city_id:
+        return None
+    try:
+        cities = client.get_cities_by_ids([int(own_area_city_id)])
+    except Exception as e:  # extra safety — клиент не должен ронять discovery
+        logger.warning("discovery: own area lookup failed (city_id=%s): %s", own_area_city_id, e)
+        return None
+    if not isinstance(cities, dict):
+        return None
+    info = cities.get(int(own_area_city_id)) or {}
+    area = (info.get("area") or "").strip()
+    return area or None
+
+
+def _drop_foreign_area(
+    groups: Sequence[DiscoveredGroup],
+    *,
+    client: VKClient,
+    own_area: str,
+) -> tuple[List[DiscoveredGroup], List[DiscoveredGroup]]:
+    """Разделить кандидатов на «наша область» и «чужая область».
+
+    Логика: у каждой группы VK отдаёт город (``city``); ``database.getCities``
+    отдаёт для города его область. Если область группы известна и **не совпадает**
+    с областью региона — группа чужая, в очередь модерации она не идёт.
+
+    Чего этот guard НЕ делает:
+
+    * не судит о группе, у которой город неизвестен (``city`` пуст или VK не знает
+      такой город) — такие остаются: «не знаю» ≠ «чужая»;
+    * не ограничивает область внутри области (соседний район той же области
+      проходит) — это задача relevance-фильтра по названиям нп.
+
+    ``groups.search`` без ``city_id`` отдаёт группы со всей страны, и по имени
+    их не отличить: «Москва», «Казань», «Скородум» — одинаково выглядят для
+    фильтра, но это разные области (P235, звено 2).
+    """
+    city_ids = sorted({g.city_id for g in groups if g.city_id})
+    if not city_ids:
+        return list(groups), []
+
+    try:
+        cities = client.get_cities_by_ids(city_ids)
+    except Exception as e:  # extra safety
+        logger.warning("discovery: area lookup failed for %d cities: %s", len(city_ids), e)
+        return list(groups), []
+    if not isinstance(cities, dict):
+        return list(groups), []
+
+    own = (own_area or "").strip().lower()
+    kept: List[DiscoveredGroup] = []
+    dropped: List[DiscoveredGroup] = []
+    for g in groups:
+        area = ""
+        if g.city_id:
+            area = ((cities.get(g.city_id) or {}).get("area") or "").strip()
+        if area and area.lower() != own:
+            dropped.append(g)
+        else:
+            kept.append(g)
+    return kept, dropped
+
+
 # Сколько последних постов главной ИНФО-страницы района читаем для сбора
 # `copy_history.owner_id` (репостов). 100 покрывает 3-6 месяцев активной
 # страницы, дальше уже маловероятно найти новых партнёров. Один запрос —
@@ -370,6 +482,8 @@ def discover_for_region(
     exclude_vk_ids: Optional[Sequence[int]] = None,
     max_candidates: int = DEFAULT_MAX_CANDIDATES,
     info_repost_posts: int = DEFAULT_INFO_REPOST_POSTS,
+    own_area_city_id: Optional[int] = None,
+    stats: Optional[Dict[str, int]] = None,
 ) -> List[DiscoveredGroup]:
     """Run composite discovery.
 
@@ -395,10 +509,19 @@ def discover_for_region(
         max_candidates: top-N после relevance-фильтра и сортировки.
         info_repost_posts: сколько последних постов главной группы читать
             для harvest'а repost-кандидатов. Default 100.
+        own_area_city_id: VK-id города, по которому определяется **область**
+            региона (город области — у района родитель-область; иначе город-центр
+            района). По ней работает area-guard: группа из чужой области в
+            очередь модерации не попадает. Нет id (или VK не знает город) —
+            guard выключен, и это видно в счётчиках.
+        stats: непустой dict — сюда пишутся счётчики (``found_total``, ``dropped_foreign_area``,
+            ``dropped_irrelevant``, ``area_guard_off`` …). Нужен, чтобы отчёт
+            прогона показывал, **сколько** отсеяно и **почему**, а не только
+            «сколько осталось».
 
     Returns:
         Список ``DiscoveredGroup``, отсортированный по
-        ``(matched_localities desc, members_count desc)``.
+        ``(curated first, matched_localities desc, members_count desc)``.
     """
     if not (center_city or "").strip() and not (localities or []) and not vk_group_id:
         return []
@@ -411,6 +534,7 @@ def discover_for_region(
         keywords=kw_list,
     )
     exclude_set = {abs(int(v)) for v in (exclude_vk_ids or [])}
+    counters: Dict[str, int] = stats if stats is not None else {}
 
     seen: Dict[int, DiscoveredGroup] = {}
 
@@ -501,50 +625,75 @@ def discover_for_region(
             g.description = (it["description"] or "").strip() or g.description
         if it.get("members_count") is not None:
             g.members_count = it["members_count"]
+        city_id, city_title = _extract_city(it)
+        if city_id:
+            g.city_id = city_id
+        if city_title:
+            g.city_title = city_title
 
     groups = list(seen.values())
+    counters["found_total"] = len(groups)
 
-    # Step 5: hard relevance filter + matched-count для сортировки.
-    # Если localities заданы — применяем многокомпонентный фильтр
-    # (см. _passes_relevance). Если localities пусты — фильтр пропускаем
-    # (старое поведение для backwards-compat).
-    if loc_list:
-        # Центральный стем — самый специфичный сигнал. Дочерние локалитеты
-        # без центра пропускаем только при ≥2 разных совпадениях, что
-        # маловероятно для случайных омонимов.
-        center_stem = _make_stem(center_city) if center_city else None
-        # Из дочерних стемов исключаем сам центр, чтобы не «двоить» вес.
-        loc_stems = [st for st in (_make_stem(loc) for loc in loc_list) if st and st != center_stem]
-        before = len(groups)
-        kept: List[DiscoveredGroup] = []
-        for g in groups:
-            text = " ".join(filter(None, [g.name, g.description])).strip()
-            passes, score = _passes_relevance(
-                text=text,
-                locality_stems=loc_stems,
-                center_stem=center_stem,
-                members_count=g.members_count,
+    # Step 5.5: area guard — города из чужих областей отсекаются.
+    own_area = _resolve_own_area(client, own_area_city_id)
+    if own_area:
+        groups, foreign = _drop_foreign_area(groups, client=client, own_area=own_area)
+        counters["dropped_foreign_area"] = len(foreign)
+        if foreign:
+            logger.info(
+                "discovery: area guard — %s кандидатов из чужой области (наша область %r): %s",
+                len(foreign),
+                own_area,
+                ", ".join(f"{g.name!r}({g.city_title or '—'})" for g in foreign[:5]),
             )
-            g.matched_localities = score
-            if passes:
-                kept.append(g)
-        groups = kept
-        logger.info(
-            "discovery: relevance filter — %s/%s candidates kept "
-            "(center=%r, localities=%d, large_threshold=%d)",
-            len(groups),
-            before,
-            center_stem,
-            len(loc_stems),
-            _LARGE_GROUP_MEMBERS_THRESHOLD,
+    else:
+        counters["area_guard_off"] = 1
+        logger.warning(
+            "discovery: area guard выключен — область региона не определена "
+            "(own_area_city_id=%s); группы из чужих областей не отсекаются",
+            own_area_city_id,
         )
+
+    # Step 6: hard relevance filter + matched-count для сортировки.
+    # Fail-closed: фильтр применяется ВСЕГДА. Если у региона нет списка нп —
+    # требование сужается до центрального стема (иначе у 62 регионов из 81
+    # фильтр был выключен целиком и в очередь попадало всё подряд — P235,
+    # звено 3). Курируемые источники фильтр проходят наравне: репост
+    # областного паблика главной страницей района — не наш паблик (тест
+    # ``test_discover_info_repost_results_go_through_relevance_filter``).
+    center_stem = _make_stem(center_city) if center_city else None
+    # Из дочерних стемов исключаем сам центр, чтобы не «двоить» вес.
+    loc_stems = [st for st in (_make_stem(loc) for loc in loc_list) if st and st != center_stem]
+    before = len(groups)
+    kept: List[DiscoveredGroup] = []
+    for g in groups:
+        text = " ".join(filter(None, [g.name, g.description])).strip()
+        passes, score = _passes_relevance(
+            text=text,
+            locality_stems=loc_stems,
+            center_stem=center_stem,
+            members_count=g.members_count,
+        )
+        g.matched_localities = score
+        if passes:
+            kept.append(g)
+    groups = kept
+    counters["dropped_irrelevant"] = before - len(groups)
+    logger.info(
+        "discovery: relevance filter — %s/%s candidates kept "
+        "(center=%r, localities=%d, large_threshold=%d)",
+        len(groups),
+        before,
+        center_stem,
+        len(loc_stems),
+        _LARGE_GROUP_MEMBERS_THRESHOLD,
+    )
 
     if not groups:
         return []
 
-    # Step 6: sort. Сначала по matched_localities (если был фильтр), потом
-    # по members_count (информативный сигнал — мёртвые мелкие паблики
-    # модератору не интересны).
+    # Step 7: sort. Сначала по matched_localities, потом по members_count
+    # (информативный сигнал — мёртвые мелкие паблики модератору не интересны).
     groups.sort(
         key=lambda g: (g.matched_localities, g.members_count or 0),
         reverse=True,

@@ -124,6 +124,9 @@ web/uploads/
 # может оказаться что угодно.
 .claude/session-state/
 
+# Локальный прогон pytest на машине разработчика: полный лог в репозиторий не нужен.
+.pytest_full_run.txt
+
 # Переговорная hotline (пилот brain 03.10): присутствие сессии — эфемерно,
 # в git не едет; ленты outbox (to-*.jsonl) — наоборот коммитятся своим flow.
 hotline/presence.json

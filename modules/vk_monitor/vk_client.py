@@ -6,7 +6,7 @@ Handles all interactions with VK API
 import asyncio
 import logging
 import threading
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Tuple
 
 import vk_api
 
@@ -594,6 +594,60 @@ class VKClient:
         except Exception as e:
             logger.error(f"Unexpected database.getCities error (q={query!r}): {e}")
             return []
+
+    def get_cities_by_ids(self, city_ids: Sequence[int]) -> Dict[int, Dict[str, Any]]:
+        """``database.getCities`` по точным id → ``{city_id: {title, area, region}}``.
+
+        Нужен discovery'у для area-guard'а: у группы VK отдаёт поле ``city``
+        (id города), а ``database.getCities`` для города отдаёт его **область**
+        (``area``). Это единственный способ отличить «паблик нашего района» от
+        «паблик чужой области с тем же названием» — на глаз по имени нельзя.
+
+        ``city_ids`` — до 100 id за вызов; лишние и неположительные отбрасываются.
+        На ошибке VK API — пустой словарь (вызывающий решает, что делать).
+        """
+        ids: List[int] = []
+        seen: set[int] = set()
+        for raw in city_ids or []:
+            try:
+                cid = int(raw)
+            except (TypeError, ValueError):
+                continue
+            if cid <= 0 or cid in seen:
+                continue
+            seen.add(cid)
+            ids.append(cid)
+        if not ids:
+            return {}
+
+        out: Dict[int, Dict[str, Any]] = {}
+        batch_size = 100
+        for i in range(0, len(ids), batch_size):
+            chunk = ids[i : i + batch_size]
+            try:
+                self._enforce_rate_limit("database.getCities")
+                response = self.vk.database.getCities(
+                    country_id=1,
+                    city_ids=",".join(str(c) for c in chunk),
+                )
+                items = (response or {}).get("items", [])
+            except vk_api.exceptions.ApiError as e:
+                _log_vk_api_error("VK database.getCities error (city_ids)", e)
+                items = []
+            except Exception as e:
+                logger.error("Unexpected database.getCities error (city_ids): %s", e)
+                items = []
+            for it in items or []:
+                try:
+                    cid = int(it.get("id"))
+                except (TypeError, ValueError):
+                    continue
+                out[cid] = {
+                    "title": (it.get("title") or "").strip(),
+                    "area": (it.get("area") or "").strip(),
+                    "region": (it.get("region") or "").strip(),
+                }
+        return out
 
     def parse_attachments(self, post: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
