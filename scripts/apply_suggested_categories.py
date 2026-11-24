@@ -35,7 +35,13 @@ import json
 import sys
 from collections import Counter
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Sequence
+
+#: Корень репозитория в sys.path: скрипт запускают как
+#: ``python scripts/apply_suggested_categories.py``, и без этого ``database``
+#: и ``modules`` не нашлись бы (как в scripts/deactivate_communities.py).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 #: Темы с **одним** слотом в сутки: перевод туда переполняет тему.
 SINGLE_SLOT_THEMES = frozenset({"detsad"})

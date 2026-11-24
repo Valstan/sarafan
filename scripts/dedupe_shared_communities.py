@@ -40,7 +40,13 @@ import json
 import sys
 from collections import defaultdict
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+
+#: Корень репозитория в sys.path: скрипт запускают как
+#: ``python scripts/dedupe_shared_communities.py``, и без этого ``database``
+#: и ``modules`` не нашлись бы (как в scripts/deactivate_communities.py).
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 #: Регион-тест в проде: его регистрации выключаются отдельной причиной.
 TEST_REGION_CODE = "test"
