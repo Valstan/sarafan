@@ -351,6 +351,59 @@ def test_district_markers_ignore_generic_prefixes():
     assert donor_triage.district_markers("ЛАИШЕВО - ИНФО") == ["лаише"]
 
 
+def test_name_naming_several_places_stays_everywhere_even_if_description_names_one():
+    """«Объявления Свеча, Лебяжье, Даровской, Котельнич» — группа многорайонная.
+
+    Описание упоминает один район («Даровского района»), но название группы
+    само перечисляет несколько наших мест — значит, она честно общая, и
+    выключать регистрацию в одном из них нельзя.
+    """
+    regs = [
+        _named_reg(row_id=1, region_id=30, region_code="svecha", region_name="СВЕЧА - ИНФО"),
+        _named_reg(row_id=2, region_id=31, region_code="darovskoy", region_name="ДАРОВСКОЙ - ИНФО"),
+    ]
+    index = donor_triage.LocalityIndex()
+    index.add_region(30, "СВЕЧА - ИНФО")
+    index.add_region(31, "ДАРОВСКОЙ - ИНФО")
+
+    rec = donor_triage.recommend_shared(
+        regs,
+        group_name="Объявления Свеча, Лебяжье, Даровской, Котельнич",
+        group_description="Объявления Даровского района принимаются в Даровском районе.",
+        group_city="Котельнич",
+        region_cities={},
+        index=index,
+    )
+    assert rec["action"] == "keep_all"
+    assert rec["confidence"] == "medium"
+
+
+def test_same_place_name_in_two_regions_waits_for_a_person():
+    """«с. Куралово» есть и в Спасском, и в Верхнеуслонском — какой, решает владелец."""
+    regs = [
+        _named_reg(row_id=1, region_id=10, region_code="spassky", region_name="СПАССКИЙ - ИНФО"),
+        _named_reg(
+            row_id=2, region_id=11, region_code="verhniy_uslon", region_name="ВЕРХНИЙ УСЛОН - ИНФО"
+        ),
+    ]
+    index = donor_triage.LocalityIndex()
+    index.add_region(10, "СПАССКИЙ - ИНФО")
+    index.add_locality(10, "Куралово")
+    index.add_region(11, "ВЕРХНИЙ УСЛОН - ИНФО")
+    index.add_locality(11, "Куралово")
+
+    rec = donor_triage.recommend_shared(
+        regs,
+        group_name="Храм св нмчч. и исп. Российских. с. Куралово",
+        group_description="",
+        group_city="Ульяновка",
+        region_cities={},
+        index=index,
+    )
+    assert rec["action"] == "keep_all"
+    assert rec["confidence"] == "low"
+
+
 # ---------------------------------------------------------------------------
 # правила для молчащих доноров
 # ---------------------------------------------------------------------------
