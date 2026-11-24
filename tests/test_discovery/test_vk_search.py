@@ -195,9 +195,14 @@ def test_discover_hard_filter_drops_irrelevant_candidates():
     assert sorted(g.vk_id for g in groups) == [1, 3]
 
 
-def test_discover_without_localities_skips_relevance_filter():
-    """Backwards-compat: если localities пуст — фильтр не применяется,
-    возвращаются все найденные."""
+def test_discover_without_localities_requires_center_match():
+    """Fail-closed: нет списка нп → фильтр НЕ выключается, а требует
+    центральный стем.
+
+    Раньше при пустом ``localities`` фильтр пропускался целиком — у 62
+    регионов из 81 (список нп не засеян) в очередь модерации попадало
+    всё, что вернул поиск (P235, звено 3).
+    """
     client = MagicMock()
     client.search_groups.return_value = [
         {"id": 1, "name": "Подслушано Тужа"},
@@ -205,8 +210,8 @@ def test_discover_without_localities_skips_relevance_filter():
     ]
     client.get_groups_by_ids.return_value = []
 
-    groups = discover_for_region(client=client, center_city="X", localities=[], keywords=[])
-    assert sorted(g.vk_id for g in groups) == [1, 2]
+    groups = discover_for_region(client=client, center_city="Тужа", localities=[], keywords=[])
+    assert [g.vk_id for g in groups] == [1]
 
 
 def test_discover_sorts_by_matched_localities_first():

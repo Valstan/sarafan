@@ -168,6 +168,28 @@ async def _ai_categorize_all(
     return dict(results)
 
 
+async def _own_area_city_id(session, region: Region) -> Optional[int]:
+    """VK-id города, по которому определяется область региона.
+
+    Сначала — город **области** (у района родитель — область), иначе — город-центр
+    самого района. Нужен area-guard'у в discovery: «город кандидата в чужой
+    области → это не наш паблик» (P235, звено 2).
+
+    Область определяется по городу, а не по названию региона: у 62 регионов из 81
+    список нп пуст, и их гео-поиск без ``city_id`` тянул группы со всей страны.
+    """
+    parent_id = getattr(region, "parent_region_id", None)
+    if parent_id:
+        parent = (
+            await session.execute(select(Region).where(Region.id == parent_id))
+        ).scalar_one_or_none()
+        if parent is not None and getattr(parent, "vk_city_id", None):
+            return int(parent.vk_city_id)
+    if getattr(region, "vk_city_id", None):
+        return int(region.vk_city_id)
+    return None
+
+
 async def _upsert_candidates(
     session,
     region_id: int,
@@ -181,11 +203,20 @@ async def _upsert_candidates(
     - Существующая `pending` / `deferred` → UPDATE snapshot + ai_* (refresh).
     - Существующая `approved` / `rejected` → не трогать (модератор уже решил).
 
+    **Кандидат без вердикта ИИ в очередь не попадает.** Раньше он вставлялся с
+    пустыми ``ai_*``, и модерация получала строки, которые ИИ не видел: 329
+    кандидатов в очереди (30.05–02.06.2026) — все без категорий и без
+    объяснения (P235, звено 4). Теперь такой кандидат просто не вставляется:
+    он не попадёт в ``exclude_vk_ids`` (его нет в БД) и будет найден и
+    классифицирован заново при следующем прогоне, а число отказов видно в
+    отчёте (``skipped_ai_failed``) и в логе.
+
     Возвращает счётчики для отчёта.
     """
     inserted = 0
     refreshed = 0
     skipped = 0
+    ai_failed = 0
 
     # One round-trip to fetch all existing candidates for this region.
     q = await session.execute(
@@ -200,6 +231,11 @@ async def _upsert_candidates(
     for g in groups:
         ai = ai_by_vk_id.get(g.vk_id) or {}
         ai_ok = bool(ai.get("success"))
+        if not ai_ok:
+            # ИИ не ответил — вердикта нет, объяснения нет. В очередь
+            # модерации такая строка не идёт (см. докстринг выше).
+            ai_failed += 1
+            continue
         cat = ai.get("category") if ai_ok else None
         conf = ai.get("confidence") if ai_ok else None
         reasoning = ai.get("reasoning") if ai_ok else None
@@ -247,7 +283,12 @@ async def _upsert_candidates(
             skipped += 1
 
     await session.commit()
-    return {"inserted": inserted, "refreshed": refreshed, "skipped_existing": skipped}
+    return {
+        "inserted": inserted,
+        "refreshed": refreshed,
+        "skipped_existing": skipped,
+        "skipped_ai_failed": ai_failed,
+    }
 
 
 def parse_list_field(val: Any) -> List[str]:
@@ -327,6 +368,7 @@ async def run_discovery_for_region_async(
             }
         exclude_ids = await _existing_vk_ids(session, region_id)
         localities, keywords = _read_region_discovery_config(region)
+        own_area_city_id = await _own_area_city_id(session, region)
 
     token = await _pick_parse_token()
     if not token:
@@ -339,6 +381,7 @@ async def run_discovery_for_region_async(
 
     # search_groups + get_groups_by_ids + wall.get(info_page) — sync; не
     # блокируем event loop.
+    search_stats: Dict[str, int] = {}
     groups: List[DiscoveredGroup] = await asyncio.to_thread(
         discover_for_region,
         client=client,
@@ -349,6 +392,8 @@ async def run_discovery_for_region_async(
         keywords=keywords,
         per_query_count=per_query_count,
         exclude_vk_ids=exclude_ids,
+        own_area_city_id=own_area_city_id,
+        stats=search_stats,
     )
 
     if not groups:
@@ -362,13 +407,21 @@ async def run_discovery_for_region_async(
             "skipped_ai_failed": 0,
             "localities_count": len(localities),
             "keywords_count": len(keywords),
+            **search_stats,
         }
 
     ai_results = await _ai_categorize_all(groups, region.name, client=client)
-    ai_failed = sum(1 for r in ai_results.values() if not r.get("success"))
 
     async with AsyncSessionLocal() as session:
         counts = await _upsert_candidates(session, region_id, groups, ai_results)
+
+    ai_failed = counts["skipped_ai_failed"]
+    if ai_failed:
+        logger.warning(
+            "discovery: ИИ не ответил по %s кандидатам — в очередь модерации они "
+            "не попали (найдутся и будут классифицированы заново при следующем прогоне)",
+            ai_failed,
+        )
 
     return {
         "success": True,
@@ -380,6 +433,9 @@ async def run_discovery_for_region_async(
         "skipped_ai_failed": ai_failed,
         "localities_count": len(localities),
         "keywords_count": len(keywords),
+        # Сколько отсеяно и почему: чужая область / не прошёл фильтр по
+        # названиям. Числа, а не ощущение (P235: «три молчаливые поломки»).
+        **search_stats,
         # Цена одного прогона подбора — то самое «сколько это стоит в токенах»,
         # ради которого P001 четыре месяца висит вопросом владельца. Раньше
         # число существовало только в ротированных логах.

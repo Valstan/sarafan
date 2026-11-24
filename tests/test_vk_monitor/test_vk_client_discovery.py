@@ -179,6 +179,62 @@ def test_get_groups_by_refs_one_failed_chunk_does_not_abort_others():
 
 
 # ──────────────────────────────────────────────────────────────────
+# get_cities_by_ids (area-guard discovery: город → область)
+# ──────────────────────────────────────────────────────────────────
+
+
+def test_get_cities_by_ids_returns_area_per_city():
+    client = _make_client()
+    client.vk.database.getCities.return_value = {
+        "items": [
+            {"id": 314, "title": "Малмыж", "area": "Кировская область"},
+            {"id": 1, "title": "Москва", "area": "Москва"},
+        ]
+    }
+    out = client.get_cities_by_ids([314, 1])
+    assert out[314]["area"] == "Кировская область"
+    assert out[1]["area"] == "Москва"
+    _, kwargs = client.vk.database.getCities.call_args
+    assert kwargs["city_ids"] == "314,1"
+    assert kwargs["country_id"] == 1
+
+
+def test_get_cities_by_ids_skips_non_positive_and_dedups():
+    client = _make_client()
+    client.vk.database.getCities.return_value = {"items": []}
+    client.get_cities_by_ids([0, -5, 314, 314])
+    _, kwargs = client.vk.database.getCities.call_args
+    assert kwargs["city_ids"] == "314"
+
+
+def test_get_cities_by_ids_empty_input_no_call():
+    client = _make_client()
+    assert client.get_cities_by_ids([]) == {}
+    client.vk.database.getCities.assert_not_called()
+
+
+def test_get_cities_by_ids_handles_vk_api_error():
+    client = _make_client()
+    err = vk_api.exceptions.ApiError(
+        vk=None,
+        method="database.getCities",
+        values={},
+        raw=None,
+        error={"error_code": 100, "error_msg": "boom"},
+    )
+    client.vk.database.getCities.side_effect = err
+    assert client.get_cities_by_ids([314]) == {}
+
+
+def test_get_cities_by_ids_enforces_rate_limit():
+    client = _make_client()
+    client.vk.database.getCities.return_value = {"items": []}
+    with patch.object(client, "_enforce_rate_limit") as rl:
+        client.get_cities_by_ids([314])
+    rl.assert_called_once()
+
+
+# ──────────────────────────────────────────────────────────────────
 # resolve_city
 # ──────────────────────────────────────────────────────────────────
 
