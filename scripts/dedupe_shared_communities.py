@@ -1,18 +1,31 @@
 #!/usr/bin/env python3
 """Выключить лишние регистрации групп, заведённых в нескольких районах (P236).
 
-**Что чиним.** 71 VK-группа заведена в ``communities`` сразу для нескольких
-регионов: 187 регистраций, 116 лишних. Посты одного донора приходят читателям
-нескольких районов (тот же класс, что P216 — утечка чужих районов через
-агрегатор «ленты соседей»). Плюс 5 групп заведены **дважды в одном регионе**
-(дубль строки) и в проде есть регион ``test``.
+**Что чиним.** 71 VK-группа была заведена в ``communities`` сразу для нескольких
+регионов (измерение 23.11: 187 регистраций, 116 лишних; к 24.11 активными
+остались 26 таких групп). Посты одного донора приходят читателям нескольких
+районов (тот же класс, что P216 — утечка чужих районов через агрегатор «ленты
+соседей»). Плюс 5 групп заведены **дважды в одном регионе** (дубль строки) и в
+проде есть регион ``test``.
 
-**Как решаем, где группа своя.** Тем же правилом, что уже работает в discovery
-(P235, звено 2 — PR #1233, area-guard): у группы VK отдаёт город (``city``), у
-города — область; область региона определяется по городу области (родитель-область)
-либо по городу-центру района. Регистрацию оставляем **только там, где область
-региона совпала с областью группы**. Нет совпадения или совпадений несколько —
-**не гадаем**: такую группу оставляем как есть и называем в отчёте.
+**Как решаем, где группа своя — по географии, на том уровне, который данные
+позволяют.** У группы VK отдаёт город (``groups.getById fields=city``); у
+региона город — это город его **главной группы** (``regions.vk_group_id``,
+есть у всех 84 активных регионов). Регистрацию оставляем там, где города
+совпали, а лишние (город чужой) выключаем.
+
+⚠️ **Почему не «область», как в discovery.** Вариант «город → область» на проде
+**не работает**: ``database.getCities`` по конкретному ``city_id`` отдаёт список
+важных городов страны без поля ``area`` (проверено на живом API 24.11), а у
+80 из 84 активных регионов пуст ``center_city`` — то есть область региона
+неизвестна. Правило «город региона против города группы» — тот же принцип
+(география решает), но на том разрешении, которое данные действительно дают, и
+оно **строго finer**: отличает район от района, а не область от области.
+
+**«Не знаю» ≠ «чужая».** Если город группы не совпал ни с одним городом
+региона (деревня, областной центр) — регистрацию оставляем: это не «лишняя
+регистрация», а группа, которую надо смотреть глазами. Если своих регистраций
+не нашлось вовсе — ничего не выключаем.
 
 **Что делает.** Ставит ``is_active=False`` + ``disabled_at`` + ``disabled_reason``
 — обратимо (строка остаётся, просто перестаёт попадать в ленту), по образцу
@@ -54,6 +67,18 @@ TEST_REGION_CODE = "test"
 REASON_SHARED = "pool_shared_group"
 REASON_DUPLICATE = "duplicate_row"
 REASON_TEST_REGION = "region_test_cleanup"
+
+
+def norm_city(title: Optional[str]) -> str:
+    """Привести название города к сравнимому виду.
+
+    «г. Котельнич», «Котельнич», «город Котельнич» — это один город. Плюс
+    ``ё`` → ``е``: в VK и в БД название пишется по-разному.
+    """
+    t = (title or "").strip().lower().replace("ё", "е")
+    for junk in ("г.", "город", "городская", "пос.", "поселок"):
+        t = t.replace(junk, " ")
+    return " ".join(t.split())
 
 
 def group_by_vk_id(rows: Sequence[Any]) -> Dict[int, List[Any]]:
@@ -101,46 +126,23 @@ def pick_duplicate_survivor(rows: Sequence[Any]) -> Any:
     )[0]
 
 
-async def _region_areas(
-    session: Any, regions: Dict[int, Any], client: Any
-) -> Dict[int, Optional[str]]:
-    """Область каждого региона — тем же способом, что и в discovery.
-
-    ``_own_area_city_id`` (tasks/discovery_tasks) → город области (родитель-область)
-    или город-центр района; ``_resolve_own_area`` (modules/discovery/vk_search) →
-    название области, как его знает VK.
-    """
-    from modules.discovery.vk_search import _resolve_own_area
-    from tasks.discovery_tasks import _own_area_city_id
-
-    out: Dict[int, Optional[str]] = {}
-    for region_id, region in regions.items():
-        try:
-            city_id = await _own_area_city_id(session, region)
-        except Exception:  # noqa: BLE001 — регион без гео = «область неизвестна»
-            city_id = None
-        out[region_id] = _resolve_own_area(client, city_id) if city_id else None
-    return out
-
-
 def decide_shared(
     shared: Dict[int, List[Any]],
     *,
-    region_areas: Dict[int, Optional[str]],
-    group_areas: Dict[int, Optional[str]],
+    group_cities: Dict[int, str],
+    region_cities: Dict[int, str],
     own_region_groups: Dict[int, int],
 ) -> Dict[int, Dict[str, Any]]:
     """Разметить общие группы: где оставляем, что выключаем.
 
-    Правило: область региона совпала с областью группы → регистрация **своя**;
-    обе области известны и не совпали → регистрация **лишняя**. Область
-    неизвестна (ни у группы, ни у региона) — **не гадаем**: такую оставляем.
+    Правило: город региона (город его главной группы) совпал с городом группы →
+    регистрация **своя**; оба города известны и не совпали → регистрация
+    **лишняя**. Город неизвестен — **не гадаем**: оставляем как есть.
 
     Ключевое условие для выключения: **есть хоть одна своя регистрация**. Тогда
-    понятно, где группа живёт, и лишние (чужой области) выключаются. Если своей
-    нет — это уже не «лишняя регистрация», а «группа нигде не своя» (чужая
-    донорская группа в N районах); area-guard такое не разбирает, и мы такое не
-    трогаем — отчёт отдаёт группу на разбор.
+    понятно, где группа живёт, и лишние выключаются. Если своей нет — это уже
+    не «лишняя регистрация», а «группа нигде не своя» (деревня или областной
+    центр); такое чистить нельзя, отчёт отдаёт группу на разбор.
 
     Чистая функция — VK и БД не трогает: её и проверяют тесты.
     """
@@ -149,17 +151,17 @@ def decide_shared(
         keep_ids: List[int] = []
         drop_ids: List[int] = []
         unknown_ids: List[int] = []
+        group_city = norm_city(group_cities.get(vk_id))
         for row in rows:
             region_id = int(getattr(row, "region_id", 0) or 0)
-            region_area = region_areas.get(region_id)
-            group_area = group_areas.get(vk_id)
+            region_city = norm_city(region_cities.get(region_id))
             # Наша собственная главная группа: её регистрацию в своём же районе
             # выключать нельзя ни при каком раскладе.
             if own_region_groups.get(region_id) == vk_id:
                 keep_ids.append(int(row.id))
                 continue
-            if region_area and group_area:
-                if region_area == group_area:
+            if group_city and region_city:
+                if group_city == region_city:
                     keep_ids.append(int(row.id))
                 else:
                     drop_ids.append(int(row.id))
@@ -171,7 +173,6 @@ def decide_shared(
             drop = drop_ids
             keep = keep_ids + unknown_ids
         else:
-            # Своей регистрации нет — не решаем, где группа «наша».
             status = "unknown" if unknown_ids else "no_match"
             drop = []
             keep = keep_ids + drop_ids + unknown_ids
@@ -205,8 +206,9 @@ async def _run(dry_run: bool, reason: str) -> Dict[str, Any]:
         if getattr(r, "vk_group_id", None)
     }
 
-    # --- область каждой группы: VK (город) → область -------------------
-    group_areas: Dict[int, Optional[str]] = {}
+    # --- город каждой стороны: VK (groups.getById fields=city) -----------
+    group_cities: Dict[int, str] = {}
+    region_cities: Dict[int, str] = {}
     client = None
     vk_error = ""
     if shared:
@@ -223,39 +225,41 @@ async def _run(dry_run: bool, reason: str) -> Dict[str, Any]:
                 token = next(iter(VK_TOKENS.values()), None)
             if token:
                 client = VKClient(token=token)
-                ids = sorted(shared.keys())
-                infos = await asyncio.to_thread(client.get_groups_by_ids, ids, fields="city")
-                city_ids = set()
-                for info in infos or []:
+
+                # Город региона — город его главной группы.
+                main_ids = sorted(
+                    {abs(int(r.vk_group_id)) for r in regions.values() if r.vk_group_id}
+                )
+                main_infos = await asyncio.to_thread(
+                    client.get_groups_by_ids, main_ids, fields="city"
+                )
+                main_city: Dict[int, str] = {}
+                for info in main_infos or []:
                     city = (info or {}).get("city") or {}
-                    if city.get("id"):
-                        city_ids.add(int(city["id"]))
-                cities = (
-                    await asyncio.to_thread(client.get_cities_by_ids, sorted(city_ids))
-                    if city_ids
-                    else {}
+                    gid = abs(int((info or {}).get("id") or 0))
+                    if city.get("title"):
+                        main_city[gid] = str(city.get("title"))
+                for rid, r in regions.items():
+                    if getattr(r, "vk_group_id", None):
+                        region_cities[int(rid)] = main_city.get(abs(int(r.vk_group_id)), "")
+
+                # Город самой группы.
+                infos = await asyncio.to_thread(
+                    client.get_groups_by_ids, sorted(shared.keys()), fields="city"
                 )
                 for info in infos or []:
                     city = (info or {}).get("city") or {}
                     gid = abs(int((info or {}).get("id") or 0))
-                    area = None
-                    if city.get("id"):
-                        area = (cities.get(int(city["id"])) or {}).get("area") or None
-                    group_areas[gid] = area
+                    group_cities[gid] = str(city.get("title") or "")
             else:
                 vk_error = "нет VK-токена"
         except Exception as exc:  # noqa: BLE001 — без VK решение не принимаем
             vk_error = "%s: %s" % (type(exc).__name__, exc)
 
-    region_areas: Dict[int, Optional[str]] = {}
-    if client is not None:
-        async with AsyncSessionLocal() as session:
-            region_areas = await _region_areas(session, regions, client)
-
     plan = decide_shared(
         shared,
-        region_areas=region_areas,
-        group_areas=group_areas,
+        group_cities=group_cities,
+        region_cities=region_cities,
         own_region_groups=own_region_groups,
     )
 
@@ -271,6 +275,8 @@ async def _run(dry_run: bool, reason: str) -> Dict[str, Any]:
                         "region_id": int(row.region_id),
                         "reason": reason,
                         "name": str(getattr(row, "name", "") or "")[:70],
+                        "group_city": group_cities.get(vk_id, ""),
+                        "region_city": region_cities.get(int(row.region_id), ""),
                     }
                 )
 
@@ -339,6 +345,7 @@ async def _run(dry_run: bool, reason: str) -> Dict[str, Any]:
         "shared_groups": len(shared),
         "shared_registrations": sum(len(v) for v in shared.values()),
         "duplicate_groups": len(duplicates),
+        "resolved_groups": sum(1 for v in plan.values() if v["status"] == "ok"),
         "unresolved_groups": sum(
             1 for v in plan.values() if v["status"] in ("unknown", "no_match")
         ),
@@ -351,17 +358,19 @@ async def _run(dry_run: bool, reason: str) -> Dict[str, Any]:
 def _print_text(report: Dict[str, Any]) -> None:
     print("активных сообществ: %d" % report["communities_total"])
     print(
-        "общих групп: %d (регистраций %d); дублей внутри региона: %d; неразобранных: %d"
+        "общих групп: %d (регистраций %d); решается городом: %d; неразобранных: %d; "
+        "дублей внутри региона: %d"
         % (
             report["shared_groups"],
             report["shared_registrations"],
-            report["duplicate_groups"],
+            report["resolved_groups"],
             report["unresolved_groups"],
+            report["duplicate_groups"],
         )
     )
     if report["vk_error"]:
         print(
-            "⚠️  VK: %s — область групп не определена, такие строки оставлены как есть"
+            "⚠️  VK: %s — город групп не определён, такие строки оставлены как есть"
             % report["vk_error"]
         )
     print("\nвыключить: %d" % len(report["to_deactivate"]))
@@ -374,6 +383,12 @@ def _print_text(report: Dict[str, Any]) -> None:
                 item["region_id"],
                 item["reason"],
                 item["name"],
+            )
+            + (
+                "   [город группы %s / город региона %s]"
+                % (item.get("group_city") or "?", item.get("region_city") or "?")
+                if item.get("reason") == REASON_SHARED
+                else ""
             )
         )
     if len(report["to_deactivate"]) > 200:
