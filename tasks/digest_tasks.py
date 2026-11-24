@@ -9,6 +9,19 @@
 Kill-switch — ``DAILY_DIGEST_ENABLED=0``: рубрика выключается одной переменной,
 не трогая сбор и ленту. Пустой сборник (мало материала) — штатный исход, а не
 сбой: в лог уходит причина, в отчёт — ``skipped``.
+
+**Веером (решение владельца 24.11, P234).** Прежде сводка была **одной** задачей
+на 76 регионов: она занимала единственный слот воркера целиком, её снимал общий
+лимит 3600 с, и сборник выходил примерно для трети сети (замер 23.11 — 21 регион
+из 76), а волна ``admin`` (22:20) ждала конца обхода. Теперь ``beat`` зовёт
+``publish_daily_digest_fanout`` — задачу на регион, разнесённую по минутам
+(``DAILY_DIGEST_REGION_SPREAD_SECONDS``) и уходящую в отдельную очередь
+(``SETKA_DIGEST_QUEUE``), ровно как веер волны (ADR-0020).
+
+**День закреплён в задаче.** Кандидаты берутся «с полуночи» (``day_start_utc``),
+поэтому задача, дошедшая после полуночи (фото в сборнике держат слот дольше
+часа), собрала бы **чужой** день. Веер передаёт каждому региону ``since`` —
+начало московского дня, за который выпускается сборник.
 """
 
 from __future__ import annotations
@@ -16,6 +29,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from tasks.celery_app import app
@@ -30,6 +44,12 @@ DIGEST_KIND = "digest"
 #: текстом — поэтому лимит дублируется в трёх местах (черновик, отбор, здесь).
 VK_MAX_ATTACHMENTS = 10
 
+#: Сколько задача сводки может ждать своей очереди, прежде чем протухнуть.
+#: Счёт от **слота** (не от постановки): с фото сборник держит слот дольше часа
+#: (замер 23.11 — 44 мин сна на троттлинге загрузки), и обычный час от
+#: ``countdown`` выкинул бы хвост веера, не дав ему выйти вовсе.
+DIGEST_TASK_EXPIRES_SEC = 4 * 3600
+
 
 @app.task(name="tasks.digest_tasks.publish_daily_digest")
 def publish_daily_digest(
@@ -41,6 +61,105 @@ def publish_daily_digest(
     except Exception as e:  # noqa: BLE001 — задача не должна валить beat-цикл
         logger.error("daily digest: задача упала: %s", e, exc_info=True)
         return {"success": False, "error": str(e)}
+
+
+@app.task(name="tasks.digest_tasks.publish_daily_digest_region")
+def publish_daily_digest_region(
+    region_code: str, since_iso: Optional[str] = None, dry_run: bool = False
+) -> Dict[str, Any]:
+    """Сборник **одного** региона — задача веера (P234).
+
+    ``since_iso`` — начало московского дня, за который выпускается сборник
+    (ISO-строка, naive UTC). Оно закреплено в задании, а не берётся «сейчас»:
+    хвост веера с фото доходит после полуночи, и без закрепления собрал бы
+    **чужой** день.
+    """
+    since: Optional[datetime] = None
+    if since_iso:
+        try:
+            since = datetime.fromisoformat(since_iso)
+        except ValueError:
+            logger.warning("daily digest: регион=%s не разобран since=%r", region_code, since_iso)
+    try:
+        return run_coro(_publish_daily_digest(region_code, dry_run=dry_run, since=since))
+    except Exception as e:  # noqa: BLE001 — один район не валит остальные
+        logger.error("daily digest: регион=%s задача упала: %s", region_code, e, exc_info=True)
+        return {"success": False, "region": region_code, "error": str(e)}
+
+
+@app.task(name="tasks.digest_tasks.publish_daily_digest_fanout")
+def publish_daily_digest_fanout() -> Dict[str, Any]:
+    """Веером: задача на регион, регионы разнесены по минутам.
+
+    Зачем (P234): прежде сводка была одной задачей на 76 регионов и занимала
+    единственный слот воркера целиком — её снимал общий лимит 3600 с, и сборник
+    выходил примерно для трети сети, а волна ``admin`` (22:20) ждала конца
+    обхода. Теперь у каждого региона своя задача со своим сроком: хвост списка
+    не выпадает, а периодика проходит между регионами.
+
+    **Что веер НЕ чинит:** сон на троттлинге загрузки фото живёт внутри задачи
+    (замер 23.11 — 38 окон × 70 с = 44 мин из 60). Фото в сборнике владелец
+    оставил (решение 24.11), поэтому прогон с фото занимает больше часа — и
+    веер растягивает его, а не сокращает.
+    """
+    from config.runtime import get_digest_queue, get_digest_region_spread_seconds
+    from modules.publisher.daily_digest import day_start_utc
+
+    try:
+        region_codes = run_coro(_active_region_codes())
+    except Exception as e:  # noqa: BLE001 — beat-цикл не должен падать
+        logger.error("daily digest: список регионов не взят: %s", e, exc_info=True)
+        return {"success": False, "error": str(e)}
+
+    # Порядок регионов фиксируем по коду: слоты тогда не прыгают день ото дня.
+    region_codes = sorted(region_codes)
+    spread = get_digest_region_spread_seconds()
+    # День закрепляем **в момент постановки**: хвост веера (с фото) доходит
+    # после полуночи, и «с полуночи» на месте запуска взяло бы уже чужой день.
+    since_iso = day_start_utc().isoformat()
+
+    results = []
+    total = len(region_codes)
+    for index, code in enumerate(region_codes):
+        countdown = 0
+        if spread > 0 and total > 1:
+            countdown = int(round(index * spread / float(total - 1)))
+        results.append(
+            publish_daily_digest_region.apply_async(
+                args=[code, since_iso],
+                countdown=countdown,
+                # Задача не должна протухнуть, пока ждёт слот и пока тянется
+                # очередь из-за троттлинга фото.
+                expires=countdown + DIGEST_TASK_EXPIRES_SEC,
+                # Отдельная очередь (ADR-0020): 76 задач на общей очереди
+                # занимают голову списка, и мелкая периодика уезжает за ними.
+                queue=get_digest_queue(),
+            )
+        )
+    logger.info(
+        "daily digest: веер — регионов=%d, окно разведения=%s с, первый слот сразу",
+        total,
+        int(spread),
+    )
+    return {
+        "success": True,
+        "regions": region_codes,
+        "tasks": [r.id for r in results],
+        "spread": int(spread),
+        "since": since_iso,
+    }
+
+
+async def _active_region_codes() -> List[str]:
+    """Коды активных регионов, у которых есть своя группа ВК (как и раньше)."""
+    from sqlalchemy import select
+
+    from database.connection import AsyncSessionLocal
+    from database.models import Region
+
+    async with AsyncSessionLocal() as session:
+        stmt = select(Region.code).where(Region.is_active.is_(True), Region.vk_group_id.isnot(None))
+        return [str(code) for code in (await session.execute(stmt)).scalars().all()]
 
 
 def _enabled() -> bool:
@@ -59,7 +178,10 @@ def _photos_enabled() -> bool:
 
 
 async def _publish_daily_digest(
-    region_code: Optional[str] = None, *, dry_run: bool = False
+    region_code: Optional[str] = None,
+    *,
+    dry_run: bool = False,
+    since: Optional[datetime] = None,
 ) -> Dict[str, Any]:
     if not _enabled():
         return {"success": True, "skipped": "disabled"}
@@ -78,7 +200,7 @@ async def _publish_daily_digest(
         reports: List[Dict[str, Any]] = []
         for region in regions:
             try:
-                report = await _digest_for_region(session, region, dry_run=dry_run)
+                report = await _digest_for_region(session, region, dry_run=dry_run, since=since)
             except Exception as e:  # noqa: BLE001 — один район не валит остальные
                 logger.warning("daily digest: регион=%s сбой: %s", region.code, e, exc_info=True)
                 report = {"region": region.code, "success": False, "error": str(e)}
@@ -100,7 +222,9 @@ async def _publish_daily_digest(
     }
 
 
-async def _digest_for_region(session: Any, region: Any, *, dry_run: bool) -> Dict[str, Any]:
+async def _digest_for_region(
+    session: Any, region: Any, *, dry_run: bool, since: Optional[datetime] = None
+) -> Dict[str, Any]:
     from sqlalchemy import select
 
     from database.models_extended import RegionConfig, WorkTable
@@ -124,12 +248,14 @@ async def _digest_for_region(session: Any, region: Any, *, dry_run: bool) -> Dic
     )
     cursor_lips, _ = build_region_dedup_sets(work_tables)
 
-    posts = await daily_digest.collect_candidates(session, region.code, exclude_lips=cursor_lips)
+    posts = await daily_digest.collect_candidates(
+        session, region.code, since=since, exclude_lips=cursor_lips
+    )
     # Посты без текста, но с фото: в сборнике они живут картинкой (решение
     # владельца 03.11). Строк в тексте не добавляют — иначе поехала бы
     # привязка «пункт ↔ источник» в фактчеке.
     photo_candidates = await daily_digest.collect_photo_candidates(
-        session, region.code, exclude_lips=cursor_lips
+        session, region.code, since=since, exclude_lips=cursor_lips
     )
     if len(posts) < daily_digest.MIN_ITEMS:
         logger.info("daily digest: регион=%s кандидатов=%d — пропуск", region.code, len(posts))
