@@ -45,6 +45,7 @@ from web.api import (  # noqa: E402
     classifier_review,
     communities,
     discovery,
+    donor_triage,
     ecosystem,
     filtration,
     gateway,
@@ -230,6 +231,9 @@ app.include_router(
     tags=["Subscriber Growth"],
 )
 app.include_router(discovery.router, prefix="/api/discovery", tags=["Region Discovery"])
+# Разбор доноров (P236/P235): общие группы и молчащие доноры. Страница
+# /donor-triage — решение владельца мышкой; префикс не публичный (сессия).
+app.include_router(donor_triage.router, prefix="/api/donor-triage", tags=["Donor Triage"])
 app.include_router(gateway.router, prefix="/api/gateway", tags=["VK Gateway"])
 app.include_router(gateway_stats.router, prefix="/api/gateway-stats", tags=["VK Gateway Stats"])
 app.include_router(promotion.router, prefix="/api/promotion", tags=["Promotion"])
@@ -599,6 +603,12 @@ async def posts_page(request: Request):
 async def communities_page(request: Request):
     """Communities page"""
     return templates.TemplateResponse("communities.html", {"request": request})
+
+
+@app.get("/donor-triage")
+async def donor_triage_page(request: Request):
+    """Разбор доноров: общие группы и молчащие доноры — решение владельца."""
+    return templates.TemplateResponse("donor_triage.html", {"request": request})
 
 
 @app.get("/notifications")

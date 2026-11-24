@@ -128,16 +128,20 @@ sudo systemctl restart setka-celery-worker
 Юнит при этом остаётся `--queues=celery,wave`: лишняя очередь без задач просто
 пуста, и волны возвращаются в общую очередь.
 
-**Второй воркер (изоляция по процессам) — подготовлен, но не включается.**
+**Второй воркер — включён 24.11 (решение владельца).**
+
 Настоящая изоляция «периодика не ждёт волну никогда» требует отдельного
-процесса, а на боксе (1536 МБ, swap = 0) он не помещается: свободно ~270 МБ в
-волну, а воркер стоит ~280 МБ, и первым убьётся движок MiniMax. Вопрос памяти —
-за владельцем (P163/P164: RAM/vSwap у провайдера). Когда решение будет, юнит:
+процесса. Прежняя оценка «не влезает по памяти» считала второй воркер в
+~280 МБ при свободных ~270 МБ в волну; **замер 24.11 23:00** показал:
+родитель 80 МБ + ребёнок 119 МБ = **~200 МБ** на воркер, свободно **794 МБ**.
+Место есть — вопрос снят.
+
+Юнит: [`infra/celery/setka-celery-worker-wave.service`](../infra/celery/setka-celery-worker-wave.service).
 
 ```ini
 [Unit]
-Description=SETKA Celery Worker (очередь волны)
-After=network.target redis.service postgresql.service
+Description=SETKA Celery Worker — второй слот (очереди волны и вечерней сводки)
+After=network.target redis.service postgresql.service setka-celery-worker.service
 
 [Service]
 EnvironmentFile=-/etc/setka/setka.env
@@ -150,12 +154,46 @@ Environment="PATH=/home/valstan/SETKA/venv/bin:/usr/local/bin:/usr/bin:/bin"
 Environment="PYTHONPATH=/home/valstan/SETKA"
 ExecStart=/home/valstan/SETKA/venv/bin/celery -A celery_app worker \
     --loglevel=info --logfile=/home/valstan/SETKA/logs/celery-wave.log \
-    --queues=wave --hostname=wave@%h
+    --queues=wave,digest --concurrency=1 --hostname=wave@%h
 Restart=on-failure
 RestartSec=10s
+MemoryHigh=380M
+MemoryMax=460M
 
 [Install]
 WantedBy=multi-user.target
+```
+
+**Почему только `wave,digest`.** Это ровно те очереди, где задания длинные
+(MiniMax + фото): дешёвая периодика (`celery`) остаётся у первого воркера.
+Второй слот нужен там, где **расписание ждёт своей очереди**: слот 21:40 и
+волна `admin` ждали по 17 минут, потому что единственный слот уходил в волны.
+
+**Потолки памяти обязательны.** Бокс — 1,5 ГБ RAM, свопа нет. `MemoryHigh` —
+«сожмись», `MemoryMax` — «ядро снимает **только** этот cgroup», а не движок и
+не postgres (P164). Без потолка при совпадении пиков двух воркеров (движок
+MiniMax ~330 МБ в задаче) ядро выбьет случайную жертву.
+
+Установка и откат:
+
+```bash
+# установка
+sudo cp ~/SETKA/infra/celery/setka-celery-worker-wave.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now setka-celery-worker-wave.service
+systemctl is-active setka-celery-worker-wave.service
+
+# откат: остановить и убрать второй слот
+sudo systemctl disable --now setka-celery-worker-wave.service
+sudo rm /etc/systemd/system/setka-celery-worker-wave.service
+sudo systemctl daemon-reload
+```
+
+Проверка, что воркер жив и слоты делятся:
+
+```bash
+cd ~/SETKA && ./venv/bin/celery -A celery_app inspect active_queues
+free -m | head -2
 ```
 
 Имя узла `wave@%h` — **обязательно**: без него два воркера назывались бы одинаково
