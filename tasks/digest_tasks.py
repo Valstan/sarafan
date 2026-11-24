@@ -88,7 +88,7 @@ def publish_daily_digest_region(
 
 
 @app.task(name="tasks.digest_tasks.publish_daily_digest_fanout")
-def publish_daily_digest_fanout() -> Dict[str, Any]:
+def publish_daily_digest_fanout(dry_run: bool = False) -> Dict[str, Any]:
     """Веером: задача на регион, регионы разнесены по минутам.
 
     Зачем (P234): прежде сводка была одной задачей на 76 регионов и занимала
@@ -101,6 +101,9 @@ def publish_daily_digest_fanout() -> Dict[str, Any]:
     (замер 23.11 — 38 окон × 70 с = 44 мин из 60). Фото в сборнике владелец
     оставил (решение 24.11), поэтому прогон с фото занимает больше часа — и
     веер растягивает его, а не сокращает.
+
+    ``dry_run=True`` — прогон без публикации: превью соберётся и уйдёт в лог
+    воркера (тот же путь, что у ``publish_daily_digest(dry_run=True)``).
     """
     from config.runtime import get_digest_queue, get_digest_region_spread_seconds
     from modules.publisher.daily_digest import day_start_utc
@@ -127,6 +130,7 @@ def publish_daily_digest_fanout() -> Dict[str, Any]:
         results.append(
             publish_daily_digest_region.apply_async(
                 args=[code, since_iso],
+                kwargs={"dry_run": bool(dry_run)},
                 countdown=countdown,
                 # Задача не должна протухнуть, пока ждёт слот и пока тянется
                 # очередь из-за троттлинга фото.

@@ -25,19 +25,20 @@ import pytest
 from tasks import digest_tasks
 
 
-def _dispatch(regions, *, spread_env=None):
+def _dispatch(regions, *, spread_env=None, dry_run=False):
     """Прогнать веер с подменёнными регионами и собрать отправленные задачи."""
     sent = []
 
-    def _fake_apply_async(args=None, countdown=None, expires=None, **kwargs):
+    def _fake_apply_async(args=None, kwargs=None, countdown=None, expires=None, **extra):
         task = MagicMock()
         task.id = "task-%s" % (args[0] if args else "?")
         sent.append(
             {
                 "args": args,
+                "kwargs": kwargs or {},
                 "countdown": countdown,
                 "expires": expires,
-                "queue": kwargs.get("queue"),
+                "queue": extra.get("queue"),
             }
         )
         return task
@@ -57,7 +58,7 @@ def _dispatch(regions, *, spread_env=None):
                 "apply_async",
                 side_effect=_fake_apply_async,
             ):
-                result = digest_tasks.publish_daily_digest_fanout()
+                result = digest_tasks.publish_daily_digest_fanout(dry_run=dry_run)
     return result, sent
 
 
@@ -113,6 +114,13 @@ def test_day_is_pinned_in_the_task():
 
     assert result["since"]
     assert sent[0]["args"][1] == result["since"]
+
+
+def test_dry_run_does_not_publish():
+    """Превью веера: ни одна задача не публикует."""
+    _, sent = _dispatch(["mi"], dry_run=True)
+
+    assert sent[0]["kwargs"].get("dry_run") is True
 
 
 def test_beat_calls_the_fanout():
