@@ -1,0 +1,38 @@
+[Unit]
+Description=SETKA Celery Worker — второй слот (очереди волны и вечерней сводки)
+After=network.target redis.service postgresql.service setka-celery-worker.service
+Wants=network.target
+
+[Service]
+EnvironmentFile=-/etc/setka/setka.env
+EnvironmentFile=/etc/setka/secrets-token.env
+Type=simple
+User=valstan
+Group=valstan
+WorkingDirectory=/home/valstan/SETKA
+Environment="PATH=/home/valstan/SETKA/venv/bin:/usr/local/bin:/usr/bin:/bin"
+Environment="PYTHONPATH=/home/valstan/SETKA"
+# Метрики Prometheus: каталог общий с первым воркером (у multiproc-режима
+# каждая копия пишет свой подкаталог по pid) — так же, как в drop-in
+# первого воркера.
+Environment=PROMETHEUS_MULTIPROC_DIR=/var/lib/setka/prom_multiproc
+ExecStartPre=/bin/mkdir -p /var/lib/setka/prom_multiproc
+ExecStartPre=/bin/chown valstan:valstan /var/lib/setka/prom_multiproc
+ExecStartPre=/bin/chmod 0750 /var/lib/setka/prom_multiproc
+# Только волны и сводка: дешёвая периодика (`celery`) остаётся у первого
+# воркера. Второй слот нужен ровно там, где задания длинные (MiniMax + фото),
+# иначе первый слот уходит в них и расписание (слот 21:40, волна `admin`)
+# ждёт своей очереди (P233, ADR-0020).
+ExecStart=/home/valstan/SETKA/venv/bin/celery -A celery_app worker --loglevel=info --logfile=/home/valstan/SETKA/logs/celery-wave.log --queues=wave,digest --concurrency=1 --hostname=wave@%h
+Restart=on-failure
+RestartSec=10s
+
+# Бокс — 1,5 ГБ RAM, свопа нет (P163/P164). Второй воркер обязан быть в своих
+# границах: MemoryHigh — «сожмись», MemoryMax — «ядро снимает ТОЛЬКО этот
+# cgroup», а не движок и не postgres. Без потолка при совпадении пиков двух
+# воркеров (движок MiniMax ~330 МБ в задаче) ядро выбьет случайную жертву.
+MemoryHigh=380M
+MemoryMax=460M
+
+[Install]
+WantedBy=multi-user.target
