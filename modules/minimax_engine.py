@@ -1263,6 +1263,17 @@ def run_classification(
     классификатора; для переписывания и конвейера задание своё (см.
     ``task_text_for``) — иначе модель отвечает вердиктами вместо пересказа.
     """
+    # CLI MiniMax отказывается работать с пустым файлом системного промта
+    # («--system-prompt-file ... is empty»). Это **наша** ошибка (вызывающий
+    # не дал промт), а не отказ аккаунта — но выглядит как поломка движка и
+    # стоит вызова. 24.11 так discovery откатывался на платный Дипсик весь
+    # ночной срез. Проверяем до всего остального: пустой промт — это наш баг,
+    # и прятать его за «cli_missing» незачем.
+    system_text = (system or "").strip()
+    if not system_text:
+        logger.error("minimax: пустой системный промт — вызов не делаем")
+        return False, "", {"reason": "empty_system", "detail": "системный промт пуст"}
+
     cli = os.getenv(ENV_CLI) or DEFAULT_CLI
     # which() возвращает путь С расширением (mcode.cmd на Windows) — без него
     # subprocess файл не находит: он не ищет по PATHEXT.
@@ -1280,7 +1291,7 @@ def run_classification(
     tmpdir = Path(tempfile.mkdtemp(prefix="minimax-"))
     try:
         system_file = tmpdir / "system.md"
-        system_file.write_text(system or "", encoding="utf-8")
+        system_file.write_text(system_text, encoding="utf-8")
         # Посты — файлом-вложением, а не строкой в промпте. Замерено 13.11:
         # агент-кодер содержимое задачи не считает данными и просит «пришлите
         # посты», пока содержимое не придёт вложением. В lightweight-режиме

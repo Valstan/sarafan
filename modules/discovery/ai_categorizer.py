@@ -80,6 +80,82 @@ ALLOWED_CATEGORIES: tuple[str, ...] = (
 )
 
 
+#: Роль и порядок изложения — одинаковые для обоих движков.
+_ROLE = (
+    "Ты — модератор сети региональных пабликов ВКонтакте. Тебе показывают "
+    "VK-сообщество, его кратко надо классифицировать по тематике. "
+)
+
+#: Инструкция: список категорий и расшифровки.
+_CATEGORY_DEFS = (
+    "Выбери одну категорию из этого списка (строго ровно одно слово):\n"
+    "  {cats}\n\n"
+    "Где:\n"
+    "  admin   — официальные органы (администрация района, депутаты, госорганы);\n"
+    "  novost  — новостной паблик района/города;\n"
+    "  reklama — объявления, барахолка, доска, куплю/продам;\n"
+    "  sosed   — соседи, ДТП, происшествия, флуд жителей;\n"
+    "  kultura — культура, афиша, дом культуры, библиотеки;\n"
+    "  sport   — спорт, фитнес, секции, команды;\n"
+    "  detsad  — детский сад, школа, родительские чаты;\n"
+    "  other   — ничего из перечисленного не подходит.\n\n"
+)
+
+#: Что ещё спросить и в каком виде ответить.
+_JSON_SCHEMA = (
+    "Также определи: похоже ли это сообщество на ГЛАВНУЮ ИНФО-страницу "
+    "района (универсальный паблик, центр коммуникации, обычно тысячи "
+    "подписчиков, постит и новости, и объявления). Если да — is_info_page=true.\n\n"
+    "Верни ТОЛЬКО валидный JSON-объект, БЕЗ markdown-ограждений, "
+    "БЕЗ префикса 'json':\n"
+    '{"category": "<one of the list>", "confidence": <0-100 integer>, '
+    '"is_info_page": <true|false>, "reasoning": "<одна короткая фраза>"}'
+)
+
+
+def _region_part(region_name: Optional[str]) -> str:
+    return (
+        f"Регион (район), к которому хотим привязать сообщество: «{region_name}». "
+        if region_name
+        else ""
+    )
+
+
+def _build_instructions() -> str:
+    """Инструкция без данных: список категорий, расшифровки, форма ответа."""
+    return _CATEGORY_DEFS.format(cats=", ".join(ALLOWED_CATEGORIES)) + _JSON_SCHEMA
+
+
+def _build_card(
+    *,
+    name: str,
+    description: Optional[str],
+    members_count: Optional[int],
+    recent_posts: Iterable[str],
+) -> str:
+    """Карточка сообщества — данные, без инструкций.
+
+    Отдельной частью нужна для MiniMax: CLI получает системный промт файлом и
+    карточку файлом (см. ``_call_minimax``), а Дипсик — один общий промт.
+    """
+    members_part = f" (~{members_count} подписчиков)" if members_count else ""
+    posts_block = "\n".join(
+        f"- {p.strip()[:250]}" for p in list(recent_posts)[:10] if (p or "").strip()
+    )
+    if not posts_block:
+        posts_block = "(нет доступных постов для анализа)"
+    return (
+        f"Сообщество: «{(name or '').strip()}»{members_part}.\n"
+        f"Описание: «{(description or '').strip()[:600] or '—'}».\n"
+        f"Последние посты:\n{posts_block}\n\n"
+    )
+
+
+def _build_system_prompt(*, region_name: Optional[str] = None) -> str:
+    """Системный промт MiniMax: роль + инструкция (без карточки)."""
+    return _ROLE + _region_part(region_name) + _build_instructions()
+
+
 def _build_prompt(
     *,
     name: str,
@@ -88,43 +164,17 @@ def _build_prompt(
     recent_posts: Iterable[str],
     region_name: Optional[str] = None,
 ) -> str:
-    members_part = f" (~{members_count} подписчиков)" if members_count else ""
-    region_part = (
-        f"Регион (район), к которому хотим привязать сообщество: «{region_name}». "
-        if region_name
-        else ""
-    )
-    posts_block = "\n".join(
-        f"- {p.strip()[:250]}" for p in list(recent_posts)[:10] if (p or "").strip()
-    )
-    if not posts_block:
-        posts_block = "(нет доступных постов для анализа)"
-    cats_list = ", ".join(ALLOWED_CATEGORIES)
+    """Полный промт для Дипсика: роль, карточка, инструкция (как раньше)."""
     return (
-        "Ты — модератор сети региональных пабликов ВКонтакте. Тебе показывают "
-        "VK-сообщество, его кратко надо классифицировать по тематике. "
-        f"{region_part}"
-        f"Сообщество: «{(name or '').strip()}»{members_part}.\n"
-        f"Описание: «{(description or '').strip()[:600] or '—'}».\n"
-        f"Последние посты:\n{posts_block}\n\n"
-        "Выбери одну категорию из этого списка (строго ровно одно слово):\n"
-        f"  {cats_list}\n\n"
-        "Где:\n"
-        "  admin   — официальные органы (администрация района, депутаты, госорганы);\n"
-        "  novost  — новостной паблик района/города;\n"
-        "  reklama — объявления, барахолка, доска, куплю/продам;\n"
-        "  sosed   — соседи, ДТП, происшествия, флуд жителей;\n"
-        "  kultura — культура, афиша, дом культуры, библиотеки;\n"
-        "  sport   — спорт, фитнес, секции, команды;\n"
-        "  detsad  — детский сад, школа, родительские чаты;\n"
-        "  other   — ничего из перечисленного не подходит.\n\n"
-        "Также определи: похоже ли это сообщество на ГЛАВНУЮ ИНФО-страницу "
-        "района (универсальный паблик, центр коммуникации, обычно тысячи "
-        "подписчиков, постит и новости, и объявления). Если да — is_info_page=true.\n\n"
-        "Верни ТОЛЬКО валидный JSON-объект, БЕЗ markdown-ограждений, "
-        "БЕЗ префикса 'json':\n"
-        '{"category": "<one of the list>", "confidence": <0-100 integer>, '
-        '"is_info_page": <true|false>, "reasoning": "<одна короткая фраза>"}'
+        _ROLE
+        + _region_part(region_name)
+        + _build_card(
+            name=name,
+            description=description,
+            members_count=members_count,
+            recent_posts=recent_posts,
+        )
+        + _build_instructions()
     )
 
 
@@ -189,13 +239,27 @@ def _paid_fallback_enabled() -> bool:
     return raw not in ("0", "false", "no", "off")
 
 
-def _call_minimax(prompt: str) -> Dict[str, Any]:
-    """Вызов MiniMax Code (free-тир). Контракт тот же, что у Дипсика."""
+def _call_minimax(prompt: str, *, system: str = "", card: str = "") -> Dict[str, Any]:
+    """Вызов MiniMax Code (free-тир). Контракт тот же, что у Дипсика.
+
+    ⚠️ **Системный промт обязателен.** CLI MiniMax отказывается работать с
+    пустым файлом промта («--system-prompt-file ... is empty») — и это выглядит
+    как поломка движка, а не как ошибка вызывающего. 24.11 это стоило 385
+    отказов и отката всего ночного среза discovery на платный Дипсик: путь
+    «discovery на MiniMax» не отработал ни разу с переключения 23.11.
+
+    Файлы для CLI: системный промт — инструкция, вложение — карточка
+    сообщества (её же ждёт задание ``TASK_TEXT_DISCOVERY``).
+    """
     from modules.minimax_engine import chat as _minimax_chat
 
     # ``label`` задаёт и метку в журнале расхода, и текст задания для CLI
     # (у discovery он свой — см. ``TASK_BY_LABEL`` в minimax_engine).
-    return _minimax_chat(user=prompt, label="discovery")
+    return _minimax_chat(
+        system=system,
+        user=card or prompt,
+        label="discovery",
+    )
 
 
 def _call_deepseek(prompt: str) -> Dict[str, Any]:
@@ -209,9 +273,9 @@ def _call_deepseek(prompt: str) -> Dict[str, Any]:
     )
 
 
-def _call_engine(engine: str, prompt: str) -> Dict[str, Any]:
+def _call_engine(engine: str, prompt: str, **kwargs: Any) -> Dict[str, Any]:
     if engine == "minimax":
-        return _call_minimax(prompt)
+        return _call_minimax(prompt, **kwargs)
     if engine == "deepseek":
         return _call_deepseek(prompt)
     raise RuntimeError("неизвестный движок категоризации: %s" % engine)
@@ -241,12 +305,23 @@ async def categorize_candidate(
         recent_posts=recent_posts or [],
         region_name=region_name,
     )
+    # MiniMax получает инструкцию и карточку по отдельности: системный промт
+    # файлом, карточка — вложением (см. ``_call_minimax``).
+    system_prompt = _build_system_prompt(region_name=region_name)
+    card = _build_card(
+        name=name,
+        description=description,
+        members_count=members_count,
+        recent_posts=recent_posts or [],
+    )
 
     engine = _engine_name()
     # Движки синхронные (urllib / CLI) — уводим в поток, чтобы не блокировать
     # event loop.
     try:
-        result = await asyncio.to_thread(_call_engine, engine, prompt)
+        result = await asyncio.to_thread(
+            _call_engine, engine, prompt, system=system_prompt, card=card
+        )
     except RuntimeError as exc:
         return {"success": False, "error": str(exc), "engine": engine}
 
