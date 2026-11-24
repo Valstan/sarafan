@@ -123,6 +123,46 @@ def stem(word: str) -> str:
     return word[:_KEY_LEN]
 
 
+#: Минимальная длина маркера района. Короче — слишком много случайных
+#: совпадений («мало», «верх», «татар»).
+_MARKER_LEN = 5
+
+#: Слова, которые не называют район, а только страну/область/тип пункта.
+_NOT_DISTRICT_WORDS = (
+    "инфо",
+    "новости",
+    "новость",
+    "область",
+    "области",
+    "район",
+    "города",
+    "город",
+)
+
+
+def district_markers(region_name: Optional[str]) -> List[str]:
+    """Маркеры района по его названию: «ВЕРХНИЙ УСЛОН - ИНФО» → «услон».
+
+    Название региона в этом проекте начинается с названия района
+    («ТУЖА, Кировская область», «ЛАИШЕВО - ИНФО»), поэтому district-часть —
+    всё до первого «-» или «,». Из неё берутся **начала слов** (5 букв):
+    они одинаковы в именительном и прилагательном падеже («Елабуга» /
+    «Елабужского района»), поэтому описание вида «... Верхнеуслонского
+    муниципального района» узнаёт свой район.
+
+    Типовые слова («верхний», «нижний», «малые») в маркер не идут: они
+    принадлежат десяткам наших районов и только засоряли бы разбор.
+    """
+    head = (region_name or "").split("-")[0].split(",")[0]
+    markers: List[str] = []
+    for word in norm_text(head).split():
+        if word in _NOISE_WORDS or word in _NOT_DISTRICT_WORDS:
+            continue
+        if len(word) >= _MARKER_LEN:
+            markers.append(word[:_MARKER_LEN])
+    return markers
+
+
 class LocalityIndex:
     """Наши населённые пункты и названия регионов → регион, которому они belong.
 
@@ -377,15 +417,17 @@ async def collect_candidates(
 
     shared: List[Dict[str, Any]] = []
     for group in collect_shared_groups(rows, regions, own_main, publications):
+        description = group_descriptions.get(int(group["vk_id"]), "")
         rec = recommend_shared(
             group["regs"],
-            group_name=" ".join([group["name"], group_descriptions.get(int(group["vk_id"]), "")]),
+            group_name=group["name"],
+            group_description=description,
             group_city=group_cities.get(int(group["vk_id"]), ""),
             region_cities=region_cities,
             index=index,
         )
         group["group_city"] = group_cities.get(int(group["vk_id"]), "")
-        group["description"] = group_descriptions.get(int(group["vk_id"]), "")[:200]
+        group["description"] = description[:200]
         group["recommendation"] = rec
         shared.append(group)
 
@@ -672,6 +714,7 @@ def recommend_shared(
     regs: Sequence[Dict[str, Any]],
     *,
     group_name: str = "",
+    group_description: str = "",
     group_city: str = "",
     region_cities: Optional[Dict[int, str]] = None,
     index: Optional[LocalityIndex] = None,
@@ -682,12 +725,17 @@ def recommend_shared(
 
     1. **Город совпал ровно с одним регионом** → оставляем там, остальное
        выключаем (это уже сделано правилом из P236).
-    2. **В названии группы — локалитет ровно одного из наших регионов** →
+    2. **В описании назван ровно один наш район** → оставляем там. Описание
+       группы — это её официальный адрес («... Верхнеуслонского муниципального
+       района»), и оно сильнее названия: название может называть деревню,
+       одинаково названную в двух наших районах.
+    3. **В названии группы — локалитет ровно одного из наших регионов** →
        оставляем там. Так отсеиваются группы из деревень (город региона —
        районный центр, а группа живёт в селе).
-    3. **В названии — локалитеты нескольких наших регионов** → группа честно
+    4. **В названии — локалитеты нескольких наших регионов** → группа честно
        охватывает несколько районов: **оставляем везде**, ничего не выключаем.
-    4. **Ничего не нашли** → по истории: регион, где у группы больше постов
+    5. **В описании — наш НП** (район не назван) → оставляем там.
+    6. **Ничего не нашли** → по истории: регион, где у группы больше постов
        (с заметным отрывом) → оставляем там; иначе — **решение за человеком**.
     """
     region_cities = region_cities or {}
@@ -718,7 +766,28 @@ def recommend_shared(
             "confidence": "high",
         }
 
-    # 2 и 3. локалитеты из названия группы
+    # 2. район назван в описании: официальный адрес сильнее названия группы
+    if group_description:
+        desc_norm = norm_text(group_description)
+        named = [
+            int(r["region_id"])
+            for r in regs
+            if any(marker in desc_norm for marker in district_markers(r.get("region_name")))
+        ]
+        if len(named) == 1:
+            keep_id = named[0]
+            code = next(
+                (str(r.get("region_code", "")) for r in regs if int(r["region_id"]) == keep_id), ""
+            )
+            return {
+                "action": "keep_region",
+                "keep_region_ids": [keep_id],
+                "drop_row_ids": [int(r["row_id"]) for r in regs if int(r["region_id"]) != keep_id],
+                "reason": "в описании группы назван наш район: %s" % code,
+                "confidence": "high",
+            }
+
+    # 3 и 4. локалитеты из названия группы
     mentions = index.regions_mentioned(group_name) if index else {}
     mentioned_here = [rid for rid in mentions if rid in ids]
     if len(mentioned_here) == 1:
@@ -742,7 +811,22 @@ def recommend_shared(
             "confidence": "medium",
         }
 
-    # 4. история
+    # 5. локалитет из описания (район не назван, но место упомянуто)
+    if group_description and index:
+        desc_mentions = index.regions_mentioned(group_description)
+        desc_here = [rid for rid in desc_mentions if rid in ids]
+        if len(desc_here) == 1:
+            keep_id = desc_here[0]
+            return {
+                "action": "keep_region",
+                "keep_region_ids": [keep_id],
+                "drop_row_ids": [int(r["row_id"]) for r in regs if int(r["region_id"]) != keep_id],
+                "reason": "в описании группы — наш НП: %s"
+                % ", ".join(desc_mentions.get(keep_id, [])[:2]),
+                "confidence": "medium",
+            }
+
+    # 6. история
     ranked = sorted(
         regs,
         key=lambda r: (
