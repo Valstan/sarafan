@@ -131,6 +131,21 @@ def test_beat_calls_the_fanout():
     assert entry["task"] == "tasks.digest_tasks.publish_daily_digest_fanout"
 
 
+def test_beat_entry_outlives_the_shared_queue_wait():
+    """Слот 21:40 не должен пропасть молча, пока ждёт свою очередь.
+
+    Замер 24.11: бокс однопроцессный (1 CPU → один слот воркера), общая очередь
+    ``celery`` к 21:40 — глубиной ~180 заданий. Бит отдал веер в 21:40, воркер
+    взял его в 21:57 (+17 мин). При ``expires`` в 1800 с задача истекла бы в
+    22:10 — и за сутки не вышел бы **ни один** сборник, без единой ошибки в
+    логах: задача просто исчезла бы из очереди.
+    """
+    from tasks.celery_app import app
+
+    entry = (app.conf.beat_schedule or {})["daily-digest-evening"]
+    assert entry["options"]["expires"] >= 7200
+
+
 @pytest.mark.asyncio
 async def test_since_is_threaded_to_candidate_collection(monkeypatch):
     """Закреплённый ``since`` доходит до отбора кандидатов.
