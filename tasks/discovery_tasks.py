@@ -576,8 +576,10 @@ async def recheck_communities_for_region_async(
 ) -> Dict[str, Any]:
     """Health-check для всех ``is_active=True`` сообществ одного региона.
 
-    Перебирает Community → ``check_community_health`` → in-place UPDATE
-    полей ``health_status`` / ``last_post_at`` / ``checked_at`` /
+    Две фазы: сначала VK-часть по всем сообществам
+    (``collect_community_health_pre_ai``), затем вердикты ИИ — **партиями**
+    (``_categorize_region_in_batches``), и только потом in-place UPDATE полей
+    ``health_status`` / ``last_post_at`` / ``checked_at`` /
     ``suggested_category``. Не трогает строки, помеченные модератором
     ``is_active=False`` (история постов остаётся валидной, но recheck
     не нужен).
