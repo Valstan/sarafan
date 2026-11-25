@@ -22,6 +22,13 @@ Env vars:
                                 # публикации движка, 180 с)
   REWRITE_PAID_TOPUP=1          # добивать ли пропущенный пост платным Дипсиком
                                 # (страховка по решению владельца 17.11)
+  REWRITE_PAID_FALLBACK=auto    # платная страховка на ОТКАЗ движка:
+                                #   auto  (дефолт) — не платим за «бокс не дал
+                                #           место» (insufficient_memory,
+                                #           cli_slot_busy, oom_killed, timeout):
+                                #           пост уходит с исходным текстом (fail-open);
+                                #   1     — платим всегда (прежнее поведение);
+                                #   0     — не платим никогда (и добивка тоже выкл)
 """
 
 from __future__ import annotations
@@ -162,6 +169,49 @@ def get_rewrite_timeout_for_engine(engine: str) -> float:
 #: Env-переключатель страховки: добивать ли пропущенный пост платным Дипсиком.
 ENV_PAID_TOPUP = "REWRITE_PAID_TOPUP"
 
+#: Env-переключатель платной страховки на **отказ движка**.
+ENV_PAID_FALLBACK = "REWRITE_PAID_FALLBACK"
+
+#: Отказы, которые означают «на боксе нет места», а не «движок сломан».
+#:
+#: Первые два — из ``modules/minimax_capacity.py`` (регулятор ёмкости: слот не
+#: дал память / слот занят), третий и четвёртый — из
+#: ``modules/minimax_engine.py`` (ядро сняло CLI по памяти / CLI не успел за
+#: потолок — тоже следствие тесноты бокса).
+#:
+#: **Почему переписывание на них не платит** (решение владельца 25.11: «когда
+#: слота не хватает, первым должен уступать переписывание, а не классификация»):
+#: переписывание — **косметика**. Пост и так уходит в ленту (исходный текст
+#: источника, fail-open), а платный Дипсик на каждый отказ — это деньги за
+#: украшение. Замер 25.11: 52 платных вызова в сутки именно на этом пути,
+#: из них 33 — отказ по ёмкости (28 ``insufficient_memory`` + 3
+#: ``cli_slot_busy`` + 2 ``timeout``).
+CAPACITY_REASONS = (
+    "insufficient_memory",
+    "cli_slot_busy",
+    "oom_killed",
+    "timeout",
+)
+
+
+def get_rewrite_paid_fallback() -> str:
+    """Режим платной страховки переписывания: ``auto`` | ``always`` | ``never``.
+
+    - ``auto`` (дефолт) — платная страховка **не срабатывает** на отказы по
+      ёмкости бокса (:data:`CAPACITY_REASONS`): пост уходит с исходным текстом,
+      деньги не тратятся;
+    - ``always`` (``1``) — прежнее поведение: любой отказ MiniMax закрывается
+      платным Дипсиком;
+    - ``never`` (``0``) — не платим никогда (и добивка пропущенного блока тоже
+      выключена — см. :func:`paid_topup_enabled`).
+    """
+    raw = (os.getenv(ENV_PAID_FALLBACK) or "auto").strip().lower()
+    if raw in ("0", "false", "no", "off", "never"):
+        return "never"
+    if raw in ("1", "true", "yes", "on", "always"):
+        return "always"
+    return "auto"
+
 
 def paid_topup_enabled() -> bool:
     """Разрешено ли добирать пропущенный пост платным Дипсиком.
@@ -172,7 +222,11 @@ def paid_topup_enabled() -> bool:
 
     Отключается двумя рубильниками: ``REWRITE_PAID_TOPUP=0`` — только этот путь,
     ``CLASSIFIER_PAID_FALLBACK=0`` — вся платная страховка разом (счёт закрыт).
+    Режим ``REWRITE_PAID_FALLBACK=0`` («переписывание не платит никогда») гасит
+    и эту добивку: иначе «не платим» означало бы «платим, но другим путём».
     """
+    if get_rewrite_paid_fallback() == "never":
+        return False
     raw = (os.getenv(ENV_PAID_TOPUP) or "1").strip().lower()
     if raw in ("0", "false", "no", "off"):
         return False

@@ -612,6 +612,72 @@ def test_padding_against_short_source_is_rejected(monkeypatch):
     assert post["text"] == source
 
 
+# ───────── платная страховка: переписывание не платит за отказ по ёмкости ─────────
+
+
+def _seen_chat_call(monkeypatch) -> dict:
+    """Подменить движок и вернуть словарь аргументов последнего вызова."""
+    seen: dict = {}
+
+    def fake_chat(**kwargs):
+        seen.update(kwargs)
+        return {"ok": False, "reason": "insufficient_memory"}
+
+    monkeypatch.setattr("modules.classifier.headless.chat", fake_chat)
+    return seen
+
+
+def test_rewrite_skips_paid_fallback_on_capacity(monkeypatch):
+    """Переписывание — косметика: на отказ по ёмкости бокса платный Дипсик не зовётся.
+
+    Замер 25.11: 52 платных вызова в сутки на этом пути, 33 — именно отказ по
+    ёмкости (28 ``insufficient_memory`` + 3 ``cli_slot_busy`` + 2 ``timeout``).
+    Пост и без Дипсика уходит в ленту — с исходным текстом (fail-open).
+    """
+    monkeypatch.delenv("REWRITE_PAID_FALLBACK", raising=False)
+    seen = _seen_chat_call(monkeypatch)
+
+    rewriter._chat_call(user="u", system="s")
+
+    assert seen["skip_paid_reasons"] == rewriter.CAPACITY_REASONS
+    assert "insufficient_memory" in seen["skip_paid_reasons"]
+    assert "cli_slot_busy" in seen["skip_paid_reasons"]
+
+
+def test_rewrite_never_pays_when_mode_never(monkeypatch):
+    """Режим ``REWRITE_PAID_FALLBACK=0`` — переписывание не платит никогда."""
+    monkeypatch.setenv("REWRITE_PAID_FALLBACK", "0")
+    seen = _seen_chat_call(monkeypatch)
+
+    rewriter._chat_call(user="u", system="s")
+
+    assert seen["paid_fallback"] is False
+    assert "skip_paid_reasons" not in seen
+
+
+def test_rewrite_pays_always_when_mode_always(monkeypatch):
+    """Режим ``REWRITE_PAID_FALLBACK=1`` — прежнее поведение (платим всегда)."""
+    monkeypatch.setenv("REWRITE_PAID_FALLBACK", "1")
+    seen = _seen_chat_call(monkeypatch)
+
+    rewriter._chat_call(user="u", system="s")
+
+    assert "paid_fallback" not in seen
+    assert "skip_paid_reasons" not in seen
+
+
+def test_never_mode_also_disables_paid_topup(monkeypatch):
+    """«Не платим никогда» должно значить «не платим никогда»: и добивка тоже."""
+    from config import post_rewrite as cfg
+
+    monkeypatch.setenv("REWRITE_PAID_FALLBACK", "0")
+    assert cfg.paid_topup_enabled() is False
+
+    monkeypatch.setenv("REWRITE_PAID_FALLBACK", "auto")
+    monkeypatch.setenv("REWRITE_PAID_TOPUP", "1")
+    assert cfg.paid_topup_enabled() is True
+
+
 def test_prompt_carries_region_and_theme():
     prompt = rewriter.build_prompt("текст", region="Малмыж", theme="культура")
     assert "Малмыж" in prompt
