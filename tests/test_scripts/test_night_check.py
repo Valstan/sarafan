@@ -18,7 +18,13 @@ import night_check as nc  # noqa: E402
 
 
 def _row(ts: str, label: str = "discovery", ok: bool = True, engine: str = "minimax") -> dict:
-    return {"ts": ts, "label": label, "ok": ok, "reason": "" if ok else "exec_failed", "engine": engine}
+    return {
+        "ts": ts,
+        "label": label,
+        "ok": ok,
+        "reason": "" if ok else "exec_failed",
+        "engine": engine,
+    }
 
 
 def test_window_starts_at_four_msk() -> None:
@@ -55,7 +61,9 @@ def test_discovery_calls_reports_window() -> None:
 
 
 def test_task_report_time_limit_kill_is_fail() -> None:
-    log = "Task tasks.discovery_tasks.recheck_all_active_regions[abc] raised SoftTimeLimitExceeded\n"
+    log = (
+        "Task tasks.discovery_tasks.recheck_all_active_regions[abc] raised SoftTimeLimitExceeded\n"
+    )
     verdicts = nc.check_task_report(log)
     assert verdicts[0].status == nc.Verdict.FAIL
     assert "time_limit" in verdicts[0].detail
@@ -126,5 +134,7 @@ def test_no_paid_calls_is_ok() -> None:
 )
 def test_worker_markers_counted(text: str, regulator: int, exec_failed: int) -> None:
     verdicts = {v.name: v for v in nc.check_worker_markers(text)}
-    assert int(verdicts["отказы регулятора (cli_slot_busy / insufficient_memory)"].detail) == regulator
+    assert (
+        int(verdicts["отказы регулятора (cli_slot_busy / insufficient_memory)"].detail) == regulator
+    )
     assert int(verdicts["отказы движка в логе воркера (exec_failed)"].detail) == exec_failed

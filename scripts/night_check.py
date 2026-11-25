@@ -114,7 +114,9 @@ def parse_task_result(payload: str) -> Dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def check_discovery_calls(rows: List[Dict[str, Any]], start: datetime, end: datetime) -> List[Verdict]:
+def check_discovery_calls(
+    rows: List[Dict[str, Any]], start: datetime, end: datetime
+) -> List[Verdict]:
     """Вызовы движка меткой ``discovery`` за окно ночи."""
     calls = []
     for row in rows:
@@ -161,12 +163,16 @@ def check_task_report(log_text: str) -> List[Verdict]:
                     "задача убита по time_limit — отчёта не будет",
                 )
             ]
-        return [Verdict("отчёт среза (tokens_measured / engines)", Verdict.NA, "строки результата нет")]
+        return [
+            Verdict("отчёт среза (tokens_measured / engines)", Verdict.NA, "строки результата нет")
+        ]
     last = matches[-1]
     elapsed = float(last.group("secs"))
     payload = parse_task_result(last.group("payload"))
     if not payload:
-        return [Verdict("отчёт среза (tokens_measured / engines)", Verdict.NA, "результат не разобран")]
+        return [
+            Verdict("отчёт среза (tokens_measured / engines)", Verdict.NA, "результат не разобран")
+        ]
 
     measured = bool(payload.get("tokens_measured"))
     engines = payload.get("engines") or {}
@@ -218,9 +224,7 @@ def count_log_markers(log_text: str, needles: Tuple[str, ...]) -> int:
 def check_oom_kills() -> List[Verdict]:
     """Ядерные убийства CLI — окно печатаем обязательно (буфер ``dmesg`` чистится)."""
     try:
-        out = subprocess.run(
-            ["dmesg", "-T"], capture_output=True, text=True, timeout=30
-        ).stdout
+        out = subprocess.run(["dmesg", "-T"], capture_output=True, text=True, timeout=30).stdout
     except (OSError, subprocess.SubprocessError):
         return [Verdict("ядерные убийства minimax-code", Verdict.NA, "dmesg недоступен")]
     lines = [line for line in out.splitlines() if OOM_RE.search(line)]
@@ -309,7 +313,10 @@ def main() -> int:
 
     print("=== ночная проверка среза discovery ===")
     print("ночь: %s, окно вызовов %s … %s (UTC)" % (night, start.isoformat(), end.isoformat()))
-    print("замер сделан: %s (МСК) — счётчик dmesg считается сейчас, не задним числом" % datetime.now(MSK).strftime("%Y-%m-%d %H:%M"))
+    print(
+        "замер сделан: %s (МСК) — счётчик dmesg считается сейчас, не задним числом"
+        % datetime.now(MSK).strftime("%Y-%m-%d %H:%M")
+    )
     print()
 
     verdicts: List[Verdict] = []
@@ -334,7 +341,9 @@ def main() -> int:
     failed = [v for v in verdicts if v.status == Verdict.FAIL]
     unknown = [v for v in verdicts if v.status == Verdict.NA]
     print()
-    print("итог: %d проверок, провалов %d, без данных %d" % (len(verdicts), len(failed), len(unknown)))
+    print(
+        "итог: %d проверок, провалов %d, без данных %d" % (len(verdicts), len(failed), len(unknown))
+    )
     if failed:
         return 1
     if unknown:
