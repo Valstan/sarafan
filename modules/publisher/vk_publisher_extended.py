@@ -131,7 +131,23 @@ class VKPublisher:
     # modules/promotion/group_setup_vk.py, probe 2026-08-28). wall.post с
     # post_id=<предложенный> тоже только user-токеном админа, но метод у него
     # общий с обычной публикацией — поэтому он идёт через ``user_only=True``.
-    _USER_TOKEN_ONLY_METHODS = frozenset({"wall.repost", "wall.pin", "wall.unpin"})
+    #
+    # wall.delete — та же история, и с дорогими последствиями. Community-токен
+    # удалять посты не может в принципе: VK отвечает кодом 27 «method is
+    # unavailable with group auth» (46 отказов в прод-логах 29.09–25.11), и
+    # проектная проба (docs/ops/group-setup-probe.md, 2026-08-28) говорит то же
+    # самое: «wall.delete (чистка) → community ⛔ 27, user VALSTAN ✅».
+    #
+    # 21.11 VK на часть вызовов ответил вместо 27 кодом 5 «User authorization
+    # failed» — тот же отказ, но другой формулировкой. Код 5 входит в
+    # ``_PUBLISH_ROTATE_CODES``, поэтому политика приняла его за поломку токена:
+    # ``report_error(COMM_*, 5)`` → cooldown 24 ч + строка «auto-disable: VK
+    # error 5» на витрине «Токены». Инцидент: 13 удалений постов из
+    # рекламного кабинета за 6 минут (21.11, 17:46–17:52 МСК) вывели из
+    # строя 9 ИСПРАВНЫХ community-токенов; удаление при этом прошло успешно
+    # через user-токен MAMA в том же каскаде. Group-токен в wall.delete не
+    # пробуем вообще — метод для него закрыт по правам.
+    _USER_TOKEN_ONLY_METHODS = frozenset({"wall.repost", "wall.pin", "wall.unpin", "wall.delete"})
 
     def __init__(
         self,
