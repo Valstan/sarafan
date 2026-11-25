@@ -35,6 +35,8 @@ from __future__ import annotations
 
 import os
 
+from modules import minimax_capacity
+
 DEFAULT_MIN_SOURCE = 300
 DEFAULT_MIN_CHARS = 300
 DEFAULT_MAX_CHARS = 1400
@@ -174,10 +176,10 @@ ENV_PAID_FALLBACK = "REWRITE_PAID_FALLBACK"
 
 #: Отказы, которые означают «на боксе нет места», а не «движок сломан».
 #:
-#: Первые два — из ``modules/minimax_capacity.py`` (регулятор ёмкости: слот не
-#: дал память / слот занят), третий и четвёртый — из
-#: ``modules/minimax_engine.py`` (ядро сняло CLI по памяти / CLI не успел за
-#: потолок — тоже следствие тесноты бокса).
+#: Список живёт в ``modules/minimax_capacity.py`` — он общий для движка и всех
+#: потоков: там и отказы регулятора ёмкости (``insufficient_memory``,
+#: ``cli_slot_busy``), и их следствия из движка (``oom_killed`` — ядро сняло CLI
+#: по памяти; ``timeout`` — CLI не успел за потолок, тоже следствие тесноты).
 #:
 #: **Почему переписывание на них не платит** (решение владельца 25.11: «когда
 #: слота не хватает, первым должен уступать переписывание, а не классификация»):
@@ -186,12 +188,7 @@ ENV_PAID_FALLBACK = "REWRITE_PAID_FALLBACK"
 #: украшение. Замер 25.11: 52 платных вызова в сутки именно на этом пути,
 #: из них 33 — отказ по ёмкости (28 ``insufficient_memory`` + 3
 #: ``cli_slot_busy`` + 2 ``timeout``).
-CAPACITY_REASONS = (
-    "insufficient_memory",
-    "cli_slot_busy",
-    "oom_killed",
-    "timeout",
-)
+CAPACITY_REASONS = minimax_capacity.CAPACITY_REASONS
 
 
 def get_rewrite_paid_fallback() -> str:
