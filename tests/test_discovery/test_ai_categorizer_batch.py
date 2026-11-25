@@ -206,6 +206,33 @@ async def test_batch_sends_all_cards_in_one_attachment(monkeypatch):
     assert "Сообщество #2" in seen["user"]
 
 
+@pytest.mark.asyncio
+async def test_batch_tokens_are_shared_not_multiplied(monkeypatch):
+    """Токены партии **делятся** между вердиктами.
+
+    Иначе отчёт сложил бы весь расход партии в каждый вердикт и показал
+    расход в N раз больше правды (8 карточек на вызов ⇒ отчёт «стоил» в 8 раз
+    дороже). Сумма по региону должна равняться расходу партии.
+    """
+    seen: list[str] = []
+
+    def fake_minimax(prompt, **kwargs):
+        seen.append("minimax")
+        return {
+            "ok": True,
+            "content": _batch_answer([_verdict(1), _verdict(2)]),
+            "model": "m",
+            "usage": {"inputTokens": 800, "outputTokens": 200},
+        }
+
+    monkeypatch.setattr(ac, "_call_minimax", fake_minimax)
+    res = await ac.categorize_candidates_bulk([_card(1), _card(2)])
+    assert res[0]["tokens_prompt"] == 400
+    assert res[1]["tokens_prompt"] == 400
+    assert res[0]["tokens_prompt"] + res[1]["tokens_prompt"] == 800
+    assert res[0]["tokens_completion"] == 100
+
+
 def test_batch_size_default_is_eight(monkeypatch):
     """Дефолт — 8 карточек на вызов: ночь 25.11 — 129 вызовов, здесь будет ~16."""
     monkeypatch.delenv(ac.ENV_AI_BATCH_SIZE, raising=False)
