@@ -435,6 +435,50 @@ async def test_report_success_resets_consecutive():
     session.commit.assert_awaited()
 
 
+@pytest.mark.asyncio
+async def test_report_success_clears_stale_auto_disable_message():
+    """Протухшее сообщение об auto-disable снимается, когда токен снова работает.
+
+    Замер 25.11: у 9 community-токенов висело красное «auto-disable: VK error 5
+    от 21.11», хотя cooldown истёк 22.11 и все девять работали в тот же день.
+    Для community-токенов поле ``error_message`` было write-only: ``enable()``
+    чистит его только у аккаунтных (``community_id IS NULL``).
+    """
+    session = AsyncMock()
+    result = MagicMock()
+    result.rowcount = 1
+    session.execute = AsyncMock(return_value=result)
+    session.commit = AsyncMock()
+
+    policy = TokenPolicy(session)
+    await policy.report_success("COMM_221504685")
+
+    # Два UPDATE: счётчики и снятие протухшего сообщения.
+    assert session.execute.await_count == 2
+    cleanup = session.execute.await_args_list[1].args[0]
+    sql = str(cleanup)
+    assert "error_message" in sql
+    # Условие смотрит и на срок отключения: пока токен в cooldown, сообщение правда.
+    assert "disabled_until" in sql
+    assert "auto-disable" in str(cleanup.compile().params)
+
+
+@pytest.mark.asyncio
+async def test_report_success_keeps_manual_disable_message():
+    """Ручное отключение (``manual disable:``) успешным вызовом не снимается."""
+    session = AsyncMock()
+    result = MagicMock()
+    result.rowcount = 1
+    session.execute = AsyncMock(return_value=result)
+    session.commit = AsyncMock()
+
+    policy = TokenPolicy(session)
+    await policy.report_success("VALSTAN")
+
+    cleanup = session.execute.await_args_list[1].args[0]
+    assert "manual disable" not in str(cleanup.compile().params)
+
+
 # ---------------------------------------------------------------------------
 # Manual disable / enable
 # ---------------------------------------------------------------------------

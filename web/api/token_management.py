@@ -380,6 +380,12 @@ class CommunityTokenEntry(BaseModel):
     last_validated: str | None = None
     error_message: str | None = None
     permissions: List[str] | None = None
+    #: До какого токен отключён (TokenPolicy). Нужно витрине, чтобы отличать
+    #: «отключён СЕЙЧАС» от «было отключён, cooldown истёк» — иначе старое
+    #: сообщение об auto-disable выглядит как текущая поломка.
+    disabled_until: str | None = None
+    last_error_code: int | None = None
+    last_error_at: str | None = None
 
 
 class CommunityTokenRow(BaseModel):
@@ -396,6 +402,7 @@ class CommunityTokenRow(BaseModel):
     last_validated: str | None = None
     error_message: str | None = None
     permissions: List[str] | None = None
+    disabled_until: str | None = None
     tokens: List[CommunityTokenEntry] = Field(default_factory=list)
 
 
@@ -452,6 +459,7 @@ async def list_community_tokens(db: AsyncSession = Depends(get_db_session)):
                     last_validated=(t.last_validated.isoformat() if t.last_validated else None),
                     error_message=t.error_message,
                     permissions=(t.permissions if isinstance(t.permissions, list) else None),
+                    disabled_until=(t.disabled_until.isoformat() if t.disabled_until else None),
                     tokens=entries,
                 )
             )
@@ -640,6 +648,7 @@ async def upsert_community_token(
         last_validated=(token.last_validated.isoformat() if token.last_validated else None),
         error_message=token.error_message,
         permissions=token.permissions if isinstance(token.permissions, list) else None,
+        disabled_until=(token.disabled_until.isoformat() if token.disabled_until else None),
         tokens=[_community_token_entry(token)],
     )
 
@@ -659,6 +668,9 @@ def _community_token_entry(token: VKToken) -> CommunityTokenEntry:
         last_validated=(token.last_validated.isoformat() if token.last_validated else None),
         error_message=token.error_message,
         permissions=token.permissions if isinstance(token.permissions, list) else None,
+        disabled_until=(token.disabled_until.isoformat() if token.disabled_until else None),
+        last_error_code=token.last_error_code,
+        last_error_at=(token.last_error_at.isoformat() if token.last_error_at else None),
     )
 
 

@@ -45,7 +45,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.models import VKToken
@@ -703,12 +703,36 @@ class TokenPolicy:
 
         Не трогает ``disabled_until`` — ручной enable делается отдельно через
         :meth:`enable` или ``POST /api/tokens/{name}/enable``.
+
+        **Протухшее сообщение об auto-disable снимается.** Иначе для
+        community-токенов (``COMM_*``) поле ``error_message`` оказывается
+        write-only: ``enable()`` чистит его только у аккаунтных токенов
+        (``community_id IS NULL``), а ``report_success`` не трогал его вовсе —
+        и страница «Токены» годами показывала красное «auto-disable: VK error 5
+        от 21.11» для токенов, которые давно работают (замер 25.11: 9 community-
+        токенов с сообщением от 21.11, при этом все девять — с ``last_used``
+        за сегодняшний день). Сообщение снимаем, только если cooldown истёк:
+        пока токен в отключении, сообщение остаётся правдой.
         """
         upper = name.upper()
+        now = datetime.utcnow()
         await self._session.execute(
             update(VKToken)
             .where(VKToken.name == upper)
-            .values(consecutive_errors=0, last_used=datetime.utcnow())
+            .values(consecutive_errors=0, last_used=now)
+        )
+        # Снять протухшее сообщение об auto-disable: токен снова работает — значит,
+        # cooldown истёк, и красная надпись на странице «Токены» стала враньём.
+        # Пока токен в отключении, сообщение остаётся правдой — поэтому условие
+        # смотрит и на срок.
+        await self._session.execute(
+            update(VKToken)
+            .where(
+                VKToken.name == upper,
+                VKToken.error_message.like("auto-disable:%"),
+                or_(VKToken.disabled_until.is_(None), VKToken.disabled_until < now),
+            )
+            .values(error_message=None)
         )
         await self._session.commit()
         self._invalidate_cache()
