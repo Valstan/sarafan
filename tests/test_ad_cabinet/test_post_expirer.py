@@ -117,3 +117,52 @@ def test_multiple_posts_mixed_results():
     assert out == {"removed": 1, "checked": 2}
     assert p1.status == "removed"
     assert p2.status == "published"
+
+
+def test_default_deleter_uses_user_token_only(monkeypatch):
+    """``wall.delete`` — только user-токен: community-токен метод не умеет.
+
+    VK отвечает group-токену на ``wall.delete`` кодом 27 «method is unavailable
+    with group auth», а 21.11 на части вызовов — кодом 5, и policy приняла это
+    за поломку токена (cooldown 24 ч + красная надпись на витрине «Токены»).
+    Community-токен в удалении не пробуем вообще.
+    """
+    import sys
+    from types import SimpleNamespace
+
+    used_tokens = []
+
+    class _Wall:
+        def delete(self, owner_id, post_id):
+            return {"response": {"success": 1}}
+
+    class _Api:
+        def __init__(self, token):
+            used_tokens.append(token)
+            self.wall = _Wall()
+
+    monkeypatch.setitem(
+        sys.modules,
+        "vk_api",
+        SimpleNamespace(
+            VkApi=lambda token: SimpleNamespace(get_api=lambda: _Api(token)),
+        ),
+    )
+
+    deleter = pe._build_default_deleter("USER_TOKEN")
+    assert deleter(-100, 55) is True
+    assert used_tokens == ["USER_TOKEN"], "community-токен в wall.delete не пробуем"
+
+
+def test_default_deleter_without_user_token_does_nothing(monkeypatch):
+    """Нет user-токена — удаления не происходит (молча, без вызова VK)."""
+    import sys
+    from types import SimpleNamespace
+
+    def _boom(token):  # pragma: no cover — вызываться не должен
+        raise AssertionError("vk_api.VkApi не должен вызываться без user-токена")
+
+    monkeypatch.setitem(sys.modules, "vk_api", SimpleNamespace(VkApi=_boom))
+
+    deleter = pe._build_default_deleter("")
+    assert deleter(-100, 55) is False

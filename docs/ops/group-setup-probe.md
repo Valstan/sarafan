@@ -19,6 +19,26 @@
 | `wall.delete` (чистка) | ⛔ 27 | ✅ | user VALSTAN |
 | `database.getRegions` / `getCities` | ⛔ 27 | ✅ | user (справочно) |
 
+### Матрица — не документ, а инвариант кода
+
+Строка `wall.delete` из матрицы выше **закреплена в коде**: `wall.delete` входит в
+`VKPublisher._USER_TOKEN_ONLY_METHODS` ([`modules/publisher/vk_publisher_extended.py`](../../modules/publisher/vk_publisher_extended.py)),
+поэтому group-токен в удалении не вызывается вообще — ни в паблишере, ни в
+авто-снятии поста по сроку ([`modules/ad_cabinet/post_expirer.py`](../../modules/ad_cabinet/post_expirer.py),
+только user-токен).
+
+**Почему это не «аккуратность», а необходимость.** Отказ group-токена на
+`wall.delete` VK формулирует двумя разными кодами: обычно **27** «method is
+unavailable with group auth» (46 отказов в прод-логах 29.09–25.11), но 21.11
+на 13 вызовах (13 удалений постов из рекламного кабинета, 17:46–17:52 МСК)
+ответил **5** «User authorization failed» — тем же отказом, но другой
+формулировкой. Код 5 входит в `_PUBLISH_ROTATE_CODES`, поэтому token-policy
+приняла его за поломку токена: `report_error(COMM_*, 5)` → **cooldown 24 часа**
+и строка «auto-disable: VK error 5» на витрине «Токены». Так были выведены из
+строя **9 исправных** community-токенов, при том что удаление в том же каскаде
+прошло успешно через user-токен MAMA. Формулировка VK не должна решать,
+жив токен или нет; решает метод.
+
 ## Три находки, помимо матрицы
 
 1. 🔴 **`groups.edit` с city/status — ловушка класса #219** («успех инструмента ≠

@@ -5,7 +5,7 @@ community client fails with VK code 15 or 27, the publisher should retry via
 its own publish-token client. Other errors propagate.
 """
 
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -59,6 +59,63 @@ async def test_repost_skips_community_token_entirely():
     community_client.method.assert_not_called()
     assert response == {"success": 1, "post_id": 999}
     assert via == "publish-token"
+
+
+@pytest.mark.asyncio
+async def test_delete_skips_community_token_entirely():
+    """wall.delete — метод только для user-токена: group-токен его не умеет.
+
+    VK отвечает community-токену на ``wall.delete`` кодом 27 «method is
+    unavailable with group auth» (проектная проба 2026-08-28 + 46 отказов в
+    прод-логах). 21.11 на части вызовов VK ответил кодом 5 — и policy приняла
+    это за поломку токена: 9 исправных community-токенов ушли в cooldown на
+    24 часа, а на витрине «Токены» висело красное «auto-disable: VK error 5».
+    Group-токен в wall.delete не пробуем вообще.
+    """
+    publish_client = _client_with_method_only({"response": {"success": 1}})
+    community_client = _client_with_method_only({"response": {"success": 1}})
+
+    publisher = _make_publisher(publish_client)
+    response, via = await publisher._call_wall_post(
+        params={"owner_id": -1, "post_id": 2},
+        method="wall.delete",
+        client=community_client,
+    )
+
+    publish_client.method.assert_called_once_with("wall.delete", {"owner_id": -1, "post_id": 2})
+    community_client.method.assert_not_called()
+    assert response == {"success": 1}
+    assert via == "publish-token"
+
+
+@pytest.mark.asyncio
+async def test_delete_never_reports_community_token_error():
+    """Community-токен в wall.delete не вызывается → policy не слышит про него.
+
+    Инвариант против повторения инцидента 21.11: отказ group-токена на
+    user-only методе не должен доходить до ``policy.report_error`` — иначе
+    исправный токен получает cooldown и красную надпись на витрине.
+    """
+    publish_client = _client_with_method_only({"response": {"success": 1}})
+    community_client = _client_with_method_only(
+        {"error": {"error_code": 5, "error_msg": "User authorization failed"}}
+    )
+    policy = MagicMock()
+    policy.report_error = AsyncMock()
+    policy.report_success = AsyncMock()
+
+    publisher = _make_publisher(publish_client)
+    publisher._policy = policy
+    publisher._community_candidates = {1: [("COMM_1", "community-token-value")]}
+
+    await publisher._call_wall_post(
+        params={"owner_id": -1, "post_id": 2},
+        method="wall.delete",
+        client=community_client,
+    )
+
+    community_client.method.assert_not_called()
+    policy.report_error.assert_not_awaited()
 
 
 @pytest.mark.asyncio
