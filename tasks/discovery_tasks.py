@@ -25,13 +25,20 @@ from sqlalchemy import func, select, update
 from database.connection import AsyncSessionLocal
 from database.models import Community, CommunityCandidate, Region
 from modules.discovery import dormant_outcomes
-from modules.discovery.ai_categorizer import categorize_candidate, sum_ai_tokens
+from modules.discovery.ai_categorizer import (
+    BATCH_MISSING_VERDICT_ERROR,
+    ai_batch_size,
+    categorize_candidate,
+    categorize_candidates_bulk,
+    sum_ai_tokens,
+)
 from modules.discovery.health_check import (
     DEFAULT_DORMANT_DAYS,
     DEFAULT_POSTS_SAMPLE,
     CommunityHealth,
-    check_community_health,
+    apply_ai_verdict,
     classify_dormant_tier,
+    collect_community_health_pre_ai,
 )
 from modules.discovery.vk_search import DiscoveredGroup, discover_for_region
 from modules.vk_monitor.vk_client import VKClient
@@ -474,7 +481,7 @@ def _dormant_days_for_region(region: Region) -> int:
     return DEFAULT_DORMANT_DAYS
 
 
-async def _recheck_one(
+async def _recheck_one_pre_ai(
     client: VKClient,
     community: Community,
     region_name: str,
@@ -482,14 +489,82 @@ async def _recheck_one(
     posts_sample: int,
     semaphore: asyncio.Semaphore,
 ) -> CommunityHealth:
+    """VK-часть проверки одного сообщества (вердикт ИИ — партией, см. ниже)."""
     async with semaphore:
-        return await check_community_health(
+        return await collect_community_health_pre_ai(
             client=client,
             community=community,
             region_name=region_name,
             dormant_days=dormant_days,
             posts_sample=posts_sample,
         )
+
+
+async def _categorize_region_in_batches(
+    rows: Sequence[Community],
+    pre_results: Sequence[CommunityHealth],
+    region_name: str,
+) -> tuple[Dict[int, Dict[str, Any]], int]:
+    """Посчитать вердикты ИИ для сообществ региона — **партиями**.
+
+    Один вызов движка на ``DISCOVERY_AI_BATCH_SIZE`` сообществ вместо одного
+    вызова на сообщество. Замер 25.11: ночной срез звал движок по одному разу на
+    community — 129 вызовов и **450 минут** слота за ночь (7 успешных из 129);
+    при медиане успешного вызова ~2 минуты срез не влезал в собственную
+    трёхчасовую рамку (``time_limit=3*3600``) и умирал без отчёта.
+
+    Возвращает ``(вердикты по id сообщества, число партий)``.
+
+    **Что делаем с неполным ответом.** Ответ пришёл, а вердикта не хватает
+    (модель потеряла часть карточек) — недостающие досчитываем одиночными
+    вызовами: потерянный вердикт хуже лишнего вызова. Отказ движка целиком
+    (движок не ответил) одиночными вызовами **не** перебиваем — там и повтор
+    бесполезен, и платить придётся за каждый вызов.
+    """
+    pending = [(row, pre) for row, pre in zip(rows, pre_results) if pre.ai_pending]
+    if not pending:
+        return {}, 0
+
+    size = ai_batch_size()
+    out: Dict[int, Dict[str, Any]] = {}
+    batches = 0
+
+    for start in range(0, len(pending), size):
+        chunk = pending[start : start + size]
+        batches += 1
+        cards = [
+            {
+                "name": row.name or "",
+                "description": None,  # у Community нет description-поля в БД
+                "members_count": None,
+                "recent_posts": list(pre.ai_texts),
+            }
+            for row, pre in chunk
+        ]
+        verdicts = await categorize_candidates_bulk(cards, region_name=region_name)
+        for (row, pre), verdict in zip(chunk, verdicts):
+            if verdict.get("success"):
+                out[pre.community_id] = verdict
+                continue
+            if str(verdict.get("error") or "") != BATCH_MISSING_VERDICT_ERROR:
+                # Отказ движка — вердикта не будет ни у кого в партии.
+                out[pre.community_id] = verdict
+                continue
+            out[pre.community_id] = await categorize_candidate(
+                name=row.name or "",
+                description=None,
+                members_count=None,
+                recent_posts=list(pre.ai_texts),
+                region_name=region_name,
+            )
+
+    logger.info(
+        "discovery: регион %s — вердикты посчитаны партиями: %d сообществ, %d партий",
+        region_name,
+        len(pending),
+        batches,
+    )
+    return out, batches
 
 
 async def recheck_communities_for_region_async(
@@ -501,8 +576,10 @@ async def recheck_communities_for_region_async(
 ) -> Dict[str, Any]:
     """Health-check для всех ``is_active=True`` сообществ одного региона.
 
-    Перебирает Community → ``check_community_health`` → in-place UPDATE
-    полей ``health_status`` / ``last_post_at`` / ``checked_at`` /
+    Две фазы: сначала VK-часть по всем сообществам
+    (``collect_community_health_pre_ai``), затем вердикты ИИ — **партиями**
+    (``_categorize_region_in_batches``), и только потом in-place UPDATE полей
+    ``health_status`` / ``last_post_at`` / ``checked_at`` /
     ``suggested_category``. Не трогает строки, помеченные модератором
     ``is_active=False`` (история постов остаётся валидной, но recheck
     не нужен).
@@ -556,10 +633,28 @@ async def recheck_communities_for_region_async(
         semaphore = asyncio.Semaphore(max_concurrent)
         region_name = region.name or region.code
 
-        results: List[CommunityHealth] = await asyncio.gather(
-            *(_recheck_one(client, c, region_name, dd, posts_sample, semaphore) for c in rows),
+        pre_results: List[CommunityHealth] = await asyncio.gather(
+            *(
+                _recheck_one_pre_ai(client, c, region_name, dd, posts_sample, semaphore)
+                for c in rows
+            ),
             return_exceptions=False,
         )
+
+        # Вердикты ИИ — **партией**: один вызов движка на N сообществ вместо
+        # одного вызова на сообщество. Замер 25.11: ночной срез звал движок по
+        # одному разу на community — 129 вызовов и 450 минут слота за ночь, из
+        # них 7 успешных; при медиане успешного вызова ~2 минуты срез не
+        # влезал в собственную трёхчасовую рамку и умирал без отчёта.
+        verdicts, ai_batches = await _categorize_region_in_batches(rows, pre_results, region_name)
+
+        results: List[CommunityHealth] = []
+        for pre, row in zip(pre_results, rows):
+            if not pre.ai_pending:
+                results.append(pre)
+                continue
+            verdict = verdicts.get(pre.community_id) or {"success": False, "error": "no verdict"}
+            results.append(apply_ai_verdict(pre, verdict, row))
 
         now = datetime.utcnow()
         counts = {
@@ -613,6 +708,15 @@ async def recheck_communities_for_region_async(
             "region": region.code,
             "total": len(rows),
             **counts,
+            # Сколько сообществ получили вердикт и сколько вызовов движка на
+            # это ушло. С партией число вызовов перестало быть мерой работы
+            # (замер 25.11: 129 вызовов на 7 вердиктов), поэтому отчёт обязан
+            # называть обе величины — иначе «сколько это стоит» и «сколько
+            # проверено» нельзя развести.
+            "communities_categorized": sum(
+                1 for r in results if str(getattr(r, "engine", "") or "") != ""
+            ),
+            "ai_batches": ai_batches,
             # Цена прогона — в самом отчёте, а не в логе: «включать ли
             # авто-одбор» (P001) — вопрос о стоимости, и он должен читаться
             # из результата задачи, а не собираться грепом по ротированным
@@ -734,6 +838,12 @@ async def recheck_all_active_regions_async(
         "tokens_completion": sum(int(r.get("tokens_completion") or 0) for r in reports),
         "tokens_measured": all(bool(r.get("tokens_measured")) for r in reports),
         "engines": _merge_engines(reports),
+        # Сколько сообществ получили вердикт и сколько вызовов движка ушло.
+        # С партией (одно сообщество → вызов) эти числа разошлись: 25.11 было
+        # 129 вызовов на 7 вердиктов, и «сколько вызовов» перестало быть мерой
+        # работы. Отчёт обязан называть обе величины.
+        "communities_categorized": sum(int(r.get("communities_categorized") or 0) for r in reports),
+        "ai_batches": sum(int(r.get("ai_batches") or 0) for r in reports),
     }
 
 

@@ -57,7 +57,39 @@ def test_discovery_calls_reports_window() -> None:
     start, end = nc.window_utc(date(2026, 11, 26))
     rows = [_row("2026-11-26T01:00:00+00:00"), _row("2026-11-26T01:30:00+00:00")]
     verdicts = {v.name: v for v in nc.check_discovery_calls(rows, start, end)}
-    assert "окно между вызовами 1800 с" in verdicts["срез discovery: ожидаемо ~190 вызовов"].detail
+    assert "окно между вызовами 1800 с" in verdicts["срез discovery: вызовы движка были"].detail
+
+
+def test_discovery_calls_minimum_is_low_because_of_batching() -> None:
+    """С партией вердиктов вызовов в разы меньше — «минимум» не должен быть жёстким.
+
+    Критерий «ожидаемо ~190 вызовов» был мерой **поштучного** режима и после
+    перехода на партию (``DISCOVERY_AI_BATCH_SIZE``) врал бы в обе стороны.
+    """
+    assert nc.MIN_DISCOVERY_CALLS <= 10
+
+
+def test_task_report_counts_categorized_communities() -> None:
+    """Мера работы среза — «сообществ с вердиктом», а не «число вызовов»."""
+    log = (
+        "Task tasks.discovery_tasks.recheck_all_active_regions[abc-123] succeeded in 4210.5s: "
+        "{'tokens_measured': True, 'engines': {'minimax': 21}, "
+        "'communities_categorized': 168, 'ai_batches': 21}\n"
+    )
+    verdicts = {v.name: v for v in nc.check_task_report(log)}
+    assert verdicts["срез discovery: сообществ с вердиктом"].status == nc.Verdict.OK
+    assert "168" in verdicts["срез discovery: сообществ с вердиктом"].detail
+
+
+def test_task_report_few_categorized_communities_is_fail() -> None:
+    """Срез отработал, но вердиктов почти нет — это провал, а не «нормально»."""
+    log = (
+        "Task tasks.discovery_tasks.recheck_all_active_regions[abc-123] succeeded in 4210.5s: "
+        "{'tokens_measured': True, 'engines': {'minimax': 2}, "
+        "'communities_categorized': 2, 'ai_batches': 2}\n"
+    )
+    verdicts = {v.name: v for v in nc.check_task_report(log)}
+    assert verdicts["срез discovery: сообществ с вердиктом"].status == nc.Verdict.FAIL
 
 
 def test_task_report_time_limit_kill_is_fail() -> None:
