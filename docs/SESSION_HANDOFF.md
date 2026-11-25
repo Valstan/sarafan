@@ -334,9 +334,30 @@ INFO — **в логе на 11 МБ это одна строка, а слот п
 - **Публикуемый снимок сессии в этом рантайме не обновляется.** Ветка `session-state`
   последний раз тронута **06.11** — хуки Claude Code (`SessionStart`/`PostToolUse`/
   `SessionEnd`) в этой оболочке не выполняются. Нить при этом не потеряна: курируемый
-  handoff лежит в `main` (PR #1254). Если нужен свежий снимок — собрать вручную:
-  `venv/Scripts/python.exe scripts/session_autosave.py --sync --force` (ветка
-  `session-state` + `wip/<машина>`, обе через `commit-tree` мимо рабочего дерева).
+  handoff лежит в `main` (PR #1254). **Уточнение 25.11 (разобрано в этой сессии):**
+  - журнал сессии рантайма лежит **не** в `~/.claude/projects/…/*.jsonl` (там последние
+    файлы — сентябрь), а в
+    `~/.minimax-areas/p-sarafan/v2/sessions/2026/11/24/<сессия>/messages.jsonl`;
+  - формат другой: роль лежит в `message.role` (`user`/`assistant`/`custom`), поля
+    `type` у записей нет — скрипт их не узнаёт и пишет пустой снимок
+    («Ходов агента: 0, реплик владельца: 0»);
+  - чтобы снимок был полным, нужен **`transcript_path`** в payload, указывающий на
+    сконвертированный файл (роль → `type`, `timestamp` в ISO, `gitBranch`).
+    Конвертер и обёртка лежат в `temp/`: `cc_transcript_convert.py`, `publish_snapshot.py`;
+  - ⚠️ **публикация в этом рантайме упирается в гейт хоста:** запуск с
+    `transcript_path` в payload отклоняется с «HOST_CAPABILITY_UNAVAILABLE: this Runtime
+    host cannot prompt for permission» (запись журнала сессии наружу). Без
+    `transcript_path` скрипт отрабатывает, но снимок пустой. Обойти нельзя и не нужно —
+    если владелец хочет освежить `session-state`, это его команда:
+    `python scripts/session_autosave.py --sync --force` с корректным `transcript_path`
+    (обе ветки собираются через `commit-tree` мимо рабочего дерева, `main` не задет).
+- **Локальный мусор этой сессии** (`temp/` под gitignore, удалить не удалось — гейт хоста
+  не даёт `rm`): `temp/cc_transcript.jsonl` — копия журнала сессии (реплики владельца,
+  машинно сконвертированная из формата рантайма), `temp/cc_transcript_convert.py`,
+  `temp/publish_snapshot.py`, `temp/payload.json`. Первые два нужны, если владелец
+  захочет освежить `session-state`; `.jsonl` — просто копия переписки, её можно
+  снести. Рядом лежат черновики прошлых заходов: `temp/commit_*.txt`,
+  `temp/prbody_*.md`, `temp/run_with_app_env.py`.
 - **Раздел промтов КАРМАНА не проверен:** команда забора (`scripts/prompts_fetch.py` с env
   приложения) блокируется гейтом инструмента на этой машине.
 - **На боксе остались временные файлы от замеров 23.11** (`rm` на проде за гейтом #025 —
