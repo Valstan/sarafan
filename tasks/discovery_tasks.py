@@ -45,6 +45,18 @@ logger = logging.getLogger(__name__)
 DEFAULT_RECHECK_SLICES = 7
 ENV_RECHECK_SLICES = "DISCOVERY_RECHECK_SLICES"
 
+#: Сколько сообществ одного региона проверяется **одновременно**. По умолчанию 4 —
+#: как было. Переопределяется ``DISCOVERY_RECHECK_MAX_CONCURRENT``.
+#:
+#: **Почему это рычаг, а не украшение.** Проверка идёт через CLI MiniMax: каждый
+#: вызов — отдельный процесс, и на боксе в 1536 МБ без свопа он занимает ~306 МБ
+#: RSS (замер 25.11 05:19, успешный вызов). Четыре таких процесса — 1,2 ГБ
+#: поверх ~1 ГБ базы бокса, и ядро снимает их по памяти (96 убийств за ночь,
+#: P239), а discovery уходит в **платный Дипсик**. Один вызов вместо четырёх
+#: помещается в свободную память — и срез перестаёт жечь деньги.
+DEFAULT_RECHECK_MAX_CONCURRENT = 4
+ENV_RECHECK_MAX_CONCURRENT = "DISCOVERY_RECHECK_MAX_CONCURRENT"
+
 
 async def _pick_parse_token() -> Optional[str]:
     """Return a VK token suitable for parse-side calls (groups.search etc.).
@@ -648,7 +660,9 @@ async def recheck_all_active_regions_async(
     """Health-check по регионам, последовательно.
 
     Между регионами — последовательно, чтобы не разрывать rate-limit одного
-    VK-токена. Внутри региона — параллельно (Semaphore=4).
+    VK-токена. Внутри региона — параллельно (по умолчанию 4 одновременно;
+    ``DISCOVERY_RECHECK_MAX_CONCURRENT`` переопределяет — на боксе в 1536 МБ без
+    свопа четыре CLI MiniMax не помещаются в память, см. P239).
 
     По итогам прогона отправляет агрегированный Telegram-alert (если
     есть non-active изменения и настроены TELEGRAM_TOKENS/CHAT_ID).
@@ -738,6 +752,19 @@ def _recheck_slices() -> int:
         return max(1, int(os.getenv(ENV_RECHECK_SLICES) or DEFAULT_RECHECK_SLICES))
     except (TypeError, ValueError):
         return DEFAULT_RECHECK_SLICES
+
+
+def _recheck_max_concurrent() -> int:
+    """Сколько сообществ региона проверяется одновременно: из env или дефолт (4).
+
+    **Потолок в одну единицу — осмысленное значение:** на боксе в 1536 МБ без
+    свопа один вызов MiniMax (≈306 МБ RSS) влезает, а четыре — нет (P239).
+    """
+    try:
+        raw = int(os.getenv(ENV_RECHECK_MAX_CONCURRENT) or DEFAULT_RECHECK_MAX_CONCURRENT)
+    except (TypeError, ValueError):
+        return DEFAULT_RECHECK_MAX_CONCURRENT
+    return max(1, raw)
 
 
 def _has_interesting_findings(reports: List[Dict[str, Any]]) -> bool:
@@ -1309,8 +1336,18 @@ try:
         Каждый регион попадает в срез раз в 7 дней (номер среза — по календарному
         дню), поэтому недельный охват сети сохраняется, а за ночь воркер
         занимается ~1/7 регионов.
+
+        Сколько сообществ региона проверяется одновременно — ``env``
+        (``DISCOVERY_RECHECK_MAX_CONCURRENT``, дефолт 4): на боксе в 1536 МБ без
+        свопа четыре CLI MiniMax не помещаются, и ядро снимает их по памяти
+        (P239).
         """
-        return _run_coro(recheck_all_active_regions_async(slices=_recheck_slices()))
+        return _run_coro(
+            recheck_all_active_regions_async(
+                slices=_recheck_slices(),
+                max_concurrent_per_region=_recheck_max_concurrent(),
+            )
+        )
 
     @_celery_app.task(name="tasks.discovery_tasks.discover_rolling_one_region")
     def discover_rolling_one_region():

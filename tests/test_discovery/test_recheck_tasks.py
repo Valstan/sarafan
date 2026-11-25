@@ -556,3 +556,26 @@ async def test_ai_categorize_wall_get_failure_does_not_block():
     assert groups[1].recent_posts == ["ok"]
     assert result[1]["success"] is True
     assert result[2]["success"] is True
+
+
+# ───────── конкурентность ночного среза (P239) ─────────
+
+
+def test_recheck_max_concurrent_defaults_to_four(monkeypatch):
+    """Без env — прежнее поведение: четыре сообщества региона одновременно."""
+    monkeypatch.delenv(dt.ENV_RECHECK_MAX_CONCURRENT, raising=False)
+    assert dt._recheck_max_concurrent() == 4
+
+
+def test_recheck_max_concurrent_reads_env(monkeypatch):
+    """Рычаг владельца: одна строка env вместо правки кода."""
+    monkeypatch.setenv(dt.ENV_RECHECK_MAX_CONCURRENT, "1")
+    assert dt._recheck_max_concurrent() == 1
+
+
+def test_recheck_max_concurrent_never_drops_below_one(monkeypatch):
+    """Ноль или мусор — дефолт, а не «ни одного вызова» и не падение."""
+    monkeypatch.setenv(dt.ENV_RECHECK_MAX_CONCURRENT, "0")
+    assert dt._recheck_max_concurrent() == 1
+    monkeypatch.setenv(dt.ENV_RECHECK_MAX_CONCURRENT, "мусор")
+    assert dt._recheck_max_concurrent() == 4
