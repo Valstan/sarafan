@@ -29,6 +29,8 @@ from typing import Any, Dict, Optional
 
 from PIL import Image, ImageChops, ImageDraw, ImageFont, ImageOps
 
+from config.runtime import get_digest_photo_throttle_mode
+
 logger = logging.getLogger(__name__)
 
 #: Потолок по стороне: телефон показывает кадр целиком, обрезать нельзя.
@@ -113,6 +115,19 @@ def _note_throttle() -> None:
     import time
 
     _throttle_until = max(_throttle_until, time.monotonic() + UPLOAD_405_COOLDOWN_SECONDS)
+
+
+def _throttle_active() -> bool:
+    """Действует ли ещё окно троттлинга (общее на процесс).
+
+    Пока окно закрыто, загрузка упрётся в него же: ждать — значит отдать слот,
+    ломиться — значит получить тот же отказ. Поэтому режим ``skip`` (см.
+    ``config.runtime.get_digest_photo_throttle_mode``) в такое окно загрузку
+    даже не начинает.
+    """
+    import time
+
+    return _throttle_until > time.monotonic()
 
 
 def _load_font(size: int) -> Any:
@@ -324,7 +339,19 @@ async def upload_wall_photo(
             logger.warning("photo: нет аккаунта-владельца — фото пропущено")
             return None
 
-        for attempt in range(1, UPLOAD_MAX_ATTEMPTS + 1):
+        # Режим троттлинга — сколько попыток и ждать ли паузу между ними.
+        # Читается на каждый вызов: env на боксе меняется без выката кода, а
+        # тестам достаточно подменить переменную.
+        mode = get_digest_photo_throttle_mode()
+        max_attempts = {"wait": UPLOAD_MAX_ATTEMPTS, "once": 2, "skip": 1}[mode]
+        wait_between = mode != "skip"
+
+        for attempt in range(1, max_attempts + 1):
+            if mode == "skip" and _throttle_active():
+                # Окно троттлинга ещё закрыто: ждать — отдать слот, ломиться —
+                # получить тот же отказ. В этом режиме фото пропускается сразу.
+                logger.warning("photo: пропущено — окно троттлинга ещё закрыто (режим skip)")
+                return None
             await _throttle_upload()
             server = await publisher._invoke(
                 client, "photos.getWallUploadServer", {"group_id": gid}
@@ -350,14 +377,25 @@ async def upload_wall_photo(
                 # Троттлинг: окно закрыто на паузу, общую на процесс. Ждём и
                 # берём новый upload-сервер — на закрытом сервер смысла нет.
                 _note_throttle()
+                if mode == "skip":
+                    # Режим «без ожидания»: слот важнее фото. Отбор фото —
+                    # решение владельца (P238), откат — одна строка env.
+                    logger.warning(
+                        "photo: загрузка отбита троттлингом (%s) — фото пропущено "
+                        "без ожидания (режим skip, попытка %d/%d)",
+                        rejection,
+                        attempt,
+                        max_attempts,
+                    )
+                    return None
                 logger.warning(
                     "photo: загрузка отбита троттлингом (%s), пауза %.0f с (попытка %d/%d)",
                     rejection,
                     UPLOAD_405_COOLDOWN_SECONDS,
                     attempt,
-                    UPLOAD_MAX_ATTEMPTS,
+                    max_attempts,
                 )
-                if attempt < UPLOAD_MAX_ATTEMPTS:
+                if wait_between and attempt < max_attempts:
                     await asyncio.sleep(UPLOAD_405_COOLDOWN_SECONDS)
                 continue
 
@@ -379,7 +417,7 @@ async def upload_wall_photo(
 
         logger.warning(
             "photo: загрузка не прошла за %d попытки — троттлинг ВК не отпустил",
-            UPLOAD_MAX_ATTEMPTS,
+            max_attempts,
         )
         return None
     except Exception as e:  # noqa: BLE001 — фото не обязано быть
