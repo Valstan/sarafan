@@ -693,6 +693,13 @@ async def categorize_candidates_bulk(
     parsed = _parse_batch_response(content, len(batch))
     model = str(result.get("model") or "")
     tokens_prompt, tokens_completion = usage_tokens(result)
+    # Токены партии делим между её вердиктами: иначе отчёт сложил бы **весь**
+    # расход партии в каждый вердикт и показал расход в N раз больше правды
+    # (замер 25.11: 8 карточек на вызов ⇒ отчёт «стоил» в 8 раз дороже).
+    # Точность деления — до N токенов на партию, что на фоне тысяч не видно.
+    count = len(batch)
+    share_prompt = (tokens_prompt // count) if tokens_prompt is not None else None
+    share_completion = (tokens_completion // count) if tokens_completion is not None else None
 
     missing = 0
     for position, item in enumerate(parsed):
@@ -708,8 +715,8 @@ async def categorize_candidates_bulk(
         verdict["success"] = True
         verdict["engine"] = engine
         verdict["model"] = model
-        verdict["tokens_prompt"] = tokens_prompt
-        verdict["tokens_completion"] = tokens_completion
+        verdict["tokens_prompt"] = share_prompt
+        verdict["tokens_completion"] = share_completion
         results[live[position]] = verdict
 
     if missing:
