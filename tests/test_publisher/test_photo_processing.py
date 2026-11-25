@@ -356,3 +356,140 @@ class _FakeResponse:
 
 def _fake_post(url, files=None, timeout=None):
     return _FakeResponse({"photo": "server-photo", "server": 1, "hash": "h"})
+
+
+# --- Режим троттлинга (P238) ------------------------------------------------
+#
+# Замер 23.11 (P234): окно сводки 64 мин, из них **49 мин (77 %) — сон** на
+# троттлинге загрузки фото: 42 окна × 70 с. Окно у ВК закрывалось ~46 мин из
+# 64, и пауза 70 с его не открывала. Дозор 25.11 то же на другом окне: 183
+# паузы на 76 регионов ≈ 2,8 мин ожидания на регион.
+#
+# Поэтому режим троттлинга — рычаг, а не украшение: по умолчанию поведение
+# прежнее («wait»), а «skip» отдаёт слот обратно ценой фото в сборнике.
+# Судьба медиа — решение владельца (заказ 24.11 «фото оставить»).
+
+
+def _collect_sleeps(monkeypatch):
+    """Подменить ``asyncio.sleep`` сбором задержек вместо реального сна."""
+    slept = []
+    real_sleep = asyncio.sleep
+
+    async def _fake_sleep(delay, *args, **kwargs):
+        slept.append(delay)
+        return await real_sleep(0)
+
+    monkeypatch.setattr("asyncio.sleep", _fake_sleep)
+    return slept
+
+
+def test_throttle_mode_defaults_to_wait(monkeypatch):
+    """По умолчанию поведение прежнее: ждать и повторять.
+
+    Рычаг не должен включаться сам: судьба фото в сборнике — решение владельца.
+    """
+    from config.runtime import get_digest_photo_throttle_mode
+
+    monkeypatch.delenv("DAILY_DIGEST_PHOTO_THROTTLE", raising=False)
+    assert get_digest_photo_throttle_mode() == "wait"
+
+
+def test_throttle_mode_follows_env(monkeypatch):
+    """Env переключает режим; неизвестное значение — откат к прежнему."""
+    from config.runtime import get_digest_photo_throttle_mode
+
+    monkeypatch.setenv("DAILY_DIGEST_PHOTO_THROTTLE", "skip")
+    assert get_digest_photo_throttle_mode() == "skip"
+
+    monkeypatch.setenv("DAILY_DIGEST_PHOTO_THROTTLE", " SKIP ")
+    assert get_digest_photo_throttle_mode() == "skip"
+
+    monkeypatch.setenv("DAILY_DIGEST_PHOTO_THROTTLE", "какая-то невнятица")
+    assert get_digest_photo_throttle_mode() == "wait"
+
+
+@pytest.mark.asyncio
+async def test_wait_mode_keeps_three_attempts(monkeypatch):
+    """Прежний режим: три попытки и две паузы — как было до рычага."""
+    monkeypatch.delenv("DAILY_DIGEST_PHOTO_THROTTLE", raising=False)
+    _post, calls = _post_sequence([_FakeResponse(None, status_code=405)])
+    monkeypatch.setattr("requests.post", _post)
+    slept = _collect_sleeps(monkeypatch)
+
+    assert await upload_wall_photo(_FakePublisher(), -42, b"jpeg-bytes") is None
+    assert len(calls) == photo_processing.UPLOAD_MAX_ATTEMPTS
+    assert len(slept) == photo_processing.UPLOAD_MAX_ATTEMPTS - 1
+
+
+@pytest.mark.asyncio
+async def test_once_mode_waits_once_and_gives_up(monkeypatch):
+    """Режим ``once``: одна пауза вместо двух — сон короче, фото теряется реже.
+
+    Замер 23.11: почти все фото проходили по второй-третьей попытке, то есть
+    платили паузой за право добыть картинку. Здесь цена обратная: фото,
+    прошедшие только с третьей попытки, теряются.
+    """
+    monkeypatch.setenv("DAILY_DIGEST_PHOTO_THROTTLE", "once")
+    _post, calls = _post_sequence([_FakeResponse(None, status_code=405)])
+    monkeypatch.setattr("requests.post", _post)
+    slept = _collect_sleeps(monkeypatch)
+
+    assert await upload_wall_photo(_FakePublisher(), -42, b"jpeg-bytes") is None
+    assert len(calls) == 2, "режим once — две попытки"
+    assert len(slept) == 1, "режим once — одна пауза"
+
+
+@pytest.mark.asyncio
+async def test_skip_mode_gives_up_at_once_without_waiting(monkeypatch):
+    """Режим ``skip``: отказ — фото пропущено, слот не спит.
+
+    Цена режима — фото в сборнике; выигрыш — слот, который освобождается сразу
+    (≈2,8 мин ожидания на регион по дозору 25.11).
+    """
+    monkeypatch.setenv("DAILY_DIGEST_PHOTO_THROTTLE", "skip")
+    _post, calls = _post_sequence([_FakeResponse(None, status_code=405)])
+    monkeypatch.setattr("requests.post", _post)
+    slept = _collect_sleeps(monkeypatch)
+
+    assert await upload_wall_photo(_FakePublisher(), -42, b"jpeg-bytes") is None
+    assert len(calls) == 1, "режим skip — одна попытка"
+    assert not slept, "режим skip — без ожидания"
+
+
+@pytest.mark.asyncio
+async def test_skip_mode_does_not_start_upload_while_throttle_window_open(monkeypatch):
+    """Пока окно троттлинга закрыто, загрузка даже не начинается.
+
+    Троттлинг общий на процесс: ждать (отдать слот) или ломиться (получить
+    тот же отказ) — оба варианта хуже, чем пропустить фото сразу.
+    """
+    import time
+
+    monkeypatch.setenv("DAILY_DIGEST_PHOTO_THROTTLE", "skip")
+    monkeypatch.setattr(photo_processing, "_throttle_until", time.monotonic() + 60.0)
+    _post, calls = _post_sequence([_FakeResponse({"photo": "p", "hash": "h"})])
+    monkeypatch.setattr("requests.post", _post)
+    slept = _collect_sleeps(monkeypatch)
+
+    assert await upload_wall_photo(_FakePublisher(), -42, b"jpeg-bytes") is None
+    assert not calls, "в закрытое окно ломиться нельзя — ВК отобьёт тем же"
+    assert not slept, "ждать в режиме skip нельзя — это отданный слот"
+
+
+@pytest.mark.asyncio
+async def test_skip_mode_still_uploads_when_window_is_open(monkeypatch):
+    """Закрытое окно — только после отказа; обычная ночь фото не теряет.
+
+    Режим ``skip`` отличается от ``DAILY_DIGEST_PHOTOS=0`` именно этим: фото
+    остаются в те ночи, когда ВК не троттлит.
+    """
+    monkeypatch.setenv("DAILY_DIGEST_PHOTO_THROTTLE", "skip")
+    # Окно троттлинга открыто (обычная ночь) — явно, а не «авось сброшено».
+    monkeypatch.setattr(photo_processing, "_throttle_until", 0.0)
+    _post, calls = _post_sequence([_FakeResponse({"photo": "server-photo", "hash": "h"})])
+    monkeypatch.setattr("requests.post", _post)
+
+    att = await upload_wall_photo(_FakePublisher(), -42, b"jpeg-bytes")
+
+    assert att == "photo20002978_777"
+    assert len(calls) == 1
