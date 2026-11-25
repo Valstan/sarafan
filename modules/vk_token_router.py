@@ -717,9 +717,7 @@ class TokenPolicy:
         upper = name.upper()
         now = datetime.utcnow()
         await self._session.execute(
-            update(VKToken)
-            .where(VKToken.name == upper)
-            .values(consecutive_errors=0, last_used=now)
+            update(VKToken).where(VKToken.name == upper).values(consecutive_errors=0, last_used=now)
         )
         # Снять протухшее сообщение об auto-disable: токен снова работает — значит,
         # cooldown истёк, и красная надпись на странице «Токены» стала враньём.
