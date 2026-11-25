@@ -17,6 +17,16 @@ MiniMax. Дипсик остался **платной страховкой**: е
 проверять сеть), и это видно в отчёте прогона — по числу вызовов на каждом
 движке.
 
+**Исключение — отказ по ёмкости бокса** (``DISCOVERY_PAID_FALLBACK=auto``,
+дефолт с 25.11): если MiniMax не ответил из-за того, что **бокс не дал место**
+под CLI (``insufficient_memory`` / ``cli_slot_busy`` / ``oom_killed`` /
+``timeout``), платная страховка **не срабатывает**. «Бокс не дал место» — это не
+поломка движка; платить за него нечего, а сообщество и без вердикта остаётся
+«active» (fail-safe в ``modules/discovery/health_check.py``) и получит вердикт в
+следующем срезе. Замер 25.11: 122 платных вызова в сутки именно на этом пути.
+Ручки: ``=1`` — прежнее поведение (платим за любой отказ), ``=0`` — не платим
+никогда; общая ``CLASSIFIER_PAID_FALLBACK=0`` сильнее обеих.
+
 ⚠️ **Цена переключения — время, а не деньги.** Вызов через CLI MiniMax занимает
 ~10 с против ~1,7 с у Дипсика: еженедельный прогон всех регионов разом
 растягивается с 32 минут до нескольких часов и начинает забирать воркер у
@@ -42,6 +52,7 @@ from typing import Any, Dict, Iterable, List, Optional
 #: Импорт на уровне модуля — не только для красоты: тесты подменяют именно
 #: ``ai_categorizer.chat`` (точка подмены одна и общая для обоих движков).
 from modules.deepseek_client import chat
+from modules.minimax_capacity import CAPACITY_REASONS
 
 logger = logging.getLogger(__name__)
 
@@ -50,8 +61,12 @@ logger = logging.getLogger(__name__)
 ENV_ENGINE = "DISCOVERY_ENGINE"
 DEFAULT_ENGINE = "minimax"
 #: Платный фолбэк на Дипсик, если бесплатный движок не ответил.
+#:
+#: Режимы: ``auto`` (дефолт) — на отказ **по ёмкости бокса** платная страховка
+#: не срабатывает; ``always`` (``1``) — прежнее поведение, платим за любой
+#: отказ; ``never`` (``0``) — не платим никогда.
 ENV_PAID_FALLBACK = "DISCOVERY_PAID_FALLBACK"
-DEFAULT_PAID_FALLBACK = "1"
+DEFAULT_PAID_FALLBACK = "auto"
 
 _TEMPERATURE = 0.2  # категоризация — задача с одним «правильным» ответом
 _MAX_TOKENS = 300
@@ -233,10 +248,39 @@ def _engine_name() -> str:
     return name or DEFAULT_ENGINE
 
 
+def _paid_fallback_mode() -> str:
+    """Режим платной страховки подбора: ``auto`` | ``always`` | ``never``.
+
+    - ``auto`` (дефолт) — платная страховка **не срабатывает** на отказы по
+      ёмкости бокса (:data:`modules.minimax_capacity.CAPACITY_REASONS`): «бокс не
+      дал место под CLI» — это не поломка движка, и платить за него нечего.
+      Сообщество остаётся «active», вердикт придёт в следующем срезе;
+    - ``always`` (``1``) — прежнее поведение: любой отказ MiniMax закрывается
+      платным Дипсиком;
+    - ``never`` (``0``) — не платим никогда.
+    """
+    raw = (os.getenv(ENV_PAID_FALLBACK) or DEFAULT_PAID_FALLBACK).strip().lower()
+    if raw in ("0", "false", "no", "off", "never"):
+        return "never"
+    if raw in ("1", "true", "yes", "on", "always"):
+        return "always"
+    return "auto"
+
+
 def _paid_fallback_enabled() -> bool:
     """Разрешён ли платный фолбэк на Дипсик, если бесплатный движок не ответил."""
-    raw = (os.getenv(ENV_PAID_FALLBACK) or DEFAULT_PAID_FALLBACK).strip().lower()
-    return raw not in ("0", "false", "no", "off")
+    return _paid_fallback_mode() != "never"
+
+
+def _global_paid_fallback_enabled() -> bool:
+    """Общая ручка проекта ``CLASSIFIER_PAID_FALLBACK`` — сильнее ручки потока.
+
+    «Платить нельзя вообще» значит «вообще»: ручка потока (``DISCOVERY_PAID_FALLBACK``)
+    может запретить платить, но не может разрешить платить, когда счёт закрыт.
+    """
+    from config.opencode import paid_fallback_enabled
+
+    return paid_fallback_enabled()
 
 
 def _call_minimax(prompt: str, *, system: str = "", card: str = "") -> Dict[str, Any]:
@@ -325,9 +369,36 @@ async def categorize_candidate(
     except RuntimeError as exc:
         return {"success": False, "error": str(exc), "engine": engine}
 
-    if not result.get("ok") and engine != "deepseek" and _paid_fallback_enabled():
+    if not result.get("ok") and engine != "deepseek":
         reason = str(result.get("reason") or "unknown")
         detail = str(result.get("detail") or "")[:160]
+        mode = _paid_fallback_mode()
+        if not _global_paid_fallback_enabled():
+            logger.warning(
+                "discovery: %s не ответил (%s%s) — платная страховка выключена "
+                "(CLASSIFIER_PAID_FALLBACK), вердикта нет",
+                engine,
+                reason,
+                (" %s" % detail) if detail else "",
+            )
+            return {"success": False, "error": reason, "engine": engine}
+        if mode == "never":
+            logger.warning(
+                "discovery: %s не ответил (%s%s) — этот поток не платит, вердикта нет",
+                engine,
+                reason,
+                (" %s" % detail) if detail else "",
+            )
+            return {"success": False, "error": reason, "engine": engine}
+        if mode == "auto" and reason in CAPACITY_REASONS:
+            logger.warning(
+                "discovery: %s не ответил (%s%s) — отказ по ёмкости бокса, "
+                "платная страховка пропущена, вердикта нет",
+                engine,
+                reason,
+                (" %s" % detail) if detail else "",
+            )
+            return {"success": False, "error": reason, "engine": engine}
         logger.warning(
             "discovery: %s не ответил (%s%s) — закрываем платным Дипсиком",
             engine,

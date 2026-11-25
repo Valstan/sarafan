@@ -120,6 +120,125 @@ async def test_no_fallback_when_paid_fallback_disabled(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_capacity_refusal_is_not_paid(monkeypatch):
+    """Отказ **по ёмкости бокса** платной страховкой не закрывается.
+
+    «Бокс не дал место под CLI» — не поломка движка: платить за него нечего, а
+    сообщество и без вердикта остаётся «active» (fail-safe в ``health_check``).
+    Замер 25.11: 122 платных вызова в сутки именно на этом пути.
+    """
+    seen: list[str] = []
+
+    def fake_minimax(prompt, **kwargs):
+        seen.append("minimax")
+        return {"ok": False, "reason": "insufficient_memory", "detail": "свободно 143 МБ"}
+
+    def fake_deepseek(prompt):
+        seen.append("deepseek")
+        return _ok("deepseek")
+
+    monkeypatch.delenv(ac.ENV_PAID_FALLBACK, raising=False)
+    monkeypatch.setattr(ac, "_call_minimax", fake_minimax)
+    monkeypatch.setattr(ac, "_call_deepseek", fake_deepseek)
+
+    res = await ac.categorize_candidate(name="X")
+    assert res["success"] is False
+    assert res["engine"] == "minimax"
+    assert res["error"] == "insufficient_memory"
+    assert seen == ["minimax"], "платный вызов на отказе по ёмкости — лишние деньги"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "reason",
+    ["insufficient_memory", "cli_slot_busy", "oom_killed", "timeout"],
+)
+async def test_all_capacity_reasons_are_skipped(monkeypatch, reason):
+    """Пропускаются **все** причины «бокс не дал место», а не только одна."""
+    monkeypatch.delenv(ac.ENV_PAID_FALLBACK, raising=False)
+    called: list[str] = []
+
+    def fake_minimax(prompt, **kwargs):
+        called.append("minimax")
+        return {"ok": False, "reason": reason}
+
+    def fake_deepseek(prompt):
+        called.append("deepseek")
+        return _ok("deepseek")
+
+    monkeypatch.setattr(ac, "_call_minimax", fake_minimax)
+    monkeypatch.setattr(ac, "_call_deepseek", fake_deepseek)
+
+    res = await ac.categorize_candidate(name="X")
+    assert res["success"] is False
+    assert called == ["minimax"]
+
+
+@pytest.mark.asyncio
+async def test_capacity_refusal_is_paid_when_mode_always(monkeypatch):
+    """Ручка ``=1`` возвращает прежнее поведение: платим за любой отказ."""
+    seen: list[str] = []
+
+    def fake_minimax(prompt, **kwargs):
+        seen.append("minimax")
+        return {"ok": False, "reason": "insufficient_memory"}
+
+    def fake_deepseek(prompt):
+        seen.append("deepseek")
+        return _ok("deepseek")
+
+    monkeypatch.setenv(ac.ENV_PAID_FALLBACK, "1")
+    monkeypatch.setattr(ac, "_call_minimax", fake_minimax)
+    monkeypatch.setattr(ac, "_call_deepseek", fake_deepseek)
+
+    res = await ac.categorize_candidate(name="X")
+    assert res["success"] is True
+    assert res["engine"] == "deepseek"
+    assert seen == ["minimax", "deepseek"]
+
+
+@pytest.mark.asyncio
+async def test_global_kill_switch_is_stronger_than_flow_switch(monkeypatch):
+    """``CLASSIFIER_PAID_FALLBACK=0`` — «платить нельзя вообще».
+
+    Ручка потока может запретить платить, но не может разрешить платить, когда
+    счёт закрыт.
+    """
+    seen: list[str] = []
+
+    def fake_minimax(prompt, **kwargs):
+        seen.append("minimax")
+        return {"ok": False, "reason": "accounts_exhausted"}
+
+    def fake_deepseek(prompt):
+        seen.append("deepseek")
+        return _ok("deepseek")
+
+    monkeypatch.setenv("CLASSIFIER_PAID_FALLBACK", "0")
+    monkeypatch.setenv(ac.ENV_PAID_FALLBACK, "1")
+    monkeypatch.setattr(ac, "_call_minimax", fake_minimax)
+    monkeypatch.setattr(ac, "_call_deepseek", fake_deepseek)
+
+    res = await ac.categorize_candidate(name="X")
+    assert res["success"] is False
+    assert seen == ["minimax"]
+
+
+def test_capacity_reasons_are_shared_with_rewrite_flow():
+    """Список причин «бокс не дал место» — **один** на оба потока.
+
+    Иначе через полгода переписывание перестанет платить за ``cli_slot_busy``,
+    а подбор сообществ — нет, и расхождение будет молчавым.
+    """
+    from config.post_rewrite import CAPACITY_REASONS as REWRITE_REASONS
+    from modules.minimax_capacity import CAPACITY_REASONS as ENGINE_REASONS
+
+    assert REWRITE_REASONS == ENGINE_REASONS
+    assert "insufficient_memory" in ENGINE_REASONS
+    assert "cli_slot_busy" in ENGINE_REASONS
+
+
+@pytest.mark.asyncio
 async def test_minimax_usage_keys_are_counted(monkeypatch):
     """У MiniMax имена полей другие — смена движка не должна обнулять цену."""
     monkeypatch.delenv(ac.ENV_ENGINE, raising=False)
