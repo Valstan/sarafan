@@ -78,7 +78,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
-from modules import karman_minimax
+from modules import karman_minimax, minimax_capacity
 
 logger = logging.getLogger(__name__)
 
@@ -1233,6 +1233,18 @@ def _looks_like_memory_failure(detail: str) -> bool:
     return any(marker in low for marker in _MEMORY_MARKERS)
 
 
+def _killed_by_kernel(returncode: int) -> bool:
+    """Сняло ли **ядро** (SIGKILL), а не сам движок.
+
+    Ядро снимает процесс сигналом 9 → код возврата ``-9`` (или 137, если
+    кодировка shell). Это не тот же класс, что отказ V8 по куче
+    (``engine_oom``): в одном случае бокс не дал памяти, в другом — движок
+    упёрся в свой потолок. Различать надо: лечатся они по-разному, и в журнале
+    видно, сколько стоило боксу, а сколько — движку.
+    """
+    return returncode in (-9, 137)
+
+
 def _killed_by_memory(returncode: int, stderr: str) -> bool:
     """Различаем «убит по памяти» и прочие отказы.
 
@@ -1241,7 +1253,7 @@ def _killed_by_memory(returncode: int, stderr: str) -> bool:
     даст тот же отказ, поэтому ротация тут бессмысленна — правильное действие
     сбросить накопленное состояние и повторить вызов.
     """
-    if returncode in (-9, 137):
+    if _killed_by_kernel(returncode):
         return True
     return _looks_like_memory_failure(stderr)
 
@@ -1289,6 +1301,7 @@ def run_classification(
         max_steps = DEFAULT_MAX_STEPS
 
     tmpdir = Path(tempfile.mkdtemp(prefix="minimax-"))
+    lease = None
     try:
         system_file = tmpdir / "system.md"
         system_file.write_text(system_text, encoding="utf-8")
@@ -1357,10 +1370,44 @@ def run_classification(
         # упирается в кучу. Замер 22.11: 897 МБ состояния → RSS 554 МБ → OOM.
         _ensure_cli_state_bounded(account)
 
+        # ── Ёмкость бокса: место под ещё один CLI есть? ──
+        #
+        # Один вызов MiniMax — это процесс ~315 МБ RSS (замер 25.11), а бокс —
+        # 1536 МБ без свопа, из них база ~1000 МБ. Запас под CLI — ~536 МБ, то
+        # есть **один** вызов влезает, а два (630 МБ) — нет: ядро снимает
+        # крупнейший процесс, и это CLI.
+        #
+        # Что из этого выросло 25.11: ночной срез discovery поднимал 4 CLI
+        # разом → **125 ядерных убийств за ночь**, каждый отказ уходил в
+        # **платный Дипсик** (122 платных вызова, ≈1 в минуту). Утренняя волна
+        # 07:00–07:40 — то же без среза: MiniMax с 0 % успеха, очередь выросла
+        # 15 → 72.
+        #
+        # Слот и проверка памяти — **общие для движка**, а не только для
+        # discovery (``DISCOVERY_RECHECK_MAX_CONCURRENT`` покрывал лишь ночной
+        # срез): CLI поднимает любая волна, сборник и переписывание.
+        lease = minimax_capacity.lease(ttl_seconds=int(limit) + 120)
+        if not lease.ok:
+            logger.warning(
+                "minimax: вызов не запускаю — %s (%s)",
+                lease.reason,
+                lease.detail,
+            )
+            return (
+                False,
+                "",
+                dict(
+                    lease.details,
+                    reason=lease.reason,
+                    detail=lease.detail,
+                ),
+            )
+
         started = time.monotonic()
         proc = None
         stdout = ""
         stderr = ""
+        mem_killed = False
         for attempt in range(2):
             proc = subprocess.run(
                 cmd,
@@ -1375,7 +1422,24 @@ def run_classification(
             stderr = (proc.stderr or "").strip()
             if not _killed_by_memory(proc.returncode, stderr):
                 break
+            # Ядро сняло процесс — это про бокс; V8, отказавший по своей куче
+            # (``engine_oom``), — про движок. Отличаем: лечатся по-разному.
+            mem_killed = _killed_by_kernel(proc.returncode)
             if attempt:
+                break
+            # Повтор имеет смысл, только если бокс тянет ещё один вызов:
+            # на голодном боксе второй CLI — это ещё одно ядерное убийство и
+            # ещё 167 с занятости слота воркера (замер 25.11: убийство в
+            # 07:32:53 → повтор → убийство → платный Дипсик).
+            retry_ok, retry_mem = minimax_capacity.memory_decision()
+            if not retry_ok:
+                logger.warning(
+                    "minimax: CLI снят по памяти (код %s) — повтор не делаю: "
+                    "на боксе %s МБ свободно, вызову нужно %s МБ",
+                    proc.returncode,
+                    retry_mem.get("mem_available_mb"),
+                    retry_mem.get("mem_required_mb"),
+                )
                 break
             # Убит по памяти — виновато накопленное состояние, а не аккаунт:
             # другой аккаунт на том же боксе дал бы тот же отказ. Сбрасываем
@@ -1389,6 +1453,9 @@ def run_classification(
         details: Dict[str, Any] = {
             "returncode": proc.returncode,
             "elapsed_ms": elapsed_ms,
+            # Сколько памяти было на боксе, когда вызов начался: без этого
+            # каждый разбор «почему ядро сняло CLI» требовал нового замера.
+            "mem_available_mb": lease.details.get("mem_available_mb"),
         }
 
         payload: Dict[str, Any] = {}
@@ -1432,6 +1499,21 @@ def run_classification(
         # отказа нашли лишь после того, как начало перестало отрезаться).
         details["stderr_head"] = stderr[:400]
         details["stdout"] = stdout[-400:]
+        if mem_killed:
+            # Ядро сняло процесс (код -9 / 137) — это не «движок не ответил»,
+            # а «бокс не дал памяти». Отдельная причина нужна, чтобы видеть
+            # класс отказа в журнале: 25.11 таких отказов был 125 за ночь, и
+            # каждый уходил в платный Дипсик.
+            details["killed_by_kernel"] = True
+            return (
+                False,
+                "",
+                dict(
+                    details,
+                    reason="oom_killed",
+                    detail="ядро сняло CLI по памяти (код %s)" % proc.returncode,
+                ),
+            )
         reason = _classify_failure(stderr, default="exec_failed")
         return False, "", dict(details, reason=reason, detail=stderr[:400] or stderr[-400:])
     except subprocess.TimeoutExpired:
@@ -1440,6 +1522,10 @@ def run_classification(
         return False, "", {"reason": "runtime", "detail": "%s: %s" % (type(exc).__name__, exc)}
     finally:
         shutil.rmtree(tmpdir, ignore_errors=True)
+        # Слот вызова отпускаем **всегда**: иначе бокс ждёт следующий вызов,
+        # хотя CLI уже отработал (слот протух бы только по TTL).
+        if lease is not None:
+            lease.release()
 
 
 def _usage_log_path() -> Path:

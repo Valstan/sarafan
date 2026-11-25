@@ -15,6 +15,11 @@ import os
 os.environ.setdefault("DATABASE_URL", "postgresql+asyncpg://test:test@localhost/test")
 os.environ.setdefault("REDIS_URL", "redis://localhost:6379/0")
 
+# Ёмкость бокса под вызовы MiniMax (слоты в Redis) — в тестах выключена: иначе
+# тесты ходят в боевой Redis, берут слот и держат его, и следующие тесты видят
+# «слот занят». Тесты самого механизма включают его явно и подставляют Redis.
+os.environ.setdefault("MINIMAX_CLI_CAPACITY_ENABLED", "0")
+
 from datetime import datetime  # noqa: E402
 from unittest.mock import AsyncMock, MagicMock  # noqa: E402
 
