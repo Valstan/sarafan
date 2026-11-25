@@ -80,7 +80,7 @@ async def _run_recheck(communities, results_by_id):
         patch.object(dt, "_pick_parse_token", new_callable=AsyncMock, return_value="tok"),
         patch.object(dt, "AsyncSessionLocal", return_value=session),
         patch.object(dt, "VKClient", MagicMock()),
-        patch.object(dt, "check_community_health", side_effect=fake_check),
+        patch.object(dt, "collect_community_health_pre_ai", side_effect=fake_check),
     ):
         return await dt.recheck_communities_for_region_async(1)
 

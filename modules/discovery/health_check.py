@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, Optional
 
@@ -138,6 +138,12 @@ class CommunityHealth:
     #: «сколько стоит прогон» читалось по сети, а не по одному общему числу:
     #: бесплатный free-тир и платный Дипсик — разные деньги.
     engine: str = ""
+    #: Вердикт ещё не получен — стена живая, но категория не посчитана.
+    #: Ставится на время между VK-частью проверки и разбором вердикта: так
+    #: вердикты можно считать **партией** (один вызов движка на N сообществ).
+    ai_pending: bool = False
+    #: Тексты последних постов — вход партии (карточка сообщества).
+    ai_texts: list = field(default_factory=list)
 
 
 def _extract_last_post_dt(items: list) -> Optional[datetime]:
@@ -165,7 +171,7 @@ async def _call_wall_get(client: VKClient, owner_id: int, count: int) -> Dict[st
     )
 
 
-async def check_community_health(
+async def collect_community_health_pre_ai(
     *,
     client: VKClient,
     community: Community,
@@ -174,7 +180,7 @@ async def check_community_health(
     posts_sample: int = DEFAULT_POSTS_SAMPLE,
     now: Optional[datetime] = None,
 ) -> CommunityHealth:
-    """Run one health check for a single Community row.
+    """VK-часть проверки сообщества: стена, давность, тексты — **без** вердикта ИИ.
 
     Args:
         client: VKClient (parse-token).
@@ -186,7 +192,9 @@ async def check_community_health(
         now: для тестов; иначе ``datetime.utcnow()``.
 
     Returns:
-        CommunityHealth — выходные поля для прямого присваивания в БД.
+        CommunityHealth — если вердикт нужен, то ``ai_pending=True`` и
+        ``ai_texts`` заполнен: вердикт считает вызывающий (по одному или
+        партией — см. :func:`apply_ai_verdict`).
     """
     now = now or datetime.utcnow()
     vk_id = abs(int(community.vk_id or 0))
@@ -298,23 +306,43 @@ async def check_community_health(
             reasoning="no text content to analyse",
         )
 
-    ai = await categorize_candidate(
-        name=community.name or "",
-        description=None,  # у Community нет description-поля в БД
-        members_count=None,
-        recent_posts=texts,
-        region_name=region_name,
+    # Стена живая, тексты есть — вердикт ещё не получен. Вызывающий решает, как
+    # считать вердикты: по одному (``check_community_health``) или партией
+    # (:func:`collect_community_health_pre_ai` + :func:`apply_ai_verdict`).
+    return CommunityHealth(
+        community_id=community.id,
+        vk_id=vk_id,
+        status="active",
+        last_post_at=last_post_at,
+        posts_sampled=len(items),
+        suggested_category=None,
+        error_code=None,
+        reasoning="",
+        ai_pending=True,
+        ai_texts=texts,
     )
+
+
+def apply_ai_verdict(
+    pre: CommunityHealth, ai: Dict[str, Any], community: Community
+) -> CommunityHealth:
+    """Применить вердикт ИИ к предварительному результату проверки.
+
+    Отдельная функция — потому, что вердикты можно считать **партией**: сначала
+    VK-часть по всем сообществам региона, потом один вызов движка на N
+    сообществ, потом разбор вердиктов по одному. Логика «что означает вердикт»
+    (дрейф категории, fail-safe при отказе) от этого не меняется.
+    """
     if not ai.get("success"):
         return CommunityHealth(
-            community_id=community.id,
-            vk_id=vk_id,
+            community_id=pre.community_id,
+            vk_id=pre.vk_id,
             status="active",
-            last_post_at=last_post_at,
-            posts_sampled=len(items),
+            last_post_at=pre.last_post_at,
+            posts_sampled=pre.posts_sampled,
             suggested_category=None,
             error_code=None,
-            reasoning=f"AI categorize failed: {ai.get('error')}",
+            reasoning="AI categorize failed: %s" % ai.get("error"),
         )
 
     ai_cat = (ai.get("category") or "").lower()
@@ -329,11 +357,11 @@ async def check_community_health(
     )
     if category_drift:
         return CommunityHealth(
-            community_id=community.id,
-            vk_id=vk_id,
+            community_id=pre.community_id,
+            vk_id=pre.vk_id,
             status="changed_category",
-            last_post_at=last_post_at,
-            posts_sampled=len(items),
+            last_post_at=pre.last_post_at,
+            posts_sampled=pre.posts_sampled,
             suggested_category=ai_cat,
             error_code=None,
             reasoning=ai.get("reasoning"),
@@ -341,13 +369,48 @@ async def check_community_health(
         )
 
     return CommunityHealth(
-        community_id=community.id,
-        vk_id=vk_id,
+        community_id=pre.community_id,
+        vk_id=pre.vk_id,
         status="active",
-        last_post_at=last_post_at,
-        posts_sampled=len(items),
+        last_post_at=pre.last_post_at,
+        posts_sampled=pre.posts_sampled,
         suggested_category=None,
         error_code=None,
         reasoning=ai.get("reasoning"),
         **ai_tokens_kwargs(ai),
     )
+
+
+async def check_community_health(
+    *,
+    client: VKClient,
+    community: Community,
+    region_name: str,
+    dormant_days: int = DEFAULT_DORMANT_DAYS,
+    posts_sample: int = DEFAULT_POSTS_SAMPLE,
+    now: Optional[datetime] = None,
+) -> CommunityHealth:
+    """Проверка одного сообщества целиком: стена + вердикт ИИ.
+
+    Одиночный путь (один вызов движка на сообщество). Ночной срез региона
+    считает вердикты **партией** — см.
+    :func:`collect_community_health_pre_ai` и :func:`apply_ai_verdict`.
+    """
+    pre = await collect_community_health_pre_ai(
+        client=client,
+        community=community,
+        region_name=region_name,
+        dormant_days=dormant_days,
+        posts_sample=posts_sample,
+        now=now,
+    )
+    if not pre.ai_pending:
+        return pre
+    ai = await categorize_candidate(
+        name=community.name or "",
+        description=None,  # у Community нет description-поля в БД
+        members_count=None,
+        recent_posts=list(pre.ai_texts),
+        region_name=region_name,
+    )
+    return apply_ai_verdict(pre, ai, community)

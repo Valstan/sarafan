@@ -68,6 +68,24 @@ DEFAULT_ENGINE = "minimax"
 ENV_PAID_FALLBACK = "DISCOVERY_PAID_FALLBACK"
 DEFAULT_PAID_FALLBACK = "auto"
 
+#: Сколько карточек сообществ класть в один вызов движка (партия).
+#:
+#: ``1`` — прежнее поведение (один вызов на сообщество). Дефолт — 8: ночной
+#: срез 25.11 звал движок 129 раз за ночь на 450 минут слота и не влезал в
+#: свою трёхчасовую рамку; партия из 8 сообществ укладывает тот же объём в
+#: ~16–30 вызовов.
+ENV_AI_BATCH_SIZE = "DISCOVERY_AI_BATCH_SIZE"
+DEFAULT_AI_BATCH_SIZE = 8
+MIN_AI_BATCH_SIZE = 1
+MAX_AI_BATCH_SIZE = 20
+
+#: Ошибка «в ответе на партию нет вердикта по этому сообществу».
+#:
+#: Отдельная от прочих отказов намеренно: она означает, что **движок ответил**,
+#: а потерялась часть карточек — такой случай можно и нужно добрать одиночным
+#: вызовом. Отказ движка целиком одиночными вызовами перебивать бессмысленно.
+BATCH_MISSING_VERDICT_ERROR = "no verdict for this community in the batch answer"
+
 _TEMPERATURE = 0.2  # категоризация — задача с одним «правильным» ответом
 _MAX_TOKENS = 300
 
@@ -203,6 +221,100 @@ def _strip_json_fences(text: str) -> str:
     return t
 
 
+def _build_batch_card(cards: List[Dict[str, Any]]) -> str:
+    """Карточки нескольких сообществ — одним блоком, с номерами.
+
+    Номера нужны для разбора ответа: по ним видно, какому сообществу принадлежит
+    вердикт, даже если модель переставила элементы.
+    """
+    blocks: List[str] = []
+    for index, card in enumerate(cards, start=1):
+        body = _build_card(
+            name=str(card.get("name") or ""),
+            description=card.get("description"),
+            members_count=card.get("members_count"),
+            recent_posts=list(card.get("recent_posts") or []),
+        )
+        blocks.append("=== Сообщество #%d ===\n%s" % (index, body))
+    return "\n".join(blocks)
+
+
+def _build_batch_system_prompt(*, region_name: Optional[str] = None) -> str:
+    """Системный промт партии: роль, список категорий, форма ответа."""
+    return (
+        _ROLE
+        + _region_part(region_name)
+        + _build_instructions()
+        + "Тебе даны несколько карточек сообществ. Верни вердикт **по каждой** "
+        "карточке, в том же порядке, в виде JSON-объекта:\n"
+        '{"results": [{"id": 1, "category": "<one of the list>", '
+        '"confidence": <0-100 integer>, "is_info_page": <true|false>, '
+        '"reasoning": "<одна короткая фраза>"}, ...]}\n'
+        "Поле id — номер карточки из её заголовка. Вердиктов должно быть "
+        "столько же, сколько карточек.\n"
+    )
+
+
+def _build_batch_prompt(
+    cards: List[Dict[str, Any]],
+    *,
+    region_name: Optional[str] = None,
+) -> str:
+    """Полный промт партии для Дипсика: роль, карточки, инструкция."""
+    return (
+        _ROLE
+        + _region_part(region_name)
+        + _build_batch_card(cards)
+        + _build_batch_system_prompt(region_name=region_name)
+    )
+
+
+def _parse_batch_response(content: str, count: int) -> List[Optional[Dict[str, Any]]]:
+    """Разобрать ответ партии: вердикт на каждое сообщество.
+
+    Возвращает список длиной ``count``; ``None`` на месте сообщества, вердикт
+    которого не нашёлся (или не распарсился). Терпимость здесь важнее строгости:
+    потерянный вердикт — это «сообщество без категории», а не падение среза.
+    """
+    out: List[Optional[Dict[str, Any]]] = [None] * max(0, int(count))
+    if not out:
+        return out
+
+    stripped = _strip_json_fences(content)
+    payload: Any = None
+    try:
+        payload = json.loads(stripped)
+    except (json.JSONDecodeError, TypeError):
+        match = re.search(r"\{.*\}", stripped, re.DOTALL)
+        if match:
+            try:
+                payload = json.loads(match.group(0))
+            except json.JSONDecodeError:
+                payload = None
+
+    items: List[Any] = []
+    if isinstance(payload, list):
+        items = payload
+    elif isinstance(payload, dict):
+        for key in ("results", "verdicts", "items", "communities"):
+            value = payload.get(key)
+            if isinstance(value, list):
+                items = value
+                break
+
+    for position, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        raw_id = item.get("id")
+        try:
+            index = int(raw_id) - 1
+        except (TypeError, ValueError):
+            index = position
+        if 0 <= index < len(out) and out[index] is None:
+            out[index] = item
+    return out
+
+
 def _parse_response(content: str) -> Optional[Dict[str, Any]]:
     """Robust JSON parsing — иногда LLM возвращает с лишним текстом до/после.
 
@@ -248,6 +360,22 @@ def _engine_name() -> str:
     return name or DEFAULT_ENGINE
 
 
+def ai_batch_size() -> int:
+    """Сколько сообществ класть в один вызов движка.
+
+    ``DISCOVERY_AI_BATCH_SIZE`` (по умолчанию 8). Значение 1 возвращает прежнее
+    поведение — один вызов на сообщество; это и откат без деплоя.
+    """
+    raw = (os.getenv(ENV_AI_BATCH_SIZE) or "").strip()
+    if not raw:
+        return DEFAULT_AI_BATCH_SIZE
+    try:
+        value = int(raw)
+    except ValueError:
+        return DEFAULT_AI_BATCH_SIZE
+    return max(MIN_AI_BATCH_SIZE, min(MAX_AI_BATCH_SIZE, value))
+
+
 def _paid_fallback_mode() -> str:
     """Режим платной страховки подбора: ``auto`` | ``always`` | ``never``.
 
@@ -283,7 +411,73 @@ def _global_paid_fallback_enabled() -> bool:
     return paid_fallback_enabled()
 
 
-def _call_minimax(prompt: str, *, system: str = "", card: str = "") -> Dict[str, Any]:
+async def _apply_paid_fallback(
+    result: Dict[str, Any],
+    engine: str,
+    prompt: str,
+) -> tuple[Dict[str, Any], str]:
+    """Решение по платной страховке: платить за отказ или нет.
+
+    Возвращает ``(ответ, движок)``. Ответ без вердикта помечается причиной
+    отказа — её потом видит и лог, и отчёт прогона.
+
+    **Одно решение на одиночный вызов и на партию:** иначе партия сообществ
+    платила бы там, где одиночный вызов не платит (или наоборот) — расхождение
+    в правиле денег выглядит как «иногда платим, иногда нет».
+    """
+    if result.get("ok") or engine == "deepseek":
+        return result, engine
+
+    reason = str(result.get("reason") or "unknown")
+    detail = str(result.get("detail") or "")[:160]
+    mode = _paid_fallback_mode()
+
+    if not _global_paid_fallback_enabled():
+        logger.warning(
+            "discovery: %s не ответил (%s%s) — платная страховка выключена "
+            "(CLASSIFIER_PAID_FALLBACK), вердикта нет",
+            engine,
+            reason,
+            (" %s" % detail) if detail else "",
+        )
+        return {"ok": False, "reason": reason}, engine
+
+    if mode == "never":
+        logger.warning(
+            "discovery: %s не ответил (%s%s) — этот поток не платит, вердикта нет",
+            engine,
+            reason,
+            (" %s" % detail) if detail else "",
+        )
+        return {"ok": False, "reason": reason}, engine
+
+    if mode == "auto" and reason in CAPACITY_REASONS:
+        logger.warning(
+            "discovery: %s не ответил (%s%s) — отказ по ёмкости бокса, "
+            "платная страховка пропущена, вердикта нет",
+            engine,
+            reason,
+            (" %s" % detail) if detail else "",
+        )
+        return {"ok": False, "reason": reason}, engine
+
+    logger.warning(
+        "discovery: %s не ответил (%s%s) — закрываем платным Дипсиком",
+        engine,
+        reason,
+        (" %s" % detail) if detail else "",
+    )
+    paid = await asyncio.to_thread(_call_engine, "deepseek", prompt)
+    return paid, "deepseek"
+
+
+def _call_minimax(
+    prompt: str,
+    *,
+    system: str = "",
+    card: str = "",
+    task: str = "",
+) -> Dict[str, Any]:
     """Вызов MiniMax Code (free-тир). Контракт тот же, что у Дипсика.
 
     ⚠️ **Системный промт обязателен.** CLI MiniMax отказывается работать с
@@ -294,6 +488,9 @@ def _call_minimax(prompt: str, *, system: str = "", card: str = "") -> Dict[str,
 
     Файлы для CLI: системный промт — инструкция, вложение — карточка
     сообщества (её же ждёт задание ``TASK_TEXT_DISCOVERY``).
+
+    ``task`` — своё задание для CLI (партия сообществ ждёт другое: см.
+    ``TASK_TEXT_DISCOVERY_BATCH``).
     """
     from modules.minimax_engine import chat as _minimax_chat
 
@@ -303,24 +500,35 @@ def _call_minimax(prompt: str, *, system: str = "", card: str = "") -> Dict[str,
         system=system,
         user=card or prompt,
         label="discovery",
+        task=task,
     )
 
 
-def _call_deepseek(prompt: str) -> Dict[str, Any]:
+def _call_deepseek(prompt: str, *, max_tokens: Optional[int] = None) -> Dict[str, Any]:
     """Вызов платного Дипсика (страховка и режим ``DISCOVERY_ENGINE=deepseek``)."""
     return chat(
         user=prompt,
         temperature=_TEMPERATURE,
-        max_tokens=_MAX_TOKENS,
+        max_tokens=int(max_tokens or _MAX_TOKENS),
         json_object=True,
         label="discovery",
     )
 
 
-def _call_engine(engine: str, prompt: str, **kwargs: Any) -> Dict[str, Any]:
+def _call_engine(
+    engine: str,
+    prompt: str,
+    *,
+    system: str = "",
+    card: str = "",
+    task: str = "",
+    max_tokens: Optional[int] = None,
+) -> Dict[str, Any]:
     if engine == "minimax":
-        return _call_minimax(prompt, **kwargs)
+        return _call_minimax(prompt, system=system, card=card, task=task)
     if engine == "deepseek":
+        if max_tokens:
+            return _call_deepseek(prompt, max_tokens=max_tokens)
         return _call_deepseek(prompt)
     raise RuntimeError("неизвестный движок категоризации: %s" % engine)
 
@@ -370,43 +578,7 @@ async def categorize_candidate(
         return {"success": False, "error": str(exc), "engine": engine}
 
     if not result.get("ok") and engine != "deepseek":
-        reason = str(result.get("reason") or "unknown")
-        detail = str(result.get("detail") or "")[:160]
-        mode = _paid_fallback_mode()
-        if not _global_paid_fallback_enabled():
-            logger.warning(
-                "discovery: %s не ответил (%s%s) — платная страховка выключена "
-                "(CLASSIFIER_PAID_FALLBACK), вердикта нет",
-                engine,
-                reason,
-                (" %s" % detail) if detail else "",
-            )
-            return {"success": False, "error": reason, "engine": engine}
-        if mode == "never":
-            logger.warning(
-                "discovery: %s не ответил (%s%s) — этот поток не платит, вердикта нет",
-                engine,
-                reason,
-                (" %s" % detail) if detail else "",
-            )
-            return {"success": False, "error": reason, "engine": engine}
-        if mode == "auto" and reason in CAPACITY_REASONS:
-            logger.warning(
-                "discovery: %s не ответил (%s%s) — отказ по ёмкости бокса, "
-                "платная страховка пропущена, вердикта нет",
-                engine,
-                reason,
-                (" %s" % detail) if detail else "",
-            )
-            return {"success": False, "error": reason, "engine": engine}
-        logger.warning(
-            "discovery: %s не ответил (%s%s) — закрываем платным Дипсиком",
-            engine,
-            reason,
-            (" %s" % detail) if detail else "",
-        )
-        result = await asyncio.to_thread(_call_engine, "deepseek", prompt)
-        engine = "deepseek"
+        result, engine = await _apply_paid_fallback(result, engine, prompt)
 
     if not result.get("ok"):
         reason = str(result.get("reason") or "unknown")
@@ -436,6 +608,121 @@ async def categorize_candidate(
     out["model"] = str(result.get("model") or "")
     out["tokens_prompt"], out["tokens_completion"] = usage_tokens(result)
     return out
+
+
+async def categorize_candidates_bulk(
+    cards: List[Dict[str, Any]],
+    *,
+    region_name: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Категоризировать несколько сообществ **одним** вызовом движка.
+
+    **Зачем.** Ночной срез звал движок по одному разу на сообщество: 129 вызовов
+    за ночь 25.11, из них 7 успешных, а слот-время — 450 минут. При медиане
+    успешного вызова ~2 минуты срез не влезал в собственную трёхчасовую рамку
+    (``time_limit=3*3600``) и умирал без отчёта. Партия кладёт N карточек в один
+    вызов: вызовов становится в N раз меньше, и вердиктов — по-прежнему по
+    одному на сообщество.
+
+    Возвращает список **той же длины**, что и ``cards``: на каждое сообщество
+    либо вердикт (``success: True``), либо отказ (``success: False`` с
+    ``error``). Пропусков быть не может — иначе вызывающий не поймёт, кому
+    принадлежит вердикт.
+
+    Платная страховка решается **одним** правилом с одиночным вызовом (см.
+    :func:`_apply_paid_fallback`): отказ по ёмкости бокса не оплачивается.
+    """
+    count = len(cards)
+    if count == 0:
+        return []
+
+    results: List[Optional[Dict[str, Any]]] = [None] * count
+    live: List[int] = []
+    for index, card in enumerate(cards):
+        if not str((card or {}).get("name") or "").strip():
+            results[index] = {"success": False, "error": "name is empty"}
+        else:
+            live.append(index)
+    if not live:
+        return [item or {"success": False, "error": "name is empty"} for item in results]
+
+    batch = [cards[index] for index in live]
+    engine = _engine_name()
+    prompt = _build_batch_prompt(batch, region_name=region_name)
+    system_prompt = _build_batch_system_prompt(region_name=region_name)
+    card_text = _build_batch_card(batch)
+
+    # Импорт внутри функции — как и в ``_call_minimax``: движок тянет за собой
+    # контур Кармана, и модуль не должен требовать его при импорте.
+    from modules.minimax_engine import TASK_TEXT_DISCOVERY_BATCH
+
+    try:
+        result = await asyncio.to_thread(
+            _call_engine,
+            engine,
+            prompt,
+            system=system_prompt,
+            card=card_text,
+            task=TASK_TEXT_DISCOVERY_BATCH,
+            # Дипсику нужен потолок ответа на **все** вердикты: 300 токенов на
+            # карточку не хватит на партию из 8 сообществ.
+            max_tokens=_MAX_TOKENS * len(batch),
+        )
+    except RuntimeError as exc:
+        message = str(exc)
+        return [item or {"success": False, "error": message, "engine": engine} for item in results]
+
+    if not result.get("ok"):
+        result, engine = await _apply_paid_fallback(result, engine, prompt)
+        if not result.get("ok"):
+            reason = str(result.get("reason") or "unknown")
+            detail = result.get("detail")
+            logger.warning(
+                "discovery: партия из %d сообществ не получила вердикта (%s%s)",
+                len(batch),
+                reason,
+                (" %s" % detail) if detail else "",
+            )
+            for index in live:
+                results[index] = {"success": False, "error": reason, "engine": engine}
+            return [
+                item or {"success": False, "error": reason, "engine": engine} for item in results
+            ]
+
+    content = str(result.get("content") or "")
+    parsed = _parse_batch_response(content, len(batch))
+    model = str(result.get("model") or "")
+    tokens_prompt, tokens_completion = usage_tokens(result)
+
+    missing = 0
+    for position, item in enumerate(parsed):
+        if not item:
+            missing += 1
+            results[live[position]] = {
+                "success": False,
+                "error": BATCH_MISSING_VERDICT_ERROR,
+                "engine": engine,
+            }
+            continue
+        verdict = _normalise(item)
+        verdict["success"] = True
+        verdict["engine"] = engine
+        verdict["model"] = model
+        verdict["tokens_prompt"] = tokens_prompt
+        verdict["tokens_completion"] = tokens_completion
+        results[live[position]] = verdict
+
+    if missing:
+        # Ответ пришёл, но вердиктов не хватает: это разбор ответа, а не отказ
+        # движка — вердикты недостающих сообществ можно добрать одиночными
+        # вызовами (вызывающий решает это сам).
+        logger.warning(
+            "discovery: в ответе на партию из %d сообществ не хватает %d вердиктов",
+            len(batch),
+            missing,
+        )
+
+    return [item or {"success": False, "error": "no verdict", "engine": engine} for item in results]
 
 
 def usage_tokens(result: Dict[str, Any]) -> tuple[Optional[int], Optional[int]]:

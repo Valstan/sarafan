@@ -44,8 +44,16 @@ from typing import Any, Dict, List, Optional, Tuple
 SLICE_START_HOUR_MSK = 4
 #: Время работы среза в коде — ``time_limit=3 * 3600``.
 SLICE_TIME_LIMIT_S = 3 * 3600
-#: Ожидаемое число вызовов на ночь при ``DISCOVERY_RECHECK_SLICES=14``.
-EXPECTED_DISCOVERY_CALLS = 190
+#: Минимальное число вызовов движка за окно ночи — «срез вообще работал».
+#:
+#: Раньше здесь стояло «ожидаемо ~190 вызовов», но это мера **поштучного** режима:
+#: одно сообщество — один вызов движка. С 25.11 вердикты считаются **партией**
+#: (``DISCOVERY_AI_BATCH_SIZE``, дефолт 8), и вызовов на тот же объём работы в
+#: разы меньше. Мерой работы стал счётчик ``communities_categorized`` в отчёте
+#: задачи (сколько сообществ получили вердикт), а не число вызовов.
+MIN_DISCOVERY_CALLS = 5
+#: Минимальное число сообществ с вердиктом за ночь — «срез не провалился».
+MIN_CATEGORIZED_COMMUNITIES = 10
 
 MSK = timezone(timedelta(hours=3))
 UTC = timezone.utc
@@ -142,9 +150,10 @@ def check_discovery_calls(
             % (len(calls), ok, len(calls) - ok, dict(reasons) if reasons else ""),
         ),
         Verdict(
-            "срез discovery: ожидаемо ~%d вызовов" % EXPECTED_DISCOVERY_CALLS,
-            Verdict.OK if len(calls) >= EXPECTED_DISCOVERY_CALLS // 2 else Verdict.FAIL,
-            "факт %d, окно между вызовами %d с" % (len(calls), span),
+            "срез discovery: вызовы движка были",
+            Verdict.OK if len(calls) >= MIN_DISCOVERY_CALLS else Verdict.FAIL,
+            "факт %d (минимум %d; с партией вердиктов вызовов в разы меньше), "
+            "окно между вызовами %d с" % (len(calls), MIN_DISCOVERY_CALLS, span),
         ),
     ]
     return out
@@ -176,11 +185,18 @@ def check_task_report(log_text: str) -> List[Verdict]:
 
     measured = bool(payload.get("tokens_measured"))
     engines = payload.get("engines") or {}
+    categorized = int(payload.get("communities_categorized") or 0)
     out = [
         Verdict(
             "срез discovery: уложился в %d ч" % (SLICE_TIME_LIMIT_S // 3600),
             Verdict.OK if elapsed <= SLICE_TIME_LIMIT_S else Verdict.FAIL,
             "задача шла %.0f с" % elapsed,
+        ),
+        Verdict(
+            "срез discovery: сообществ с вердиктом",
+            Verdict.OK if categorized >= MIN_CATEGORIZED_COMMUNITIES else Verdict.FAIL,
+            "%d (минимум %d), партий вызовов: %s"
+            % (categorized, MIN_CATEGORIZED_COMMUNITIES, payload.get("ai_batches")),
         ),
         Verdict(
             "отчёт среза: tokens_measured",

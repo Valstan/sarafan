@@ -244,7 +244,7 @@ async def test_recheck_writes_health_fields_and_aggregates_counts():
         patch.object(dt, "_pick_parse_token", new_callable=AsyncMock, return_value="tok"),
         patch.object(dt, "AsyncSessionLocal", return_value=session),
         patch.object(dt, "VKClient", MagicMock()),
-        patch.object(dt, "check_community_health", side_effect=fake_check),
+        patch.object(dt, "collect_community_health_pre_ai", side_effect=fake_check),
     ):
         out = await dt.recheck_communities_for_region_async(1)
 
@@ -300,13 +300,149 @@ async def test_recheck_counts_transient_errors():
         patch.object(dt, "_pick_parse_token", new_callable=AsyncMock, return_value="tok"),
         patch.object(dt, "AsyncSessionLocal", return_value=session),
         patch.object(dt, "VKClient", MagicMock()),
-        patch.object(dt, "check_community_health", side_effect=fake_check),
+        patch.object(dt, "collect_community_health_pre_ai", side_effect=fake_check),
     ):
         out = await dt.recheck_communities_for_region_async(1)
     assert out["errors"] == 1
     assert out["active"] == 1
     # transient-код тоже персистится — виден до следующего чистого recheck'а
     assert c.last_error_code == 6
+
+
+# ───────── партия вердиктов (25.11: срез звал движок по одному разу на community) ─────────
+
+
+def _pre_ai(community_id: int) -> CommunityHealth:
+    """Результат VK-части: стена живая, вердикт ещё не получен."""
+    return CommunityHealth(
+        community_id=community_id,
+        vk_id=100,
+        status="active",
+        last_post_at=None,
+        posts_sampled=5,
+        suggested_category=None,
+        error_code=None,
+        reasoning="",
+        ai_pending=True,
+        ai_texts=["новость района"],
+    )
+
+
+@pytest.mark.asyncio
+async def test_recheck_counts_verdicts_in_batches_not_one_by_one():
+    """Три сообщества с живой стеной — **один** вызов движка, а не три.
+
+    Замер 25.11: поштучный режим дал 129 вызовов и 450 минут слота за ночь, и
+    срез не влезал в свою трёхчасовую рамку.
+    """
+    region = _make_region()
+    communities = [_make_community(id_=i, vk_id=100 + i) for i in (1, 2, 3)]
+    session = _FakeSession(
+        [
+            {"kind": "scalar_one", "value": region},
+            {"kind": "scalars_all", "value": communities},
+        ]
+    )
+    bulk = AsyncMock(
+        return_value=[
+            {"success": True, "category": "novost", "confidence": 80, "engine": "minimax"},
+            {"success": True, "category": "novost", "confidence": 80, "engine": "minimax"},
+            {"success": True, "category": "novost", "confidence": 80, "engine": "minimax"},
+        ]
+    )
+
+    async def fake_check(*, community, **_kwargs):
+        return _pre_ai(community.id)
+
+    with (
+        patch.object(dt, "_pick_parse_token", new_callable=AsyncMock, return_value="tok"),
+        patch.object(dt, "AsyncSessionLocal", return_value=session),
+        patch.object(dt, "VKClient", MagicMock()),
+        patch.object(dt, "collect_community_health_pre_ai", side_effect=fake_check),
+        patch.object(dt, "categorize_candidates_bulk", bulk),
+    ):
+        out = await dt.recheck_communities_for_region_async(1)
+
+    assert bulk.await_count == 1, "вердикты считаются партией, а не по одному"
+    assert len(bulk.await_args.args[0]) == 3
+    assert out["ai_batches"] == 1
+    assert out["communities_categorized"] == 3
+
+
+@pytest.mark.asyncio
+async def test_recheck_missing_verdict_is_fetched_single():
+    """Потерянный в партии вердикт добирается одиночным вызовом — качество важнее цены."""
+    region = _make_region()
+    communities = [_make_community(id_=1), _make_community(id_=2)]
+    session = _FakeSession(
+        [
+            {"kind": "scalar_one", "value": region},
+            {"kind": "scalars_all", "value": communities},
+        ]
+    )
+    bulk = AsyncMock(
+        return_value=[
+            {"success": True, "category": "novost", "confidence": 80, "engine": "minimax"},
+            {"success": False, "error": dt.BATCH_MISSING_VERDICT_ERROR, "engine": "minimax"},
+        ]
+    )
+    single = AsyncMock(
+        return_value={"success": True, "category": "sport", "confidence": 90, "engine": "minimax"}
+    )
+
+    async def fake_check(*, community, **_kwargs):
+        return _pre_ai(community.id)
+
+    with (
+        patch.object(dt, "_pick_parse_token", new_callable=AsyncMock, return_value="tok"),
+        patch.object(dt, "AsyncSessionLocal", return_value=session),
+        patch.object(dt, "VKClient", MagicMock()),
+        patch.object(dt, "collect_community_health_pre_ai", side_effect=fake_check),
+        patch.object(dt, "categorize_candidates_bulk", bulk),
+        patch.object(dt, "categorize_candidate", single),
+    ):
+        out = await dt.recheck_communities_for_region_async(1)
+
+    assert single.await_count == 1
+    assert out["communities_categorized"] == 2
+
+
+@pytest.mark.asyncio
+async def test_recheck_engine_failure_does_not_retry_single():
+    """Движок не ответил — одиночными вызовами не перебиваем: движок-то не встал."""
+    region = _make_region()
+    communities = [_make_community(id_=1), _make_community(id_=2)]
+    session = _FakeSession(
+        [
+            {"kind": "scalar_one", "value": region},
+            {"kind": "scalars_all", "value": communities},
+        ]
+    )
+    bulk = AsyncMock(
+        return_value=[
+            {"success": False, "error": "insufficient_memory", "engine": "minimax"},
+            {"success": False, "error": "insufficient_memory", "engine": "minimax"},
+        ]
+    )
+    single = AsyncMock()
+
+    async def fake_check(*, community, **_kwargs):
+        return _pre_ai(community.id)
+
+    with (
+        patch.object(dt, "_pick_parse_token", new_callable=AsyncMock, return_value="tok"),
+        patch.object(dt, "AsyncSessionLocal", return_value=session),
+        patch.object(dt, "VKClient", MagicMock()),
+        patch.object(dt, "collect_community_health_pre_ai", side_effect=fake_check),
+        patch.object(dt, "categorize_candidates_bulk", bulk),
+        patch.object(dt, "categorize_candidate", single),
+    ):
+        out = await dt.recheck_communities_for_region_async(1)
+
+    assert single.await_count == 0
+    # fail-safe: сообщество осталось «active», вердикта нет
+    assert out["active"] == 2
+    assert out["communities_categorized"] == 0
 
 
 @pytest.mark.asyncio
@@ -328,7 +464,7 @@ async def test_recheck_clean_run_clears_stale_error_code():
         patch.object(dt, "_pick_parse_token", new_callable=AsyncMock, return_value="tok"),
         patch.object(dt, "AsyncSessionLocal", return_value=session),
         patch.object(dt, "VKClient", MagicMock()),
-        patch.object(dt, "check_community_health", side_effect=fake_check),
+        patch.object(dt, "collect_community_health_pre_ai", side_effect=fake_check),
     ):
         await dt.recheck_communities_for_region_async(1)
     assert c.last_error_code is None
