@@ -10,6 +10,8 @@
 - Celery: задачи и расписания (`tasks/celery_app.py`)
 - Nginx: reverse proxy и `/static` (`config/setka.conf.editable`)
 - Monitoring: `/metrics` + `config/prometheus.yml`
+- **Агентный слой:** `gateway_mcp/` (реестр инструментов, цикл агента, профили)
+- **Локальный стенд (Windows):** `infra/windows/` (замена systemd-юнитов)
 
 ## 2) Потоки данных (основные)
 
@@ -124,3 +126,48 @@ flowchart LR
 ## 5) UI (страницы)
 
 `/`, `/regions`, `/regions/links`, `/posts`, `/communities`, `/notifications`, `/tokens`, `/publisher`, `/monitoring`, `/schedule`, `/parsing`, `/parsing-stats`, `/pipeline`
+
+## 6) Агентный слой (`gateway_mcp/`)
+
+Единый слой «модель выдаёт задание — инструмент выполняет»
+([ADR-0024](adr/0024-agentnyy-sloy-zadanie-instrument.md)).
+
+| Модуль | Что |
+|---|---|
+| `gateway_mcp/tool_registry.py` | `ToolSpec` (имя, описание, JSON Schema, обработчик) и `ToolRegistry` (каталог, вызов с валидацией) |
+| `gateway_mcp/tools.py` | Read-инструменты VK-шлюза: `vk_get_community`, `vk_get_wall`, `vk_call` |
+| `gateway_mcp/local_tools.py` | Read-инструменты по локальной базе: `sarafan_list_regions`, `sarafan_find_posts`, `sarafan_region_stats` |
+| `gateway_mcp/registry.py` | Сборка реестра (какие инструменты доступны агенту) |
+| `gateway_mcp/agent.py` | Цикл агента: задание → модель → инструмент → результат (`AgentResult`) |
+| `gateway_mcp/model_adapters.py` | Адаптеры движков: DeepSeek, MiniMax Code CLI, заглушка |
+| `gateway_mcp/profiles.py` | Профили агентов: очередь (`agent`, `agent_wave`, `agent_discovery`), движок, лимит шагов |
+| `gateway_mcp/bench.py` | Замер ёмкости машины для агентов |
+| `gateway_mcp/client.py`, `gateway_mcp/server.py` | HTTP-клиент шлюза и MCP-обёртка |
+
+Вход в конвейер — задача `tasks.celery_app.run_agent_task`; постановка в
+очередь профиля — `tasks.celery_app.enqueue_agent_task`.
+
+Подробности и живой каталог инструментов — в
+[`AGENT_RUNTIME.md`](AGENT_RUNTIME.md).
+
+## 7) Локальный стенд (Windows)
+
+Замена systemd-юнитов боевого контура — `infra/windows/`:
+
+| Файл | Что |
+|---|---|
+| `infra/windows/local_env.py` | Чтение env-файла процессом (на Windows нет `EnvironmentFile=`) |
+| `infra/windows/common.ps1` | Общая часть скриптов запуска |
+| `infra/windows/start-web.ps1` | Веб (замена юнита `setka`) |
+| `infra/windows/start-worker.ps1` | Воркер очереди `celery` (пул `solo`) |
+| `infra/windows/start-wave-worker.ps1` | Воркер очередей `wave`, `digest` |
+| `infra/windows/start-beat.ps1` | Планировщик (замена `setka-celery-beat`) |
+| `infra/windows/start-vk-bot.ps1` | Демон VK-бота (замена `setka-vk-bot`) |
+| `infra/windows/start-radar-intake.ps1` | Приём радара (замена `setka-radar-intake`) |
+| `infra/windows/register-scheduled-tasks.ps1` | Задачи планировщика Windows (по одной на юнит) |
+| `infra/windows/prod_dump.sh` | Снятие дампа боевой базы (только чтение) |
+| `infra/windows/prod_counters.sh` | Счётчики боевой базы для построчной сверки |
+| `infra/windows/classifier_parity.py` | Построчная сверка классификатора: локальный движок против боевых вердиктов |
+
+Инвентаризация и план переезда — в
+[`MIGRATION_TO_WINDOWS.md`](MIGRATION_TO_WINDOWS.md).

@@ -12,9 +12,14 @@ from pathlib import Path
 # ДО импорта config.runtime (его тянет database.connection и web.api ниже):
 # потеря /etc/setka/setka.env иначе убьёт процесс на `_require` ещё на этапе
 # импорта. В норме — no-op (все ключи на месте, ноль сетевых вызовов).
+# ПЕРЕД bootstrap'ом — чтение env-файла локального стенда: на Windows нет
+# systemd'овского EnvironmentFile=, и без этого шага процесс стартует с
+# пустым окружением (на проде переменные даёт systemd — там шаг no-op).
+from infra.windows.local_env import load_local_env  # noqa: E402
 from modules.secrets_bootstrap import bootstrap_secrets  # noqa: E402
 from utils.log_redaction import install_log_redaction  # noqa: E402
 
+load_local_env()  # noqa: E402
 bootstrap_secrets()  # noqa: E402
 
 from fastapi import FastAPI, Request  # noqa: E402
