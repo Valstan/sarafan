@@ -668,6 +668,36 @@ function communityTokenRowsHtml(row) {
     return slots.map((slot, index) => communityTokenSlotHtml(row, slot, byName[slot.name], index === 0)).join('');
 }
 
+// Токен-политика пишет времена в UTC БЕЗ суффикса (``datetime.utcnow()``), а JS
+// без 'Z' считает такую строку местным временем — на боксе это сдвиг на +3 ч,
+// и «cooldown до 14:47» показывалось на три часа раньше правды.
+function parsePolicyTime(iso) {
+    if (!iso) return null;
+    const raw = /[zZ]|[+-]\d{2}:?\d{2}$/.test(iso) ? iso : iso + 'Z';
+    const d = new Date(raw);
+    return isNaN(d.getTime()) ? null : d;
+}
+
+// Сообщение об ошибке токена: красным — пока токен реально отключён, после
+// истечения cooldown — приглушённым («было»). Раньше сообщение об auto-disable
+// висело красным годами: для community-токенов поле ``error_message`` никто не
+// чистил (``enable()`` чистит только аккаунтные, ``community_id IS NULL``), и
+// страница показывала «auto-disable: VK error 5 от 21.11» для токенов, которые
+// давно работают (замер 25.11: 9 таких community-токенов, у всех ``last_used``
+// за сегодняшний день).
+function tokenMessageHtml(tokenRow) {
+    if (!tokenRow || !tokenRow.error_message) return '';
+    const msg = escapeHtml(tokenRow.error_message);
+    const until = parsePolicyTime(tokenRow.disabled_until);
+    if (until && until > new Date()) {
+        return `<small class="text-danger d-block mt-1">${msg} — отключён до ${until.toLocaleString('ru-RU')}</small>`;
+    }
+    if (until) {
+        return `<small class="text-muted d-block mt-1">${msg} — cooldown истёк ${until.toLocaleString('ru-RU')}</small>`;
+    }
+    return `<small class="text-danger d-block mt-1">${msg}</small>`;
+}
+
 function communityTokenSlotHtml(row, slot, tokenRow, firstForRegion) {
     const cid = row.community_id;
     const hasToken = !!tokenRow;
@@ -687,7 +717,7 @@ function communityTokenSlotHtml(row, slot, tokenRow, firstForRegion) {
             <td>
                 <input type="text" class="form-control form-control-sm" id="${inputId}"
                        placeholder="${escapeHtml(placeholder)}" autocomplete="off">
-                ${tokenRow && tokenRow.error_message ? `<small class="text-danger d-block mt-1">${escapeHtml(tokenRow.error_message)}</small>` : ''}
+                ${tokenMessageHtml(tokenRow)}
             </td>
             <td>${statusBadge}${tokenRow && tokenRow.last_validated ? `<div><small class="text-muted">${new Date(tokenRow.last_validated).toLocaleString('ru-RU')}</small></div>` : ''}</td>
             <td>
@@ -811,7 +841,7 @@ function displayTokens(tokens) {
         `· ${tokens.length} всего: ${comm} сообществ, ${tokens.length - comm} пользовательских`;
     container.innerHTML = tokens.map(token => {
         const now = new Date();
-        const cooldownUntil = token.disabled_until ? new Date(token.disabled_until) : null;
+        const cooldownUntil = parsePolicyTime(token.disabled_until);
         const inCooldown = cooldownUntil && cooldownUntil > now;
         const cooldownLabel = inCooldown
             ? `<div class="text-danger"><strong>⏸ В cooldown до:</strong> ${cooldownUntil.toLocaleString('ru-RU')}${token.last_error_code ? ` (VK error ${token.last_error_code})` : ''}</div>`
