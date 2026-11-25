@@ -24,6 +24,7 @@ import json
 import logging
 import time
 from datetime import datetime, timedelta
+from typing import Optional
 
 from celery import Celery, signals
 from celery.schedules import crontab
@@ -44,9 +45,14 @@ logger = logging.getLogger(__name__)
 # ДО импорта config.runtime: worker/beat стартуют из этой точки, и потеря
 # /etc/setka/setka.env иначе убьёт процесс на `_require` при первом же
 # импорте таска. В норме — no-op (все ключи на месте, ноль сетевых вызовов).
+# ПЕРЕД bootstrap'ом — чтение env-файла локального стенда: на Windows нет
+# systemd'овского EnvironmentFile=, и без этого шага worker/beat стартуют
+# с пустым окружением (на проде переменные даёт systemd — там шаг no-op).
+from infra.windows.local_env import load_local_env  # noqa: E402
 from modules.secrets_bootstrap import bootstrap_secrets  # noqa: E402
 from utils.log_redaction import install_log_redaction  # noqa: E402
 
+load_local_env()  # noqa: E402
 bootstrap_secrets()  # noqa: E402
 
 # Маскирование секретов в логах — строго ПОСЛЕ bootstrap: значения секретов
@@ -385,6 +391,66 @@ def _setka_record_task_duration(task=None, task_id=None, **_kwargs) -> None:
         )
     except Exception:
         logger.debug("task timings: длительность не записана", exc_info=True)
+
+
+@app.task(name="tasks.celery_app.run_agent_task")
+def run_agent_task(
+    task_text: str,
+    profile_name: str = "generic",
+    context: Optional[dict] = None,
+) -> dict:
+    """Задание для агента: модель получает задачу → вызывает инструмент → результат в конвейер.
+
+    Это точка входа каркаса «модель выдаёт задание — инструмент выполняет»
+    ([ADR-0024](../docs/adr/0024-agentnyy-sloy-zadanie-instrument.md)).
+    Задача приходит из очереди профиля (у каждого профиля своя очередь и свой
+    слот — см. `gateway_mcp/profiles.py`), агент отрабатывает её и возвращает
+    **структурированный** результат: `ok`, `output`, `tool_calls`, `steps`.
+
+    Возвращается словарь, а не текст: разбирать ответ модели на стороне
+    вызывающего не должен никто — иначе каждый потребитель заведёт свой
+    разбор и разойдётся с агентом.
+
+    Ошибка движка **не** роняет задачу: неуспех — это `{"ok": False, ...}`
+    с причиной. Ронять задачу имеет смысл только когда повтор попросит
+    другой результат, а решает это уже потребитель.
+    """
+    from gateway_mcp.profiles import build_runner, get_profile
+    from gateway_mcp.registry import build_registry
+
+    try:
+        profile = get_profile(profile_name)
+    except KeyError as exc:
+        return {"ok": False, "reason": "unknown_profile", "detail": str(exc)}
+
+    registry = build_registry()
+    runner = build_runner(profile, registry=registry)
+    result = run_coro(runner.run(task_text, context=context))
+    payload = result.to_dict()
+    payload["profile"] = profile.name
+    payload["queue"] = profile.queue
+    return payload
+
+
+def enqueue_agent_task(
+    task_text: str,
+    profile_name: str = "generic",
+    context: Optional[dict] = None,
+) -> str:
+    """Положить задание агенту в очередь его профиля. Возвращает task id.
+
+    Маршрутизация — **явная** (``apply_async(queue=...)``), а не через
+    ``task_routes``: тогда локальный стенд поднимается рядом с боевой
+    раскладкой очередей и не требует правки боевой конфигурации.
+    """
+    from gateway_mcp.profiles import get_profile
+
+    profile = get_profile(profile_name)
+    async_result = run_agent_task.apply_async(
+        args=[task_text, profile.name, context],
+        queue=profile.queue,
+    )
+    return async_result.id
 
 
 @app.task(name="tasks.celery_app.run_vk_monitoring")

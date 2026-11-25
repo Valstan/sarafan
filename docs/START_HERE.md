@@ -2,6 +2,11 @@
 
 Если что-то в документации расходится с кодом — приоритет у кода и реальных конфигов сервера.
 
+**Два окружения.** Боевой контур **жив** (Ubuntu, systemd, SSH-доступ) — и
+параллельно идёт перенос на локальную машину владельца (Windows). Разделы
+0–9 ниже — про прод; **раздел 10 — про локальный стенд**. Полный план
+переезда — [`MIGRATION_TO_WINDOWS.md`](MIGRATION_TO_WINDOWS.md).
+
 ---
 
 ## Удалённый доступ к продакшену (важно для AI)
@@ -165,4 +170,72 @@ pre-commit run --all-files
 
 ---
 
-*Последнее обновление: 2026-09-29*
+## 10) Локальный стенд (Windows)
+
+**Назначение.** Перенос боевого контура на машину владельца
+([ADR-0023](adr/0023-pereezd-boevogo-kontura-na-lokalnuyu-mashinu.md)). Прод
+при этом **не остановлен** и остаётся страховкой до отдельной команды
+владельца.
+
+### Состав
+
+| Компонент | Что | Где |
+|---|---|---|
+| Python | 3.12.10 + venv | `venv/` |
+| PostgreSQL | portable-сборка 17.6, порт **5433** | `downloads/pgsql`, кластер `downloads/pgdata` |
+| Redis | сборка для Windows 8.10.3, порт 6379 | `downloads/Redis-*` |
+| FastAPI | uvicorn, `127.0.0.1:8000` | `infra/windows/start-web.ps1` |
+| Celery | worker (`celery`), worker (`wave`,`digest`), beat | `infra/windows/start-*.ps1` |
+| env-файл | машинный, в git не едет | `config/local-stand.env` |
+
+> Порт PostgreSQL **5433** — не ошибка: на машине уже был чужой PostgreSQL на
+> 5432, и свой кластер поднят на свободном порту, чтобы его не трогать.
+
+### Запуск
+
+```powershell
+powershell -ExecutionPolicy Bypass -File infra\windows\start-web.ps1
+powershell -ExecutionPolicy Bypass -File infra\windows\start-worker.ps1
+powershell -ExecutionPolicy Bypass -File infra\windows\start-wave-worker.ps1
+powershell -ExecutionPolicy Bypass -File infra\windows\start-beat.ps1
+
+# круглосуточно: задачи планировщика Windows (по одной на юнит прода)
+powershell -ExecutionPolicy Bypass -File infra\windows\register-scheduled-tasks.ps1
+```
+
+### Проверки
+
+```powershell
+Invoke-WebRequest http://127.0.0.1:8000/api/health/ -UseBasicParsing   # 200
+Invoke-WebRequest http://127.0.0.1:8000/metrics     -UseBasicParsing   # 200
+.\venv\Scripts\python.exe -m pytest tests\ -q --basetemp=temp\pytest_win
+```
+
+> На Windows pytest падает на финальной уборке временных каталогов
+> (`PermissionError: [WinError 5]` в `%TEMP%`) — **не тесты проекта, а pytest
+> на этой машине**. Обход: `--basetemp` внутри репозитория.
+
+### Что нужно помнить
+
+* **Пул Celery на Windows — `solo`.** Prefork падает с `WinError 5`
+  (см. [`AGENT_RUNTIME.md`](AGENT_RUNTIME.md) §5).
+* **env-файл читает сам процесс** (`SETKA_ENV_FILES`), потому что на Windows
+  нет systemd'овского `EnvironmentFile=`.
+* **Локальные `DATABASE_URL`/`REDIS_URL` заданы явно** — иначе bootstrap
+  подхватил бы из комнаты КАРМАНа **боевые** адреса, и локальный процесс
+  писал бы в продовую базу.
+* **Секреты в репозитории нет** и не появится; ключи приезжают из комнаты
+  КАРМАНа.
+
+### Агентный слой
+
+```powershell
+.\venv\Scripts\python.exe -m gateway_mcp.bench --concurrency 1,4,8 --tasks 16 --latency 0.05
+```
+
+Каталог инструментов и профили агентов — в
+[`AGENT_RUNTIME.md`](AGENT_RUNTIME.md).
+
+---
+
+*Последнее обновление: 2026-11-26*

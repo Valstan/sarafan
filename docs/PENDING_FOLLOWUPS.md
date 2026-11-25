@@ -40,6 +40,7 @@
 ## 🔴 Блокеры
 
 
+- **P242** [🔴 Штатный ежедневный бэкап боевой базы падает и оставляет пустые файлы — рабочих бэкапов нет с января (найдено при переезде 26.11)](pending/P242-ezhednevnyj-bekap-boevoj-bazy-sloman.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P164** [🔴 OOM вернулся: 13.11 убит воркер, 14.11 трижды minimax-code (замер 19.11; потолок ребёнка опущен 21.11, RAM — за владельцем)](pending/P164-celery-vorker-ubivaetsya-oom-primerno-raz-v.md) · `⏱ 2026-11-19 · snooze 0 · fresh`
 - **P163** [🔴 Swap завести НЕЛЬЗЯ изнутри — это контейнер OpenVZ (проверено опытом 2026-09-14)](pending/P163-swap-zavesti-nelzya-iznutri-eto-konteyner-openvz.md) · `⏱ 2026-11-19 · snooze 0 · fresh`
 - **P158** [📈 Лендинг `/regions/links`: прирост подписчиков, сортировка по охвату, две колонки (заказ владельца 2026-08-27)](pending/P158-lending-prirost-podpischikov-sortirovka-po.md) · `⏱ 2026-08-27 · snooze 0 · parked`
@@ -50,6 +51,7 @@
 
 ## ⏳ В процессе
 
+- **P243** [⏳ Решения владельца для завершения переезда: токен комнаты на локальную машину, судьба радара, движок, проверка VK-токенов с нового адреса, команда «закрыть прод»](pending/P243-resheniya-vladeltsa-dlya-zaversheniya-pereezda.md) · `⏱ 2026-11-26 · snooze 0 · parked`
 - **P230** [🟡 MAX-канал рекламных заявок: карточка с фото и кнопкой ответа + нейросетевой судья](pending/P230-max-kanal-reklamnyh-zayavok.md) · `⏱ 2026-11-20 · snooze 0 · fresh`
 - **P225** [⏳ Пилот единого профиля жителя (#386): слой условий услуг + ассистент — шаг 1 выкачен 11.11, шаг 3 собран 19.11](pending/P225-pilot-386-usloviya-uslug-i-assistent.md) · `⏱ 2026-11-11 · snooze 0 · fresh`
 - **P227** [⏳ Контур MiniMax: пул и подбор — в Кармане, весь трафик на MiniMax; **продление входа сработало в бою 23.11 17:02** (тот же аккаунт #3, +12 ч, без 409); **решение 24.11: аккаунты, выданные 22.11, не нужны — renew для них не смягчаем**](pending/P227-minimax-kontur-pul-ak-kuntov-avtochekin.md) · `⏱ 2026-11-24 · snooze 0 · fresh`
@@ -100,6 +102,7 @@
 
 ## 🟡 Техдолги
 
+- **P244** [🟡 Windows: prefork Celery падает с WinError 5 (обход — `--pool=solo`), pytest падает на уборке `%TEMP%` (обход — `--basetemp`); 37 пропущенных тестов разобраны — 36 ждут gitleaks, 1 Linux-only](pending/P244-windows-nesovmestimosti-i-propuschennye-testy.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P237** [🟡 Татарстан, 14-я порция: Бавлинский + Дрожжановский + Тукаевский — область закрыта 43/43; хвост за владельцем: COMM-ключи трёх групп и оформление](pending/P237-tatarstan-14-ya-porciya-bavlinskiy-drozhzhanovskiy-tukayevskiy.md) · `⏱ 2026-11-24 · snooze 0 · fresh`
 - **P236** [🟡 Дубли доноров между регионами: 71 VK-группа заведена в нескольких районах (116 лишних регистраций; 35 — закамский клон-пул); **решение 24.11: деактивируем лишние — выключено 26 (6 дублей + 9 региона `test` + 11 по городу), 17 групп не решаются городом — на разбор глазами**](pending/P236-dubl-donorov-mezhdu-regionami.md) · `⏱ 2026-11-24 · snooze 0 · fresh`
 - **P226** [🟡 Полный прогон падает в двух проверках `test_token_policy.py` — порядок кандидатов плавает (найдено 2026-11-11)](pending/P226-testy-ne-germetichny-poryadok-kandidatov.md) · `⏱ 2026-11-11 · snooze 0 · fresh`
