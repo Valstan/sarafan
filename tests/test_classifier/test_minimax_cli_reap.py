@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import signal
 from pathlib import Path
+from typing import List
 
 from modules import minimax_cli_reap as reap
 
@@ -117,3 +118,35 @@ def test_two_orphans_are_sorted(tmp_path: Path) -> None:
     _make_proc(tmp_path, 900, "minimax-code", 1)
     _make_proc(tmp_path, 100, "minimax-code", 1)
     assert reap.find_orphan_cli_pids(tmp_path) == [100, 900]
+
+
+def test_reaper_runs_even_when_slot_refuses(monkeypatch, tmp_path: Path) -> None:
+    """Уборка обязана выполняться и когда слот отказал.
+
+    Живой замер 25.11 15:34: уборщик стоял после проверки слота, а на голодном боксе
+    слот отказывает — то есть уборка не выполнялась ровно тогда, когда сироты и вредны
+    (сирота дождалась ядерного убийства при 36 платных отказах подряд).
+    """
+    from modules import minimax_engine as mx
+    from modules.minimax_capacity import Lease
+
+    account = mx.MinimaxAccount(name="work", root=tmp_path)
+    reaped: List[int] = []
+
+    def _reap(*_args: object, **_kwargs: object) -> dict:
+        reaped.append(1)
+        return {"found": 0, "candidates": [], "killed": [], "errors": []}
+
+    monkeypatch.setattr(mx.minimax_cli_reap, "reap_orphan_cli", _reap)
+    monkeypatch.setattr(
+        mx.minimax_capacity,
+        "lease",
+        lambda **_kwargs: Lease(ok=False, reason="insufficient_memory", detail="нет памяти"),
+    )
+    monkeypatch.setattr(mx.shutil, "which", lambda _name: "/usr/bin/mcode")
+
+    ok, _text, details = mx.run_classification(account, system="s", user="u")
+
+    assert ok is False
+    assert details["reason"] == "insufficient_memory"
+    assert reaped, "уборка сирот обязана выполняться и когда слот отказал"
