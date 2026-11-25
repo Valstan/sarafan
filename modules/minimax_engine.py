@@ -78,7 +78,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urlencode
 
-from modules import karman_minimax, minimax_capacity
+from modules import karman_minimax, minimax_capacity, minimax_cli_reap
 
 logger = logging.getLogger(__name__)
 
@@ -1402,6 +1402,19 @@ def run_classification(
                     detail=lease.detail,
                 ),
             )
+
+        # ── Осиротевшие CLI (замер 25.11) ──
+        #
+        # CLI перехватывает SIGTERM ⇒ graceful-остановка воркера его НЕ убивает: после
+        # смерти воркера процесс остаётся сиротой (PPid = 1), живёт ещё ~18 минут,
+        # подрастая до 250–290 МБ, и его снимает ядро — а в логах это выглядит как «новые
+        # отказы движка» (замер 25.11: 26 убийств в 08:13–08:30 после рестарта воркеров,
+        # при том что все вызовы движка в это окно прошли успешно). Перед запуском
+        # снимаем только таких — по PPid = 1, живой CLI чужого воркера не трогаем.
+        try:
+            minimax_cli_reap.reap_orphan_cli()
+        except Exception:  # noqa: BLE001 — уборка не должна ломать вызов
+            logger.debug("minimax: уборка осиротевших CLI не удалась", exc_info=True)
 
         started = time.monotonic()
         proc = None

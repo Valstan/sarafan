@@ -258,6 +258,29 @@ def _setka_apply_json_logging(**_kwargs) -> None:
         logger.debug("install_log_redaction failed", exc_info=True)
 
 
+@signals.worker_ready.connect  # type: ignore[has-type]
+def _setka_reap_orphan_minimax_cli(**_kwargs) -> None:
+    """Снять осиротевшие процессы MiniMax CLI на старте воркера.
+
+    CLI перехватывает SIGTERM, поэтому рестарт воркера его не убивает: процесс
+    остаётся сиротой (PPid = 1), живёт ещё ~18 минут, съедает 250–290 МБ на боксе
+    с 1536 МБ и в конце его снимает ядро — в логах это читается как «новые отказы
+    движка» (замер 25.11: 26 убийств в 08:13–08:30 после рестарта, при том что все
+    вызовы движка прошли успешно). Сироты появляются **из-за** рестарта — значит
+    убирать их надо **в момент старта нового воркера** ([P240]).
+
+    Трогаем только ``PPid`` = 1: живой CLI чужого воркера не прерывается.
+    """
+    try:
+        from modules import minimax_cli_reap
+
+        report = minimax_cli_reap.reap_orphan_cli()
+        if report.get("killed"):
+            logger.warning("minimax: на старте воркера снято осиротевших CLI: %s", report["killed"])
+    except Exception:
+        logger.debug("reap_orphan_minimax_cli failed", exc_info=True)
+
+
 # ---------------------------------------------------------------------------
 # Прибор памяти: КАКАЯ задача поднимает потолок RSS дочернего процесса.
 #
