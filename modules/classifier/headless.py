@@ -99,6 +99,20 @@ def chat(*, engine: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
     # для него — лишнее.
     task = str(kwargs.pop("task", "") or "")
 
+    # Управление платной страховкой **на уровне вызова**.
+    #
+    # ``paid_fallback`` — None (глобальная ручка ``CLASSIFIER_PAID_FALLBACK``),
+    # True (платим всегда) или False (не платим никогда).
+    # ``skip_paid_reasons`` — причины отказа, на которые платить не надо.
+    #
+    # Зачем второй список: переписывание — **косметика**, и платить за отказ
+    # «бокс не дал место» бессмысленно (решение владельца 25.11: «когда слота
+    # не хватает, первым должен уступать переписывание, а не классификация»).
+    # Тот же отказ у классификации остаётся платным — там вердикт решает, что
+    # вообще попадёт в ленту.
+    paid_fallback = kwargs.pop("paid_fallback", None)
+    skip_paid_reasons = kwargs.pop("skip_paid_reasons", None)
+
     # MiniMax Code — второй контур (ADR-0017). Пул аккаунтов с ежедневными
     # очками чекина; когда очки кончились у всех — это НЕ поломка движка,
     # поэтому причина тут «accounts_exhausted», а не «quota_exhausted»:
@@ -122,6 +136,21 @@ def chat(*, engine: Optional[str] = None, **kwargs: Any) -> Dict[str, Any]:
             logger.warning(
                 "headless: MiniMax не ответил (%s%s) — платная страховка выключена, "
                 "чанк без вердикта",
+                reason,
+                (", %s" % detail) if detail else "",
+            )
+            return result
+        if paid_fallback is False:
+            logger.warning(
+                "headless: MiniMax не ответил (%s%s) — этот поток не платит, " "чанк без вердикта",
+                reason,
+                (", %s" % detail) if detail else "",
+            )
+            return result
+        if skip_paid_reasons and reason in set(skip_paid_reasons):
+            logger.warning(
+                "headless: MiniMax не ответил (%s%s) — отказ по ёмкости бокса, "
+                "платная страховка пропущена, чанк без вердикта",
                 reason,
                 (", %s" % detail) if detail else "",
             )

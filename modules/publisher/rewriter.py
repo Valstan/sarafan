@@ -39,12 +39,14 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence
 
 from config.post_rewrite import (
+    CAPACITY_REASONS,
     get_max_chars,
     get_max_posts,
     get_min_chars,
     get_min_source_chars,
     get_model,
     get_rewrite_engine,
+    get_rewrite_paid_fallback,
     get_rewrite_timeout,
     get_rewrite_timeout_for_engine,
     paid_topup_enabled,
@@ -205,10 +207,24 @@ def _chat_call(**kwargs: Any) -> Dict[str, Any]:
     ⚠️ Для пересказа движок **свой** (``REWRITE_ENGINE``): пока переключатель
     был один, переписывание ушло в MiniMax не по решению, а потому что так
     стоял общий флаг, и забрало 85 % вызовов MiniMax (замер 16.11).
+
+    **Платная страховка — по режиму ``REWRITE_PAID_FALLBACK``** (дефолт
+    ``auto``): на отказ по ёмкости бокса (``insufficient_memory``,
+    ``cli_slot_busy``, ``oom_killed``, ``timeout``) платный Дипсик **не
+    зовётся** — переписывание косметика, и пост и так уйдёт с исходным
+    текстом (fail-open). Решение владельца 25.11: «когда слота не хватает,
+    первым должен уступать переписывание, а не классификация». Остальные отказы
+    (движок сломан, очки кончились) платной страховкой закрываются, как
+    решил владелец 17.11.
     """
     from modules.classifier.headless import chat
 
     kwargs.setdefault("engine", get_rewrite_engine())
+    mode = get_rewrite_paid_fallback()
+    if mode == "never":
+        kwargs.setdefault("paid_fallback", False)
+    elif mode == "auto":
+        kwargs.setdefault("skip_paid_reasons", CAPACITY_REASONS)
     return chat(**kwargs)
 
 
