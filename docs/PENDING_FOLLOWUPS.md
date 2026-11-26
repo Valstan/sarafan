@@ -102,6 +102,8 @@
 
 ## 🟡 Техдолги
 
+- **P254** [🟡 Проба состояния стенда читает не те логи: `local_status.py` берёт stdout-файлы (`celery-worker.log` — 4 КБ, запись 09:58), а живые логи воркеров — `logs/setka-worker.err.log` и `logs/setka-wave-worker.err.log`; «0 ошибок» в отчёте пустое](pending/P254-proba-stenda-chitaet-ne-te-logi.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
+- **P253** [🔴 Лента хаба на стенде падает целиком (44 из 44) и волны-мамы падают в треть (2 из 6): «This event loop is already running» — общий персистентный цикл уже занят, а сторож `run_coro` этот случай не ловит](pending/P253-lenta-khaba-i-chast-publikaciy-padayut-s-event-loop.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P252** [🟡 Релизная процедура и часть канона описывают прод, которого больше нет: `/reliz` (SSH + `systemctl`), `REMOTE_ACCESS`, `OPERATIONS`, `START_HERE` — выкатка на стенд идёт руками, обкатки нет](pending/P252-reliznaya-protsedura-i-kanon-opisyvayut-prod-kotorogo-net.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P250** [🟡 Сбор осиротевших CLI на Windows не работает: `minimax_cli_reap.py` Linux-only (`/proc`, `PPid=1`), утекшие после смерти воркера процессы не собираются; запас машины тонкий (26.11 17:06 — 50 МБ из 15.8 ГБ, 99.7 %; 9 областей MiniMax Code держат ~6 ГБ; пик — вечер, ровно под ночные волны)](pending/P250-sbor-osirotevshih-cli-ne-rabotaet-na-windows.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P251** [🟡 Локальный стенд не собирается из репозитория: `install-stand.ps1`, описанный в README, отсутствует, env-файл стенда под gitignore — 79 переменных живут только на этой машине](pending/P251-lokalnyj-stend-ne-sbiraetsya-iz-repo.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
