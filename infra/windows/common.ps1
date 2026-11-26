@@ -69,7 +69,7 @@ function Initialize-StandEnvironment {
 }
 
 function Test-StandWebHealth {
-    param([int]$Port = 8000, [int]$TimeoutSec = 5)
+    param([int]$Port = 8000, [int]$TimeoutSec = 30)
     # Отвечает ли живой экземпляр веба на порту.
     #
     # Нужно супервизору: остановка задачи убивает обёртку, но не сам python —
@@ -83,10 +83,46 @@ function Test-StandWebHealth {
     # «[текст, False]». Массив в булевом контексте истинен — супервизор решил бы,
     # что порт занят, и никогда не поднял бы экземпляр. Это случилось
     # 26.11.2026: молчащий супервизор, пустой порт и ноль публикаций.
+    #
+    # ⚠️ Таймаут был 5 секунд, и это был **источник шторма** (P255): на тесной
+    # по памяти машине веб отвечал 229 секунд, проба всегда возвращала
+    # «нездоров», и супервизор поднимал новый экземпляр каждые 30 секунд —
+    # 11 экземпляров за вечер. Теперь 30 секунд: это уже дольше типичного
+    # ответа на тесной машине, но всё ещё намного меньше 229 с.
     try {
         $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/health/" `
             -UseBasicParsing -TimeoutSec $TimeoutSec
         return ($response.StatusCode -eq 200)
+    }
+    catch {
+        return $false
+    }
+}
+
+function Test-StandPortListening {
+    param([int]$Port = 8000, [int]$TimeoutSec = 3)
+    # Держит ли порт живой процесс.
+    #
+    # Отдельная от health-проверки вещь, и она важнее: **сокет на порту живёт
+    # дольше, чем отвечает приложение**. Под тесной памятью веб отвечает
+    # десятки секунд — и health-проба объявляет его мёртвым, хотя процесс
+    # жив и порт держит. Супервизор, веривший только health-пробе, плодил
+    # экземпляры (P255: 11 за вечер), и каждый лишний — это Python на машине,
+    # где свободно 0,4–1,8 ГБ.
+    #
+    # Проверка через TCP-соединение: успешный connect означает «порт занят
+    # живым процессом» независимо от того, как быстро приложение отвечает.
+    # Именно это и нужно супервизору, чтобы **не поднимать второй** экземпляр.
+    try {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $async = $client.BeginConnect("127.0.0.1", $Port, $null, $null)
+        if (-not $async.AsyncWaitHandle.WaitOne($TimeoutSec * 1000, $false)) {
+            $client.Close()
+            return $false
+        }
+        $client.EndConnect($async)
+        $client.Close()
+        return $true
     }
     catch {
         return $false
