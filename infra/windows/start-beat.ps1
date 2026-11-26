@@ -1,4 +1,4 @@
-# Планировщик Celery на Windows — замена systemd-юнита `setka-celery-beat`.
+﻿# Планировщик Celery на Windows — замена systemd-юнита `setka-celery-beat`.
 #
 # На проде beat пишет файл расписания в каталог рядом с приложением
 # (`--schedule=...`). На Windows путь к файлу расписания тоже задаётся

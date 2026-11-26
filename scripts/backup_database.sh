@@ -13,7 +13,10 @@ mkdir -p "$BACKUP_DIR"
 
 # Load DATABASE_URL from server-side env (root-readable)
 ENV_FILE="/etc/setka/setka.env"
-DATABASE_URL="$(sudo -n awk 'BEGIN{FS=\"=\"} $1==\"DATABASE_URL\"{sub(/^DATABASE_URL=/, \"\"); print; exit}' \"$ENV_FILE\")"
+# Экранированные кавычки внутри одинарных кавычек bash остаются литеральными,
+# и awk падает на разборе (P242): «backslash not last character on line».
+# Форма — как у соседней строки AD_UPLOAD_DIR ниже, где awk работает.
+DATABASE_URL="$(sudo -n awk 'BEGIN{FS="="} $1=="DATABASE_URL"{sub(/^DATABASE_URL=/, ""); print; exit}' "$ENV_FILE")"
 if [[ -z "${DATABASE_URL}" ]]; then
   echo "❌ DATABASE_URL not found in ${ENV_FILE}"
   exit 1
@@ -48,9 +51,21 @@ PY
 
 export DATABASE_URL
 
-# Backup database
+# Backup database.
+# Дамп сначала пишется во временный файл и только потом переносится на место:
+# перенаправление `>` создаёт целевой файл ДО pg_dump, и упавший pg_dump
+# оставлял в каталоге файл нулевого размера — выглядящий как бэкап (P242).
 echo "🔄 Creating database backup..."
-PGPASSWORD="$DB_PASSWORD" pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" > "$BACKUP_FILE"
+TMP_FILE="$BACKUP_DIR/.setka_backup_$DATE.sql.part"
+PGPASSWORD="$DB_PASSWORD" pg_dump -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" > "$TMP_FILE"
+
+DUMP_BYTES=$(stat -c%s "$TMP_FILE" 2>/dev/null || echo 0)
+if [[ "${DUMP_BYTES:-0}" -lt 1024 ]]; then
+    echo "❌ pg_dump дал файл в ${DUMP_BYTES} байт — бэкап НЕ засчитан, старый не тронут"
+    rm -f "$TMP_FILE"
+    exit 1
+fi
+mv "$TMP_FILE" "$BACKUP_FILE"
 
 # Compress backup
 echo "📦 Compressing backup..."
@@ -64,6 +79,18 @@ echo "✅ Backup created: $BACKUP_FILE (Size: $SIZE)"
 echo "🧹 Cleaning old backups (keeping last 7)..."
 cd "$BACKUP_DIR"
 ls -t setka_backup_*.sql.gz 2>/dev/null | tail -n +8 | xargs -r rm
+
+# Хвост от сломанного awk: файлы нулевого размера (84 штуки с октября).
+# Это НЕ бэкапы — они и появляются только потому, что перенаправление `>`
+# создаёт файл до pg_dump. Чистим и говорим, что именно убрали.
+echo "🧹 Removing zero-byte leftovers of the broken script..."
+for stale in setka_backup_*.sql; do
+    [[ -e "$stale" ]] || continue
+    if [[ "$(stat -c%s "$stale" 2>/dev/null || echo 1)" -eq 0 ]]; then
+        echo "   removed empty file: $stale"
+        rm -f "$stale"
+    fi
+done
 
 BACKUPS_COUNT=$(ls -1 setka_backup_*.sql.gz 2>/dev/null | wc -l)
 echo "📊 Total backups: $BACKUPS_COUNT"
