@@ -10,23 +10,56 @@
 `utils.celery_asyncio.run_coro`. Отказ приходит снизу, чужим текстом:
 `RuntimeError: This event loop is already running`.
 
-Живой замер 26.11 (`logs/setka-wave-worker.err.log`, окно 09:58–18:33,
-лог воркера с утра):
+Живой замер 26.11, окно 09:58–18:57 (логи живут и продолжают расти, поэтому
+числа — снимок на момент замера). **Оба воркера**, потому что поломка бьёт по
+обоим:
+
+**Волновой воркер** (`logs/setka-wave-worker.err.log`):
 
 | что | сколько |
 |---|---|
-| `Task failed for copy/setka` (лента хаба) | **44 из 44 — 100 %** |
+| `Task failed for copy/setka` (лента хаба) | **47 — 100 % от всех попыток** |
+| `parse_and_publish_theme`: received / succeeded / retry | 471 / 283 / 47 |
 | `run_all_regions_theme` (мама волн): received / succeeded / **упало** | 6 / 4 / **2** |
-| `parse_and_publish_theme` succeeded / retry (60 с) | 278 / 44 |
-| `Discarding revoked task` | 58 |
-| `missed heartbeat from celery@PC79` | 26 (слот волнового воркера занят) |
-| «This event loop is already running» | 94, первое — 10:42 |
+| `Discarding revoked task: parse_and_publish_theme` | 58 |
+| `missed heartbeat from celery@PC79` | 28 |
+| «This event loop is already running» | 100, первое — **10:42** |
+
+**Общий воркер** (`logs/setka-worker.err.log`):
+
+| что | сколько |
+|---|---|
+| `Discarding revoked task` (всего) | 333 — `dispatch_broadcasts` 154, `dispatch_ad_reposts` 152, `dispatch_ad_outreach` 13, прочее 14 |
+| `missed heartbeat from wave@PC79` | 71 |
 
 **Читать так:** лента хаба (`copy/setka`, «Короткой строкой») не работает **ни
-одного раза** с утра; из шести волн-мам **две упали** — а вечерние волны
-22:00 / 22:20 / 22:50 сегодня ещё не начинались, и каждая стартует с
-мамы-задачи. «Revoked» и «missed heartbeat» — следствие того же: слот занят
-зависшими задачами.
+одного раза** с 10:42 — это тот же `parse_and_publish_theme`, но с
+`region_code="copy"`, `theme="setka"` (логгер: `Task failed for {region}/{theme}`,
+`tasks/parsing_scheduler_tasks.py:1130`); из шести волн-мам **две упали** — а
+вечерние волны 22:00 / 22:20 / 22:50 сегодня ещё не начинались, и каждая
+стартует с мамы-задачи. Слот волнового воркера занят (71 «missed heartbeat from
+wave» со стороны общего воркера), и **58 задач регионов истекли, не выполнившись**.
+
+## Что означает «Discarding revoked task» (проверено по коду celery)
+
+Сообщение celery **одинаково** означает «отозвано» и «просрочено» — в
+`venv/Lib/site-packages/celery/worker/request.py:492`:
+
+```python
+if any((expired, revoked_by_id, revoked_by_header)):
+    log_msg = 'Discarding revoked task: %s[%s]'
+    ...
+    self._announce_revoked('expired' if expired else 'revoked', False, None, expired)
+```
+
+В репозитории **никто не отзывает задачи** (`revoke` не встречается ни в одном
+`*.py`, кроме несвязанных `revoked_at` в моделях ОИДК). Значит, все 58 + 333 —
+это **`expired`**: задачи простояли в очереди дольше своего срока. У задач
+регионов срок — `expires = countdown + 3600`
+(`tasks/parsing_scheduler_tasks.py:1278`), то есть волновой воркер не успевал
+разбирать очередь, и публикации терялись по сроку. Общий воркер отбрасывал так
+же мелкую периодику — это тот самый «кладбище общей очереди» из 25.11
+(`config/celery_config.py:133-153`), сегодня в 100 раз мягче (333 против 3434).
 
 ## Локализация (трейсбек из лога, не догадка)
 
@@ -37,9 +70,9 @@ asyncio/base_events.py:626             raise RuntimeError('This event loop is al
 ```
 
 То есть `_loop` (общий персистентный цикл процесса) **уже крутится** к моменту
-вызова. Рядом в логе — `RuntimeWarning: coroutine 'parse_and_publish...' was
-never awaited` (`tasks/parsing_scheduler_tasks.py:1150`): корутину запустили, но
-не дождались.
+вызова. Первое падение — 10:42:00,083, через 4 мс после получения задачи, при
+том что предыдущая задача (район `agryzsky`, тема `novost`) ещё работала секунду
+назад и логировала свои последние строки в 10:41:53.
 
 ## Почему сторож не поймал
 
@@ -72,11 +105,19 @@ else:
 2. `asyncio.to_thread` в копи-пути (`modules/copy_setka_network.py:81,182`):
    там крутится синхронный `VKClient`; если внутри него есть мост на `run_coro`,
    цикл уходит в поток.
-3. **Незавершённая корутина от прерванной задачи**: `run_until_complete`
-   прерывается (revoke / истечение срока), корутина остаётся висеть на общем
-   цикле — механизм описан в `config/celery_config.py:105-115` (там же — почему
-   мягкий лимит не вводили). 58 «Discarding revoked task» — по порядку
-   совпадает.
+3. **Цикл в другом потоке вообще** — механизм отказа требует именно этого:
+   `run_until_complete` бросает «This event loop is already running», когда цикл
+   уже исполняется **в другом потоке** (`loop._thread_id` установлен). В том же
+   потоке такой вызов был бы заблокирован сторожем.
+
+⚠️ **Прежняя гипотеза снята замером:** «незавершённая корутина от прерванной
+задачи» (из `config/celery_config.py:105-115`) — **не причина**. Предупреждения
+`RuntimeWarning: coroutine ... was never awaited` (17 штук) — **следствие**
+отказа: когда `run_coro` бросает исключение, переданная ему корутина
+(`_execute` либо `_save_failure`, `tasks/parsing_scheduler_tasks.py:1148`)
+не ожидается вовсе и срабатывает `GC` с предупреждением. Именно так и
+предупреждает `parsing_scheduler_tasks.py:1150` — это `except Exception: pass`
+вокруг `run_coro(_save_failure())`.
 
 ## Что делать
 
