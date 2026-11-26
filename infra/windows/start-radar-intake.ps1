@@ -1,4 +1,4 @@
-# Приём радара на Windows — замена systemd-юнита `setka-radar-intake`.
+﻿# Приём радара на Windows — замена systemd-юнита `setka-radar-intake`.
 #
 # На проде это демон приёма: VK Bots Long Poll + Telegram getUpdates. Он же
 # держит живыми сессии радара и доставку.

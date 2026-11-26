@@ -1,4 +1,4 @@
-# Воркер очереди `celery` на Windows — замена systemd-юнита `setka-celery-worker`.
+﻿# Воркер очереди `celery` на Windows — замена systemd-юнита `setka-celery-worker`.
 #
 # На проде юнит ограничен по памяти (MemoryHigh/MemoryMax): бокс 1,5 ГБ без
 # свопа, и второй воркер без потолка выбивал бы случайную жертву. На

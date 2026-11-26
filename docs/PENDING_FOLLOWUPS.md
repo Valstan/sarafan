@@ -51,6 +51,7 @@
 
 ## ⏳ В процессе
 
+- **P246** [⏳ Публичная часть переезда: где живёт и что с ней делать — топология (бокс остаётся / новый VPS) и перенос ЕСА, `/services`, VK-шлюза; карта сервисов и порядок — в `MIGRATION_FINAL_PLAN.md`](pending/P246-publichnaya-chast-pereezda-topologiya.md) · `⏱ 2026-11-26 · snooze 0 · parked`
 - **P243** [⏳ Решения владельца для завершения переезда: токен комнаты на локальную машину, судьба радара, выбор движка (MiniMax Code CLI на этой машине **уже живой**, сверка вердиктов с боем снята 26.11), проверка VK-токенов с нового адреса, команда «закрыть прод»](pending/P243-resheniya-vladeltsa-dlya-zaversheniya-pereezda.md) · `⏱ 2026-11-26 · snooze 0 · parked`
 - **P230** [🟡 MAX-канал рекламных заявок: карточка с фото и кнопкой ответа + нейросетевой судья](pending/P230-max-kanal-reklamnyh-zayavok.md) · `⏱ 2026-11-20 · snooze 0 · fresh`
 - **P225** [⏳ Пилот единого профиля жителя (#386): слой условий услуг + ассистент — шаг 1 выкачен 11.11, шаг 3 собран 19.11](pending/P225-pilot-386-usloviya-uslug-i-assistent.md) · `⏱ 2026-11-11 · snooze 0 · fresh`
@@ -102,6 +103,8 @@
 
 ## 🟡 Техдолги
 
+- **P248** [🟡 Резервный публикатор мёртв: `VK_TOKEN_VALSTAN` отдаёт `invalid access_token` — и с прода, и с домашнего адреса; основной публикатор `MAMA` в комнате и на боксе отсутствует, публикуют community-токены из БД](pending/P248-rezervnyj-publikator-mertv-vk-token-valstan.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
+- **P247** [🟡 Домены `www.*` отдают 502: сертификаты `www.*` покрыты (edge), а в nginx нет ни одного `server_name` с `www.` → `default_server` → 444 → 502 (дефект не связан с переездом)](pending/P247-www-domeny-502-net-server-name.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P244** [🟡 Windows: prefork Celery падает с WinError 5 (обход — `--pool=solo`), pytest падает на уборке `%TEMP%` (обход — `--basetemp`); 37 пропущенных тестов разобраны — 36 ждут gitleaks, 1 Linux-only](pending/P244-windows-nesovmestimosti-i-propuschennye-testy.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P245** [🟡 Локальная область движка MiniMax: вход живёт ~9 ч (refresh-токен намеренно не переносится — обмен ротирует его и обесценил бы вход работающей сессии владельца); после истечения область перезаводится `infra/windows/setup_minimax_area.py`](pending/P245-lokalnaya-oblast-minimax-tekst-zhivyot-9-chasov.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P237** [🟡 Татарстан, 14-я порция: Бавлинский + Дрожжановский + Тукаевский — область закрыта 43/43; хвост за владельцем: COMM-ключи трёх групп и оформление](pending/P237-tatarstan-14-ya-porciya-bavlinskiy-drozhzhanovskiy-tukayevskiy.md) · `⏱ 2026-11-24 · snooze 0 · fresh`
