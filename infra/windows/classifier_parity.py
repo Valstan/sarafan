@@ -13,10 +13,17 @@
 `confidence`. Рассуждение (`reasoning`) не сравнивается — оно формулировка,
 а не решение.
 
-**Что нужно, чтобы скрипт дал полный ответ.** Живой движок: DeepSeek API
-(ключ из комнаты КАРМАНа) или пул аккаунтов MiniMax Code. Пока ключ не
-подключён, скрипт честно печатает `engine_unavailable` и **не** притворяется,
-что сверка прошла.
+**Что нужно, чтобы скрипт дал полный ответ.** Живой движок. Движок выбирается
+переменной `CLASSIFIER_ENGINE` (движок проекта, тот же, что на бою): на локальной
+машине это **MiniMax Code CLI** (`minimax`) — та же модель
+`MiniMax-M3.1-Flash`, которой вынесены боевые вердикты в скопированной базе,
+то есть сверка идёт «та же модель против той же модели». Платный Дипсик на
+локальной машине не нужен: страховку стоит выключить
+(`CLASSIFIER_PAID_FALLBACK=0`), иначе отказ MiniMax тихо уйдёт в Дипсик, а
+вердикта не будет.
+
+Пул аккаунтов MiniMax на локальной машине — `MINIMAX_ACCOUNTS_DIR`
+(заводится один раз: `infra/windows/setup_minimax_area.py`).
 
 Запуск (из корня репозитория, env-файл стенда подхватывается сам):
 
@@ -127,6 +134,53 @@ def compare(prod: Dict[str, Any], local: Dict[str, Any]) -> Dict[str, Any]:
     return diffs
 
 
+def field_breakdown(rows: List[Dict[str, Any]]) -> Dict[str, Dict[str, int]]:
+    """Согласие по каждому решающему полю отдельно.
+
+    **Зачем это важнее, чем «совпало/не совпало».** Строгая сверка по четырём
+    полям сразу смешивает две разные вещи: расхождение **решения** (действие
+    или тема — то есть публикация поста в ленту) и расхождение **числа**
+    (confidence — то есть насколько модель уверена в том же решении). Для
+    переезда первое — риск, второе — шум. Поэтому отчёт говорит и то, и то.
+    """
+    stats: Dict[str, Dict[str, int]] = {
+        field: {"agree": 0, "differ": 0, "compared": 0} for field in DECISION_FIELDS
+    }
+    for row in rows:
+        if row.get("status") == "no_local_verdict":
+            continue
+        prod = row.get("prod") or {}
+        local = row.get("local") or {}
+        for field in DECISION_FIELDS:
+            stats[field]["compared"] += 1
+            if prod.get(field) == local.get(field):
+                stats[field]["agree"] += 1
+            else:
+                stats[field]["differ"] += 1
+    return stats
+
+
+def index_verdicts(verdicts: Any) -> Dict[str, Dict[str, Any]]:
+    """Собрать локальные вердикты в карту ``lip → решение``.
+
+    **Почему ключ берётся из объекта вердикта, а не из его JSON.** ``lip`` —
+    это ключ поста, а не решение: в ``ClassifierVerdict.to_verdict_json()`` его
+    нет (там только theme/action/confidence/urgent и прочее решение). Если
+    брать ключ из словаря решения, все вердикты схлопываются в одну запись
+    ``""`` — и сверка показывает «нет локального вердикта» по каждому посту
+    при полном ответе модели (так и случилось 26.11: движок ответил, а отчёт
+    был пустым).
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    for verdict in verdicts or []:
+        data = verdict.to_verdict_json() if hasattr(verdict, "to_verdict_json") else dict(verdict)
+        lip = str(getattr(verdict, "lip", "") or (data.get("lip") or ""))
+        if not lip:
+            continue
+        out[lip] = data
+    return out
+
+
 async def run(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
     """Прогон сверки. Всё в одном event loop: пул соединений asyncpg привязан
     к петле, и второй ``asyncio.run`` уронил бы его («Event loop is closed»)."""
@@ -144,12 +198,15 @@ async def run(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
     from modules.classifier.headless import classify_posts
 
     payload = [dict(c) for c in candidates]
+    # Служебные поля (боевой вердикт) в модель не идут: движок читает из поста
+    # только lip/region_code/theme/text/media/метрики, но лишнее в payload
+    # мешает читать прогон.
+    for item in payload:
+        item.pop("_prod_verdict", None)
+        item.pop("_prod_model", None)
     result = classify_posts(payload, postulates=postulates)
 
-    local_by_lip: Dict[str, Any] = {}
-    for verdict in result.get("verdicts") or []:
-        data = verdict.to_verdict_json() if hasattr(verdict, "to_verdict_json") else dict(verdict)
-        local_by_lip[str(data.get("lip") or "")] = data
+    local_by_lip = index_verdicts(result.get("verdicts") or [])
 
     rows: List[Dict[str, Any]] = []
     matched = 0
@@ -171,13 +228,23 @@ async def run(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
 
     report = {
         "candidates": len(candidates),
+        "chunks": result.get("chunks"),
         "engine_failures": result.get("failures") or [],
         "engine_problems": result.get("problems") or [],
         "matched": matched,
         "differed": sum(1 for r in rows if r["status"] == "differs"),
         "no_local_verdict": sum(1 for r in rows if r["status"] == "no_local_verdict"),
+        "by_field": field_breakdown(rows),
         "rows": rows,
     }
+
+    if args.json_out:
+        out_path = Path(args.json_out)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(
+            json.dumps(report, ensure_ascii=False, indent=2, default=str), encoding="utf-8"
+        )
+        print(f"Отчёт сохранён: {out_path}")
 
     if args.json:
         print(json.dumps(report, ensure_ascii=False, indent=2, default=str))
@@ -187,18 +254,38 @@ async def run(args: argparse.Namespace) -> Optional[Dict[str, Any]]:
         f"Постов взято: {report['candidates']} | совпало: {matched} | "
         f"расходится: {report['differed']} | без локального вердикта: {report['no_local_verdict']}"
     )
+    print(
+        "Согласие по полям: "
+        + " | ".join(
+            f"{field}: {stats['agree']}/{stats['compared']}"
+            for field, stats in report["by_field"].items()
+        )
+    )
     if report["engine_failures"]:
         print(f"Отказы движка: {report['engine_failures']}")
+    # Проблемы разбора — отдельной строкой: раньше они молчали, и сверка
+    # выглядела как «модель не ответила», хотя ответ был и был разобран частично.
+    if report["engine_problems"]:
+        print(f"Проблемы разбора вердиктов ({len(report['engine_problems'])}):")
+        for problem in report["engine_problems"][:10]:
+            print(f"  - {problem}")
     print()
-    print(f"{'lip':<28} {'статус':<18} {'prod action/theme':<28} {'local action/theme'}")
-    print("-" * 120)
+    print(
+        f"{'lip':<28} {'статус':<18} {'prod action/theme':<28} "
+        f"{'local action/theme':<28} расхождения"
+    )
+    print("-" * 150)
     for row in rows:
         prod = row.get("prod") or {}
         local = row.get("local") or {}
+        diffs = row.get("diffs") or {}
+        diff_text = ", ".join(
+            f"{field}({diffs[field]['prod']}→{diffs[field]['local']})" for field in sorted(diffs)
+        )
         print(
             f"{row['lip']:<28} {row['status']:<18} "
             f"{str(prod.get('action')) + '/' + str(prod.get('theme')):<28} "
-            f"{str(local.get('action')) + '/' + str(local.get('theme'))}"
+            f"{str(local.get('action')) + '/' + str(local.get('theme')):<28} {diff_text}"
         )
     return report
 
@@ -212,6 +299,11 @@ def main() -> None:
     )
     parser.add_argument("--region", default="", help="Код региона (по умолчанию — все).")
     parser.add_argument("--env-file", default="", help="env-файл стенда.")
+    parser.add_argument(
+        "--json-out",
+        default="",
+        help="Куда сохранить полный отчёт в JSON (пусто — не сохранять).",
+    )
     parser.add_argument("--json", action="store_true", help="Вывести только JSON.")
     args = parser.parse_args()
 
