@@ -40,6 +40,8 @@
 ## 🔴 Блокеры
 
 
+- **P255** [🔴 Локальный стенд: веб лежит — порт 8000 не слушает никто, а три супервизора `start-web.ps1` плодят 11 экземпляров: проба здоровья даёт 5 секунд, веб на тесной машине отвечает 229 секундами; корень — теснота памяти](pending/P255-veb-stenda-lezhit-supervizor-plodit-ekzemplyary.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
+- **P253** [🔴 Лента хаба на стенде падает целиком (47 отказов, 100 % попыток) и волны-мамы падают в треть (2 из 6): «This event loop is already running» — общий персистентный цикл уже занят, а сторож `run_coro` этот случай не ловит; 58 задач регионов истекли, не выполнившись](pending/P253-lenta-khaba-i-chast-publikaciy-padayut-s-event-loop.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P242** [🔴 Штатный ежедневный бэкап боевой базы **бокса** падал и оставлял пустые файлы — после переезда боевой бэкап локальный и работает (задача `sarafan-db-backup`, 03:00), бокс уходит (P249)](pending/P242-ezhednevnyj-bekap-boevoj-bazy-sloman.md) · `⏱ 2026-11-26 · snooze 0 · parked`
 - **P164** [🔴 OOM вернулся: 13.11 убит воркер, 14.11 трижды minimax-code (замер 19.11; потолок ребёнка опущен 21.11, RAM — за владельцем)](pending/P164-celery-vorker-ubivaetsya-oom-primerno-raz-v.md) · `⏱ 2026-11-26 · snooze 0 · parked`
 - **P163** [🔴 Swap завести НЕЛЬЗЯ изнутри — это контейнер OpenVZ (проверено опытом 2026-09-14)](pending/P163-swap-zavesti-nelzya-iznutri-eto-konteyner-openvz.md) · `⏱ 2026-11-26 · snooze 0 · parked`
@@ -103,7 +105,6 @@
 ## 🟡 Техдолги
 
 - **P254** [🟡 Проба состояния стенда читает не те логи: `local_status.py` берёт stdout-файлы (`celery-worker.log` — 4 КБ, запись 09:58), а живые логи воркеров — `logs/setka-worker.err.log` и `logs/setka-wave-worker.err.log`; «0 ошибок» в отчёте пустое](pending/P254-proba-stenda-chitaet-ne-te-logi.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
-- **P253** [🔴 Лента хаба на стенде падает целиком (47 отказов, 100 % попыток) и волны-мамы падают в треть (2 из 6): «This event loop is already running» — общий персистентный цикл уже занят, а сторож `run_coro` этот случай не ловит; 58 задач регионов истекли, не выполнившись](pending/P253-lenta-khaba-i-chast-publikaciy-padayut-s-event-loop.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P252** [🟡 Релизная процедура и часть канона описывают прод, которого больше нет: `/reliz` (SSH + `systemctl`), `REMOTE_ACCESS`, `OPERATIONS`, `START_HERE` — выкатка на стенд идёт руками, обкатки нет](pending/P252-reliznaya-protsedura-i-kanon-opisyvayut-prod-kotorogo-net.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P250** [🟡 Сбор осиротевших CLI на Windows не работает: `minimax_cli_reap.py` Linux-only (`/proc`, `PPid=1`), утекшие после смерти воркера процессы не собираются; запас машины тонкий (26.11 17:06 — 50 МБ из 15.8 ГБ, 99.7 %; 9 областей MiniMax Code держат ~6 ГБ; пик — вечер, ровно под ночные волны)](pending/P250-sbor-osirotevshih-cli-ne-rabotaet-na-windows.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P251** [🟡 Локальный стенд не собирается из репозитория: `install-stand.ps1`, описанный в README, отсутствует, env-файл стенда под gitignore — 79 переменных живут только на этой машине](pending/P251-lokalnyj-stend-ne-sbiraetsya-iz-repo.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
