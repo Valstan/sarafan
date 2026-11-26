@@ -46,9 +46,25 @@ if ($Foreground) {
 
     Write-SupervisorLog "супервизор запущен, порт $Port"
     while ($true) {
-        $healthy = Test-StandWebHealth -Port $Port
-        if (-not $healthy) {
-            Write-SupervisorLog "экземпляра нет — поднимаю"
+        # ⚠️ Решение «жив ли экземпляр» — по ПОРТУ, а не по health-пробе (P255).
+        # Health-проба на тесной по памяти машине даёт ложный «мёртв»: веб
+        # отвечает десятки секунд, проба не успевает и объявляет процесс
+        # мёртвым, а супервизор поднимает новый экземпляр. Так за вечер
+        # накопилось 11 экземпляров (22 процесса) на машине, где свободно
+        # 0,4–1,8 ГБ. Порт же живёт дольше ответа: если сокет на нём есть —
+        # процесс жив, второй экземпляр не поднимаем.
+        $listening = Test-StandPortListening -Port $Port
+        $healthy = Test-StandWebHealth -Port $Port -TimeoutSec 30
+        if ($listening) {
+            if ($healthy) {
+                Write-SupervisorLog "экземпляр жив и отвечает — не плодю второй"
+            }
+            else {
+                Write-SupervisorLog "порт $Port держит живой процесс, но ответ медленный — второй не поднимаю"
+            }
+        }
+        else {
+            Write-SupervisorLog "порт свободен — поднимаю экземпляр"
             try {
                 $new = Start-StandProcess -Name "setka-web" -LogFileName "setka-web.log" -Arguments @(
                     "-m", "uvicorn", "main:app",
@@ -61,9 +77,6 @@ if ($Foreground) {
             catch {
                 Write-SupervisorLog "не поднялся: $($_.Exception.GetType().Name): $($_.Exception.Message)"
             }
-        }
-        else {
-            Write-SupervisorLog "экземпляр отвечает — не плодю второй"
         }
         Start-Sleep -Seconds 30
     }
