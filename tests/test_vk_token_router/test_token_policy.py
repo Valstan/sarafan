@@ -855,8 +855,25 @@ async def test_pick_healthy_read_token_network_glitch_skips_without_disable():
 
 
 @pytest.mark.asyncio
-async def test_pick_read_orders_by_last_used_oldest_first():
-    """READ-кандидаты идут каруселью: давно не использованные первыми, NULL в голову."""
+async def test_pick_read_orders_by_last_used_oldest_first(monkeypatch):
+    """READ-кандидаты идут каруселью: давно не использованные первыми, NULL в голову.
+
+    **Почему обнуляем балансировку.** Порядок задаёт ключ
+    ``(расход за сутки, last_used)``, и первая составляющая приходит из **живых**
+    счётчиков ``token_usage`` — то есть с той машины, где продукт реально
+    работает. На стенде это VALSTAN=694, MAMA=706, VITA=768 (замер 26.11), и
+    порядок получается ``['VALSTAN', 'MAMA', 'VITA']`` вместо ожидаемого — тест
+    краснеет **только на живой машине**, а на CI (чистая база) зелен. Это ровно
+    P226: тест, у которого нет симптома в CI и есть симптом в бою.
+
+    Обнуление — тем же приёмом, что и в соседних тестах этого файла
+    (``_calls_today_safe`` → ``{}``): тест проверяет **карусель по last_used**,
+    а не балансировку (она проверяется отдельно, в
+    ``test_pick_read_orders_by_calls_today``).
+    """
+    import modules.vk_token_router as router
+
+    monkeypatch.setattr(router, "_calls_today_safe", lambda: {})
     rows_active = [
         _vk_token_row("VALSTAN", "tok_v"),
         _vk_token_row("VITA", "tok_vita"),
