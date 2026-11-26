@@ -168,6 +168,7 @@ flowchart LR
 | `infra/windows/prod_dump.sh` | Снятие дампа боевой базы (только чтение) |
 | `infra/windows/prod_counters.sh` | Счётчики боевой базы для построчной сверки |
 | `infra/windows/classifier_parity.py` | Построчная сверка классификатора: локальный движок против боевых вердиктов |
+| `infra/windows/setup_minimax_area.py` | Рабочая область движка MiniMax Code на локальной машине (профиль CLI → пул аккаунтов) |
 
 Инвентаризация и план переезда — в
 [`MIGRATION_TO_WINDOWS.md`](MIGRATION_TO_WINDOWS.md).

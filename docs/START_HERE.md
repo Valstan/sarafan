@@ -236,6 +236,31 @@ Invoke-WebRequest http://127.0.0.1:8000/metrics     -UseBasicParsing   # 200
 Каталог инструментов и профили агентов — в
 [`AGENT_RUNTIME.md`](AGENT_RUNTIME.md).
 
+### Локальный движок (MiniMax Code)
+
+Движку MiniMax Code нужен пул аккаунтов (профиль CLI + токен-стор + состояние
+сессии). На машине владельца он заводится один раз:
+
+```powershell
+.\venv\Scripts\python.exe infra\windows\setup_minimax_area.py
+.\venv\Scripts\python.exe infra\windows\setup_minimax_area.py --check
+```
+
+Без этого движок отвечает `no_accounts` — то есть локальная машина не может
+ни классифицировать посты, ни выполнять задания агентов. Подробности и
+разбор про refresh-токен — в [`AGENT_RUNTIME.md`](AGENT_RUNTIME.md) §6.
+
+Сверка локальных вердиктов с боевыми:
+
+```powershell
+$env:MINIMAX_ACCOUNTS_DIR = "$env:USERPROFILE\minimax-accounts"
+$env:CLASSIFIER_ENGINE = "minimax"
+$env:CLASSIFIER_PAID_FALLBACK = "0"
+.\venv\Scripts\python.exe infra\windows\classifier_parity.py --limit 40 --env-file config\local-stand.env
+```
+
+Результат и разбор — в [`MIGRATION_TO_WINDOWS.md`](MIGRATION_TO_WINDOWS.md) §6.4.
+
 ---
 
 *Последнее обновление: 2026-11-26*
