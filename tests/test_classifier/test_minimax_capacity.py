@@ -108,14 +108,101 @@ def test_memory_decision_refuses_when_box_has_no_room(monkeypatch):
     assert details["mem_available_mb"] == 63
 
 
-def test_memory_decision_is_skipped_without_meminfo(monkeypatch):
-    """Не Linux (или файл не прочитан) — проверки нет, вызов идёт как раньше."""
+def test_memory_decision_is_skipped_when_probe_failed(monkeypatch):
+    """Определить не удалось (ни /proc, ни psutil) — проверки нет, вызов идёт как раньше."""
     monkeypatch.setattr(capacity, "mem_available_mb", lambda: None)
 
     ok, details = capacity.memory_decision()
 
     assert ok is True
     assert details["mem_available_mb"] is None
+
+
+# ── источник величины «сколько памяти доступно» ───────────────────────────
+#
+# До 26.11 величина читалась только из ``/proc/meminfo``. На локальном стенде
+# (Windows) файла нет, ``mem_available_mb`` отдавал ``None``, и порог
+# ``MINIMAX_MIN_AVAILABLE_MB`` не действовал вовсе: слот в Redis работал, а
+# проверка памяти молча выключалась. Теперь источников два.
+
+
+def test_memory_probe_prefers_linux_meminfo(monkeypatch):
+    """Linux: MemAvailable из /proc — величина, которой оперирует ядро.
+
+    Значение на Linux не меняется: от него считались замеры P239/P240.
+    """
+    monkeypatch.setattr(capacity, "_mem_available_from_proc", lambda: 664)
+    monkeypatch.setattr(capacity, "_mem_available_from_psutil", lambda: 1637)
+
+    assert capacity.mem_available_mb() == 664
+
+
+def test_memory_probe_falls_back_to_psutil_without_proc(monkeypatch):
+    """Windows: /proc нет — берём ту же величину из psutil, а не отдаём None."""
+    monkeypatch.setattr(capacity, "_mem_available_from_proc", lambda: None)
+    monkeypatch.setattr(capacity, "_mem_available_from_psutil", lambda: 1637)
+
+    assert capacity.mem_available_mb() == 1637
+
+
+def test_memory_probe_is_none_when_no_source_answers(monkeypatch):
+    """Ни /proc, ни psutil — определить нельзя: проверки нет (fail-open)."""
+    monkeypatch.setattr(capacity, "_mem_available_from_proc", lambda: None)
+    monkeypatch.setattr(capacity, "_mem_available_from_psutil", lambda: None)
+
+    assert capacity.mem_available_mb() is None
+
+
+def test_proc_probe_reads_mem_available(tmp_path):
+    """Разбор /proc/meminfo: значение в кБ приходит в МБ."""
+    meminfo = tmp_path / "meminfo"
+    meminfo.write_text(
+        "MemTotal:       16384400 kB\nMemAvailable:    1676288 kB\n",
+        encoding="utf-8",
+    )
+
+    assert capacity._mem_available_from_proc(str(meminfo)) == 1637
+
+
+def test_proc_probe_without_file(tmp_path):
+    """Файла нет (или платформа без /proc) — источник молчит, а не падает."""
+    assert capacity._mem_available_from_proc(str(tmp_path / "нет-такого")) is None
+
+
+def test_psutil_probe_reports_available_memory(monkeypatch):
+    """Величина из psutil — те же МБ, что и из /proc (хвост в кБ не считается)."""
+
+    class _VM:
+        available = 1637 * 1024 * 1024 + 512 * 1024
+
+    class _FakePsutil:
+        @staticmethod
+        def virtual_memory():
+            return _VM()
+
+    monkeypatch.setattr(capacity, "_psutil_module", lambda: _FakePsutil)
+
+    assert capacity._mem_available_from_psutil() == 1637
+
+
+def test_psutil_probe_without_psutil(monkeypatch):
+    """psutil не установлен — источника нет, а не исключение."""
+    monkeypatch.setattr(capacity, "_psutil_module", lambda: None)
+
+    assert capacity._mem_available_from_psutil() is None
+
+
+def test_psutil_probe_survives_broken_psutil(monkeypatch):
+    """psutil поднял исключение — величина неизвестна, вызов идёт как раньше."""
+
+    class _BrokenPsutil:
+        @staticmethod
+        def virtual_memory():
+            raise RuntimeError("сломалось")
+
+    monkeypatch.setattr(capacity, "_psutil_module", lambda: _BrokenPsutil)
+
+    assert capacity._mem_available_from_psutil() is None
 
 
 # ── слот ──────────────────────────────────────────────────────────────────

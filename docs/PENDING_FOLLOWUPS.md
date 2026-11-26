@@ -102,6 +102,8 @@
 
 ## 🟡 Техдолги
 
+- **P250** [🟡 Сбор осиротевших CLI на Windows не работает: `minimax_cli_reap.py` Linux-only (`/proc`, `PPid=1`), утекшие после смерти воркера процессы не собираются; запас машины тонкий (1.0–1.6 ГБ из 15.8 ГБ, заняты 19 областей владельца)](pending/P250-sbor-osirotevshih-cli-ne-rabotaet-na-windows.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
+- **P251** [🟡 Локальный стенд не собирается из репозитория: `install-stand.ps1`, описанный в README, отсутствует, env-файл стенда под gitignore — 79 переменных живут только на этой машине](pending/P251-lokalnyj-stend-ne-sbiraetsya-iz-repo.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P248** [🟡 Резервный публикатор мёртв: `VK_TOKEN_VALSTAN` отдаёт `invalid access_token` — и с прода, и с домашнего адреса; основной публикатор `MAMA` в комнате и на боксе отсутствует, публикуют community-токены из БД](pending/P248-rezervnyj-publikator-mertv-vk-token-valstan.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P247** [🟡 Домены `www.*` отдают 502: сертификаты `www.*` покрыты (edge), а в nginx нет ни одного `server_name` с `www.` → `default_server` → 444 → 502 (дефект не связан с переездом)](pending/P247-www-domeny-502-net-server-name.md) · `⏱ 2026-11-26 · snooze 0 · fresh`
 - **P244** [🟡 Windows: prefork Celery падает с WinError 5 (обход — `--pool=solo`), pytest падает на уборке `%TEMP%` (обход — `--basetemp`); 37 пропущенных тестов разобраны — 36 ждут gitleaks, 1 Linux-only](pending/P244-windows-nesovmestimosti-i-propuschennye-testy.md) · `⏱ 2026-11-26 · snooze 0 · fresh`

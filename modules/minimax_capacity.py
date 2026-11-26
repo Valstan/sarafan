@@ -28,8 +28,9 @@ swap = 0**, а база без CLI (postgres 333, celery 423, uvicorn 109, pytho
 2. **Память.** Если на боксе нет места под ещё один CLI — вызов не запускается вовсе:
    отказ уходит в платный Дипсик **сразу**, а не через 167 с, которые бокс не
    переживёт. Порог — ``MINIMAX_MIN_AVAILABLE_MB`` (дефолт 384 = замеренный RSS
-   живого вызова + запас). Читается ``MemAvailable`` из ``/proc/meminfo``; на
-   платформе без него проверка не делается вовсе.
+   живого вызова + запас). Величина — «сколько можно выделить, не уходя в
+   подкачку»: ``MemAvailable`` из ``/proc/meminfo`` (Linux) либо
+   ``psutil.virtual_memory().available`` (Windows и прочие платформы).
 
 **Почему это не «ещё один ограничитель».** Ограничитель конкуренции у discovery
 уже был (``DISCOVERY_RECHECK_MAX_CONCURRENT``), но он покрывает только ночной срез
@@ -67,6 +68,10 @@ DEFAULT_SLOT_WAIT_SECONDS = 300
 DEFAULT_MIN_AVAILABLE_MB = 384
 
 KEY_PREFIX = "setka:minimax_cli_slot:"
+
+#: Файл с величиной «сколько памяти доступно» — Linux. На Windows его нет,
+#: и тогда величину берёт ``psutil`` (см. ``mem_available_mb``).
+PROC_MEMINFO = "/proc/meminfo"
 
 #: Отказ: на боксе нет памяти под вызов CLI.
 REASON_NO_MEMORY = "insufficient_memory"
@@ -165,20 +170,74 @@ def min_available_mb() -> int:
         return DEFAULT_MIN_AVAILABLE_MB
 
 
-def mem_available_mb() -> Optional[int]:
-    """Сколько памяти бокса доступно под новые выделения, МБ.
+def _psutil_module() -> Any:
+    """Модуль ``psutil`` — или ``None``, если его нет в окружении.
 
-    ``MemAvailable`` из ``/proc/meminfo`` — та же величина, которой ядро решает,
-    хватает ли памяти. ``None`` — платформа без ``/proc`` (или файл не прочитан):
-    тогда проверка памяти не делается вовсе, и вызов идёт как раньше.
+    Импорт ленивый и внутри функции: ``psutil`` нужен только замеру памяти, а
+    модуль движка импортируется и скриптами, работающими без зависимостей
+    проекта (например, прибором замера потолка кучи).
     """
     try:
-        with open("/proc/meminfo", "r", encoding="utf-8") as fh:
+        import psutil
+    except ImportError:
+        return None
+    return psutil
+
+
+def _mem_available_from_proc(meminfo_path: str = PROC_MEMINFO) -> Optional[int]:
+    """``MemAvailable`` из ``/proc/meminfo`` — Linux, МБ.
+
+    Та же величина, которой ядро решает, хватит ли памяти. На боксе замеры
+    P239/P240 считаются именно от неё, поэтому значение на Linux не меняется.
+    """
+    try:
+        with open(meminfo_path, "r", encoding="utf-8") as fh:
             for line in fh:
                 if line.startswith("MemAvailable:"):
                     return int(line.split()[1]) // 1024
     except (OSError, ValueError, IndexError):
         return None
+    return None
+
+
+def _mem_available_from_psutil() -> Optional[int]:
+    """Доступная физическая память через ``psutil`` — Windows и прочие, МБ.
+
+    ``psutil.virtual_memory().available`` — тот же смысл, что ``MemAvailable`` в
+    Linux: «сколько можно выделить, не уходя в подкачку». Это единственный
+    источник на локальном стенде (26.11): Windows не имеет ``/proc``, и до
+    правки порог памяти там просто не действовал.
+    """
+    psutil = _psutil_module()
+    if psutil is None:
+        return None
+    try:
+        available = psutil.virtual_memory().available
+    except Exception:  # psutil на неведомой платформе может поднять что угодно
+        return None
+    return int(available // (1024 * 1024))
+
+
+def mem_available_mb() -> Optional[int]:
+    """Сколько памяти хоста доступно под новые выделения, МБ.
+
+    Порядок источников:
+
+    1. ``/proc/meminfo`` (``MemAvailable``) — Linux: величина, которой оперирует
+       ядро. Значение не меняется — на боксе от неё считались замеры.
+    2. ``psutil`` (``virtual_memory().available``) — Windows и прочие платформы:
+       тот же смысл, та же единица.
+    3. ``None`` — определить не удалось.
+
+    ``None`` означает «проверки памяти нет»: вызов идёт как раньше (fail-open).
+    **Молчаливый ``None`` — поломка защиты, а не её отсутствие:** до 26.11
+    Windows шёл именно сюда, и порог ``MINIMAX_MIN_AVAILABLE_MB`` на локальном
+    стенде не действовал вовсе, хотя слот в Redis работал (см. P250).
+    """
+    for probe in (_mem_available_from_proc, _mem_available_from_psutil):
+        value = probe()
+        if value is not None:
+            return value
     return None
 
 
