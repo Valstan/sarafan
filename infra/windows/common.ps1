@@ -68,6 +68,31 @@ function Initialize-StandEnvironment {
     return $resolved
 }
 
+function Test-StandWebHealth {
+    param([int]$Port = 8000, [int]$TimeoutSec = 5)
+    # Отвечает ли живой экземпляр веба на порту.
+    #
+    # Нужно супервизору: остановка задачи убивает обёртку, но не сам python —
+    # процесс-сирота остаётся держать порт. Следующая попытка старта падает с
+    # «address already in use», задача уходит в бесконечный цикл ошибок, а
+    # страница при этом жива. Проверка здоровья различает «порт занят живым
+    # экземпляром» (ничего не делаем) и «порт свободен» (поднимаем свой).
+    #
+    # ⚠️ Докстринг здесь — комментарием, а не строкой: в PowerShell одиночная
+    # строка в теле функции уходит в поток вывода, и функция вернула бы
+    # «[текст, False]». Массив в булевом контексте истинен — супервизор решил бы,
+    # что порт занят, и никогда не поднял бы экземпляр. Это случилось
+    # 26.11.2026: молчащий супервизор, пустой порт и ноль публикаций.
+    try {
+        $response = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/api/health/" `
+            -UseBasicParsing -TimeoutSec $TimeoutSec
+        return ($response.StatusCode -eq 200)
+    }
+    catch {
+        return $false
+    }
+}
+
 function Start-StandProcess {
     param(
         [Parameter(Mandatory = $true)][string]$Name,

@@ -28,6 +28,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+# --- Окружение и секреты. На проде их даёт systemd (EnvironmentFile=), на
+#     Windows-стенде env-файл читает сам процесс, а ключи приезжают из комнаты
+#     КАРМАНА тем же путём, что и на проде. На проде обе строки — no-op:
+#     окружение целое, сеть не трогается.
+#     Почему это здесь, а не в main.py: демон запускается как отдельный
+#     процесс и main.py не импортирует — без этих строк он падал с
+#     «DATABASE_URL is not set» ещё до первого запроса.
+from infra.windows.local_env import load_local_env  # noqa: E402
+from modules.secrets_bootstrap import bootstrap_secrets  # noqa: E402
+from utils.log_redaction import install_log_redaction  # noqa: E402
+
+load_local_env()
+bootstrap_secrets()
+install_log_redaction()
+
 logger = logging.getLogger("vk_bot_daemon")
 
 LP_WAIT = 25  # секунд ожидания a_check; ВК держит до 90
