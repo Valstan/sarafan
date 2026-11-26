@@ -118,6 +118,23 @@ def test_memory_decision_is_skipped_when_probe_failed(monkeypatch):
     assert details["mem_available_mb"] is None
 
 
+def test_memory_decision_respects_kill_switch(monkeypatch):
+    """«Выключить всё» отключает и проверку памяти, а не только слот.
+
+    Иначе аварийный откат не откатывал бы вторую половину регулятора, а тесты
+    зависели бы от свободной памяти машины, на которой их гоняют (замер 26.11:
+    полный прогон на Windows падал на повторе после ядерного убийства, пока в
+    изоляции проходил — RAM машины гуляла вокруг порога).
+    """
+    monkeypatch.setenv(capacity.ENV_ENABLED, "0")
+    monkeypatch.setattr(capacity, "mem_available_mb", lambda: 63)
+
+    ok, details = capacity.memory_decision()
+
+    assert ok is True
+    assert details.get("capacity_check") == "disabled"
+
+
 # ── источник величины «сколько памяти доступно» ───────────────────────────
 #
 # До 26.11 величина читалась только из ``/proc/meminfo``. На локальном стенде

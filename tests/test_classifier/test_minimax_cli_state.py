@@ -83,6 +83,15 @@ def test_cli_killed_by_memory_is_retried_once_after_state_reset(tmp_path, monkey
     account = _area(tmp_path, junk_bytes=0)
     calls = []
 
+    # Свободная память машины не должна влиять на этот тест: он проверяет
+    # «сброс состояния и ровно один повтор», а не запас RAM. На тесной машине
+    # повтор после ядерного убийства не делается — и это правильно, но не
+    # предмет теста (замер 26.11: полный прогон на Windows падал здесь, пока
+    # в изоляции проходил — RAM машины гуляла вокруг порога 384 МБ).
+    from modules import minimax_capacity as capacity
+
+    monkeypatch.setattr(capacity, "mem_available_mb", lambda: 664)
+
     def _run(cmd, **kwargs):
         calls.append(kwargs.get("env", {}).get("NODE_OPTIONS", ""))
         if len(calls) == 1:
