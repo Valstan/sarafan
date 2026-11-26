@@ -64,6 +64,11 @@ class TestAuth:
         assert "tok-123" not in (seen["params"] or {})
 
     def test_enabled_requires_token_and_chat(self, monkeypatch):
+        # Выученный из Redis chat_id — часть БОЕВОГО окружения: без заглушки
+        # проверка «без MAX_CHAT_ID канал выключен» зависела от данных машины
+        # (на боевой машине выученный chat_id есть — и тест падал). Тот же
+        # приём — в TestChatId::test_enabled_needs_token_and_chat.
+        monkeypatch.setattr(max_http, "learned_chat_id", lambda: "")
         monkeypatch.setenv("MAX_TOKEN", "tok")
         monkeypatch.setenv("MAX_CHAT_ID", "42")
         assert max_http.enabled() is True

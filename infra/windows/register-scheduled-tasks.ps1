@@ -80,9 +80,31 @@ foreach ($unit in $units) {
     $envArg = ""
     if ($EnvFile) { $envArg = "-EnvFile `"$EnvFile`"" }
 
+    # Тихий запуск. Задача выполняется в сессии владельца, поэтому любая
+    # консольная программа создаёт на экране окно. Скрытие стиля окна его
+    # прячет, но не отменяет создания — на быстрых машинах это вспышка.
+    # Поэтому действием задачи стоит wscript.exe (приложение без консоли),
+    # а он запускает цепочку cmd -> powershell -> python скрыто.
+    # Цепочка лежит в .cmd-файле: так в аргументы не тащится экранирование
+    # кавычек, а планировщик получает одну короткую команду.
+    $launchDir = Join-Path $repoRoot "logs\launch"
+    New-Item -ItemType Directory -Force -Path $launchDir | Out-Null
+    $cmdFile = Join-Path $launchDir "$($unit.Name).cmd"
+    $cmdBody = @"
+@echo off
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$scriptPath" -Foreground $envArg
+"@
+    Set-Content -Path $cmdFile -Value $cmdBody -Encoding ASCII
+
+    $vbs = Join-Path $PSScriptRoot "hidden_run.vbs"
+    if (-not (Test-Path $vbs)) {
+        Write-Error "нет скрытого лаунчера: $vbs"
+        exit 2
+    }
+
     $action = New-ScheduledTaskAction `
-        -Execute "powershell.exe" `
-        -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$scriptPath`" -Foreground $envArg" `
+        -Execute "$env:SystemRoot\System32\wscript.exe" `
+        -Argument "//nologo `"$vbs`" `"$cmdFile`"" `
         -WorkingDirectory $repoRoot
 
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User $userId
@@ -104,6 +126,43 @@ foreach ($unit in $units) {
 
     Write-Host "зарегистрирована задача: $($unit.Name) — $($unit.Description)"
 }
+
+# --- Задача ежедневного бэкапа: НЕ по входу, а по часу (03:00). ---
+# На боевом боксе это делал cron, который с октября падал на разборе
+# DATABASE_URL и оставлял пустые файлы (P242) — то есть рабочего бэкапа
+# боевой базы не было полгода. После переезда локальная машина — единственное
+# место, где лежит боевая база, поэтому бэкап здесь обязателен.
+$backupScript = Join-Path $PSScriptRoot "backup_db.ps1"
+if (-not (Test-Path $backupScript)) {
+    Write-Error "нет скрипта бэкапа: $backupScript"
+    exit 2
+}
+$launchDir = Join-Path $repoRoot "logs\launch"
+New-Item -ItemType Directory -Force -Path $launchDir | Out-Null
+$backupCmd = Join-Path $launchDir "sarafan-db-backup.cmd"
+$backupBody = @"
+@echo off
+powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -WindowStyle Hidden -File "$backupScript"
+"@
+Set-Content -Path $backupCmd -Value $backupBody -Encoding ASCII
+
+$backupAction = New-ScheduledTaskAction `
+    -Execute "$env:SystemRoot\System32\wscript.exe" `
+    -Argument "//nologo `"$vbs`" `"$backupCmd`"" `
+    -WorkingDirectory $repoRoot
+$backupTrigger = New-ScheduledTaskTrigger -Daily -At 03:00
+$backupPrincipal = New-ScheduledTaskPrincipal -UserId $userId -LogonType Interactive -RunLevel Limited
+$backupSettings = New-ScheduledTaskSettingsSet `
+    -StartWhenAvailable `
+    -AllowStartIfOnBatteries `
+    -DontStopIfGoingOnBatteries `
+    -ExecutionTimeLimit ([TimeSpan]::Zero) `
+    -MultipleInstances IgnoreNew
+
+Register-ScheduledTask -TaskName "sarafan-db-backup" -Action $backupAction -Trigger $backupTrigger `
+    -Principal $backupPrincipal -Settings $backupSettings `
+    -Description "SETKA: ежедневный дамп локальной боевой базы (03:00)" -Force | Out-Null
+Write-Host "зарегистрирована задача: sarafan-db-backup — ежедневный дамп базы (03:00)"
 
 Write-Host ""
 Write-Host "Проверка: Get-ScheduledTask -TaskName 'setka*'"
