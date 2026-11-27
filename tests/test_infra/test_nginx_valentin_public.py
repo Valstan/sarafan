@@ -33,8 +33,11 @@ TUNNEL = REPO_ROOT / "infra" / "windows" / "start-tunnel.ps1"
 
 #: Пути витрины, которые уходят в приложение. Ровно этот набор — и ничего
 #: больше: всё остальное отдаёт статика визитки.
+#:
+#: ⚠️ Корень домена (``/``) здесь НЕ в списке: витрина — одна из страниц
+#: сайта (решение владельца 27.11), а корень — визитка владельца.
 ALLOWED_APP_PATHS = {
-    "/",
+    "/sarafan/",
     "/regions/links",
     "/api/regions/vk-links",
     "/api/landing/orders",
@@ -99,6 +102,26 @@ class TestAppProxyIsNarrow:
         text = _text()
         assert "location /portfolio/" in text
         assert "alias /home/valstan/valentin/current/" in text
+
+    def test_root_is_the_portfolio_not_the_showcase(self) -> None:
+        """Корень домена — визитка; витрина живёт по пути /sarafan/.
+
+        Уточнение владельца 27.11: «мне не нужно чтобы продающая страница
+        сарафана была на главной странице валентин.вмалмыже.рф, мне надо чтобы
+        она была одной из страниц сайта, как портфолио».
+        """
+        text = _text()
+        exact = {
+            sel.split("=", 1)[1].strip() for sel, body in _blocks(text) if "proxy_pass" in body
+        }
+        assert "/" not in exact, (
+            "nginx_valentin.conf: корень домена не должен отдавать витрину — "
+            "корень это визитка владельца, витрина живёт по пути /sarafan/"
+        )
+        assert "/sarafan/" in exact, (
+            "nginx_valentin.conf: витрина должна быть доступна по пути /sarafan/ "
+            "как одна из страниц сайта"
+        )
 
 
 class TestClientIp:
