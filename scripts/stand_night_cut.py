@@ -755,11 +755,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         "ts": (baseline or {}).get("ts"),
     }
 
-    neural_rows = journal_rows(REPO_ROOT / "logs" / "neural_usage.jsonl", since=since, until=until)
+    neural_rows = journal_rows(logs_dir / "neural_usage.jsonl", since=since, until=until)
     report["paid"] = paid_calls(neural_rows)
 
     minimax_rows = journal_rows(
-        REPO_ROOT / "logs" / "minimax_usage.jsonl", since=since, until=until
+        logs_dir / "minimax_usage.jsonl", since=since, until=until
     )
     report["engine_discovery"] = engine_calls(minimax_rows, label="discovery")
     report["memory_free_mb"] = memory_free_mb()
