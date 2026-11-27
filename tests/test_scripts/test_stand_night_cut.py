@@ -247,19 +247,24 @@ def test_publication_tasks_count_ignores_periodic_tail() -> None:
 
 def test_load_baseline_ignores_stale_file(tmp_path) -> None:
     path = tmp_path / "baseline.json"
-    path.write_text('{"ts": "2026-11-20T21:30:00+03:00", "unacked": 5}', encoding="utf-8")
+    path.write_text(
+        '{"night": "2026-11-27", "ts": "2026-11-20T21:30:00+03:00", '
+        '"unacked": 5, "publication": 2}',
+        encoding="utf-8",
+    )
     since = datetime(2026, 11, 27, 21, 40, tzinfo=MSK)
-    assert snc.load_baseline(path, since) is None
+    assert snc.load_baseline(path, "2026-11-27", since) is None
 
 
 def test_load_baseline_reads_fresh_file(tmp_path) -> None:
     path = tmp_path / "baseline.json"
     path.write_text(
-        '{"ts": "2026-11-27T21:30:00+03:00", "unacked": 13, "publication": 10}',
+        '{"night": "2026-11-27", "ts": "2026-11-27T21:30:00+03:00", '
+        '"unacked": 13, "publication": 10}',
         encoding="utf-8",
     )
     since = datetime(2026, 11, 27, 21, 40, tzinfo=MSK)
-    data = snc.load_baseline(path, since)
+    data = snc.load_baseline(path, "2026-11-27", since)
     assert data is not None
     assert data["unacked"] == 13
     assert data["publication"] == 10
@@ -270,7 +275,126 @@ def test_load_baseline_ignores_old_format(tmp_path) -> None:
     path = tmp_path / "baseline.json"
     path.write_text('{"ts": "2026-11-27T21:30:00+03:00", "unacked": 13}', encoding="utf-8")
     since = datetime(2026, 11, 27, 21, 40, tzinfo=MSK)
-    assert snc.load_baseline(path, since) is None
+    assert snc.load_baseline(path, "2026-11-27", since) is None
+
+
+def test_load_baseline_ignores_another_night(tmp_path) -> None:
+    """База вчерашней ночи — не база этой: хвост сравнивать не с чем."""
+    path = tmp_path / "baseline.json"
+    path.write_text(
+        '{"night": "2026-11-26", "ts": "2026-11-26T21:30:00+03:00", '
+        '"unacked": 13, "publication": 10}',
+        encoding="utf-8",
+    )
+    since = datetime(2026, 11, 27, 21, 40, tzinfo=MSK)
+    assert snc.load_baseline(path, "2026-11-27", since) is None
+
+
+def test_save_baseline_round_trip(tmp_path) -> None:
+    """Записанная база читается обратно — своей ночью и только своей."""
+    path = tmp_path / "baseline.json"
+    now = datetime(2026, 11, 27, 20, 30, tzinfo=MSK)
+    snc.save_baseline(path, "2026-11-27", 13, 10, now)
+    since = datetime(2026, 11, 27, 21, 40, tzinfo=MSK)
+    data = snc.load_baseline(path, "2026-11-27", since)
+    assert data is not None
+    assert data["unacked"] == 13
+    assert data["publication"] == 10
+    assert data["night"] == "2026-11-27"
+    # Та же запись, но ночь другая — не берётся.
+    assert snc.load_baseline(path, "2026-11-28", since) is None
+
+
+def test_night_window_modes() -> None:
+    """Режимы ночного окна: подготовка → идёт → суд → днём суд за прошлую ночь."""
+    prepare = snc.night_window(datetime(2026, 11, 27, 21, 30, tzinfo=MSK))
+    assert prepare["mode"] == "prepare"
+    assert prepare["night"] == "2026-11-27"
+    assert prepare["start"] == datetime(2026, 11, 27, 21, 40, tzinfo=MSK)
+
+    active = snc.night_window(datetime(2026, 11, 27, 22, 10, tzinfo=MSK))
+    assert active["mode"] == "active"
+    assert active["night"] == "2026-11-27"
+
+    verdict = snc.night_window(datetime(2026, 11, 27, 23, 55, tzinfo=MSK))
+    assert verdict["mode"] == "verdict"
+    assert verdict["night"] == "2026-11-27"
+    assert verdict["ready_at"] == datetime(2026, 11, 27, 23, 50, tzinfo=MSK)
+
+    after_midnight = snc.night_window(datetime(2026, 11, 28, 2, 0, tzinfo=MSK))
+    assert after_midnight["mode"] == "verdict"
+    assert after_midnight["night"] == "2026-11-27"
+
+    daytime = snc.night_window(datetime(2026, 11, 28, 9, 0, tzinfo=MSK))
+    assert daytime["mode"] == "day"
+    assert daytime["night"] == "2026-11-27"
+
+
+def test_night_window_ends_at_five() -> None:
+    """Ночь кончается в 05:00 — утренний слот novost 06:40 в ночь не входит."""
+    window = snc.night_window(datetime(2026, 11, 27, 23, 55, tzinfo=MSK))
+    assert window["end"] == datetime(2026, 11, 28, 5, 0, tzinfo=MSK)
+
+
+def test_wave_slot_status_checks_each_slot() -> None:
+    """Слот считается выполненным по своей задаче в своём окне."""
+    night_start = datetime(2026, 11, 27, 21, 40, tzinfo=MSK)
+    lines = [
+        _line(
+            "2026-11-27 22:02:10,000",
+            "Task tasks.parsing_scheduler_tasks.parse_and_publish_theme[aaa] succeeded in 1.2s: {}",
+        ),
+        _line(
+            "2026-11-27 22:20:44,000",
+            "Task tasks.parsing_scheduler_tasks.run_all_regions_theme[bbb] succeeded in 40s: {}",
+        ),
+    ]
+    stats = snc.scan_lines(lines, since=night_start)
+    slots = snc.wave_slot_status(stats["succeeded_moments"], night_start)
+    by_name = {slot["name"]: slot for slot in slots}
+    assert by_name["копир 22:00"]["ok"] is True
+    assert by_name["admin 22:20"]["ok"] is True
+    assert by_name["sport 22:50"]["ok"] is False
+
+
+def test_wave_slot_status_ignores_success_outside_window() -> None:
+    """Успех волны вне своего окна — не её слот: 22:50 не закрывает 22:20."""
+    night_start = datetime(2026, 11, 27, 21, 40, tzinfo=MSK)
+    lines = [
+        _line(
+            "2026-11-27 22:55:00,000",
+            "Task tasks.parsing_scheduler_tasks.run_all_regions_theme[bbb] succeeded in 40s: {}",
+        ),
+    ]
+    stats = snc.scan_lines(lines, since=night_start)
+    slots = snc.wave_slot_status(stats["succeeded_moments"], night_start)
+    by_name = {slot["name"]: slot for slot in slots}
+    assert by_name["admin 22:20"]["ok"] is False
+    assert by_name["sport 22:50"]["ok"] is True
+
+
+def test_build_gates_count_slots_and_digest_from_db() -> None:
+    """Гейт волн — по слотам, гейт сборников — по журналу публикаций."""
+    gates = snc.build_gates(
+        {"p253_diagnostics": 0, "revoked_by_class": {"wave": 0, "digest": 0, "other": 0}},
+        {"unacked": 13, "publication": 10},
+        {"paid_total": 0},
+        expect_waves=3,
+        expect_regions=84,
+        baseline={"night": "2026-11-27", "ts": "2026-11-27T21:30:00+03:00", "publication": 10},
+        slots=[
+            {"name": "копир 22:00", "ok": True},
+            {"name": "admin 22:20", "ok": True},
+            {"name": "sport 22:50", "ok": False},
+        ],
+        digest_regions=84,
+    )
+    by_id = {gate["id"]: gate for gate in gates}
+    assert by_id["waves"]["value"] == 2
+    assert by_id["waves"]["ok"] is False
+    assert by_id["digest"]["value"] == 84
+    assert by_id["digest"]["ok"] is True
+    assert by_id["unacked"]["ok"] is True
 
 
 @pytest.mark.parametrize(
