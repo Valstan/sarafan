@@ -1050,6 +1050,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
             else "логи воркеров пусты"
         )
         report["verdict"] = "нет данных: %s" % coverage
+    elif baseline is None:
+        report["verdict"] = (
+            "базы хвоста нет (прогон в окне 19:40–21:40 не состоялся) — "
+            "гейт по хвосту не судится"
+        )
     elif unjudged:
         report["verdict"] = (
             "база хвоста записана (волн/сводки: %d, всего сообщений: %d) — суд по "
