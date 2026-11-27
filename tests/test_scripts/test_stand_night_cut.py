@@ -290,6 +290,21 @@ def test_load_baseline_ignores_another_night(tmp_path) -> None:
     assert snc.load_baseline(path, "2026-11-27", since) is None
 
 
+def test_save_baseline_round_trip(tmp_path) -> None:
+    """Записанная база читается обратно — своей ночью и только своей."""
+    path = tmp_path / "baseline.json"
+    now = datetime(2026, 11, 27, 20, 30, tzinfo=MSK)
+    snc.save_baseline(path, "2026-11-27", 13, 10, now)
+    since = datetime(2026, 11, 27, 21, 40, tzinfo=MSK)
+    data = snc.load_baseline(path, "2026-11-27", since)
+    assert data is not None
+    assert data["unacked"] == 13
+    assert data["publication"] == 10
+    assert data["night"] == "2026-11-27"
+    # Та же запись, но ночь другая — не берётся.
+    assert snc.load_baseline(path, "2026-11-28", since) is None
+
+
 def test_night_window_modes() -> None:
     """Режимы ночного окна: подготовка → идёт → суд → днём суд за прошлую ночь."""
     prepare = snc.night_window(datetime(2026, 11, 27, 21, 30, tzinfo=MSK))
