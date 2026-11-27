@@ -223,6 +223,107 @@ else:
 - **Процедура рестарта — в репозитории:** [`infra/windows/stop-unit.ps1`](../../infra/windows/stop-unit.ps1)
   и запись [P256](P256-ostanovka-zadachi-ne-ostanavlivet-prilozhenie.md).
 
+## 27.11 06:47 — диагностика PR #1306 сработала в бою и назвала держателя
+
+После правильного рестарта (26.11 23:08, см. P256) сторож встал в бой и
+сработал 06:47:00 — **нашим** сообщением, без единого чужого «This event
+loop is already running»:
+
+```
+ERROR/MainProcess] run_coro: общий event-loop занят другим потоком
+  (holder_thread=17188 (Timer-1) caller_thread=22164 (MainThread)
+   holder_stack=connection.py:1533:get_connection | connection.py:380:connect
+   | connection.py:389:connect_check_health | retry.py:105:call_with_retry
+   | connection.py:390:<lambda> | connection.py:787:_connect)
+ERROR/MainProcess] Task failed for copy/setka: run_coro(): общий event-loop уже
+  занят другим потоком (...)
+```
+
+**Держатель назван:**
+
+- **держатель петли — не главный поток, а поток `Timer-1`**; звал из главного
+  потока;
+- ⚠️ **поправка к первому чтению стека:** это **не SQLAlchemy**, а **redis-py** —
+  `connection.py` там это `redis/connection.py` (строка 380 — `connect`,
+  389 — `connect_check_health`, 787 — `_connect`, 1533 — `get_connection`), а
+  `retry.py:105:call_with_retry` — это `redis/retry.py`. То есть держатель
+  **блокирующе подключался к Redis с ретраями прямо в потоке петли**;
+- иными словами, мост «поток → `run_coro`» — это вызов **из потока таймера**.
+
+Счёт за ночь 26.11→27.11: **2 срабатывания нашей диагностики, 0 чужих
+«already running»** — то есть сторож работает и подменяет собой чужой отказ.
+
+## 27.11 07:10 — кто такой `Timer-1`: ответ на п.3 закрыт
+
+Имя потока оказалось не угадкой, а прямо в коде celery:
+
+- `venv/Lib/site-packages/celery/utils/timer2.py:65` —
+  `self.name = f'Timer-{next(self._timer_count)}'`. Потоки вида `Timer-N` — это
+  **ETA-таймер celery** (счётчик на процесс), а не `threading.Timer` из нашего
+  кода (`threading.Timer` в проекте ровно один — `modules/opencode_engine.py:328`,
+  это убийца CLI, в бою не используется; в kombu 5.5.4 `class Timer` в
+  `transport/redis.py` тоже нет).
+- `venv/Lib/site-packages/celery/worker/strategy.py:199` — задача с ETA:
+  `call_at(eta, apply_eta_task, (req,), priority=6)`, где
+  `call_at = consumer.timer.call_at`. То есть **ETA-задачу поднимает поток
+  таймера**, а не главный поток.
+- `venv/Lib/site-packages/celery/worker/consumer/consumer.py:572` —
+  `apply_eta_task`: «Method called by the timer to apply a task with an
+  ETA/countdown».
+- На стенде воркер идёт с `--pool=solo`, а solo-пул исполняет тело задачи
+  **inline в том же потоке** (`celery/concurrency/solo.py` → `on_apply`).
+  Значит, тело ETA-задачи выполняется **в потоке таймера**.
+
+**Полная цепочка коллизии (06:47:00):**
+
+1. ETA-задача (у нас это `countdown=` — `tasks/parsing_scheduler_tasks.py:1276`
+   для волн и `tasks/digest_tasks.py:134` для сводки, а также ретраи с
+   `countdown=60`) срабатывает по таймеру celery → её тело исполняется **в
+   потоке `Timer-1`**.
+2. Тело нашей задачи — обычный sync `def`, и оно зовёт `run_coro(_execute())`
+   (`tasks/parsing_scheduler_tasks.py:1077`) → **общий персистентный цикл
+   процесса оказывается в руках потока таймера**.
+3. Пока цикл занят, в главный поток приходит задача от beat'а — `copy/setka`
+   (крон `minute="2,7,12,17,22,32,37,42,47,52"`, минута 47 в списке) → её
+   `run_coro` отказывает по сторожу → «Task failed for copy/setka».
+4. Держал петлю в этот момент **синхронный Redis внутри корутины**:
+   `redis/connection.py` → `connect_check_health` → `retry.call_with_retry` →
+   connect с ретраями. Клиенты у нас обычные (не async): `modules/minimax_capacity.py:126`
+   (`lease()`, зовётся из движка `modules/minimax_engine.py:1419`),
+   `modules/wave_lock.py:61`, `modules/task_timings.py:58`. Такое I/O **блокирует
+   поток петли** и заметно продлевает коллизию.
+
+**Ответ на п.3 — какой мост тянуть в async:**
+
+- **Кандидат №2 (`asyncio.to_thread` в копи-пути, `modules/copy_setka_network.py:81,182`) — снят замером.**
+  `VKClient` не зовёт `run_coro` (`modules/vk_monitor/vk_client.py` — только
+  `asyncio.to_thread` вокруг rate-limit'а), а потоки `to_thread` называются
+  `ThreadPoolExecutor-N_M`, а не `Timer-1`. Держателем был именно таймер celery.
+- **Кандидат №1 (sync-мост `get_active_parse_tokens_sync`,
+  `modules/vk_token_router.py:957-982`) — остался единственным sync→`run_coro`
+  мостом в коде** (единственный вызов — `tasks/parsing_tasks.py:726`), но
+  **виновником 06:47 он не был**: его зовут из sync-контекста, а не из
+  ETA-потока. Чинить его всё равно стоит (см. ниже), но это не петля.
+- **Настоящий «мост» — вызов `run_coro` из тела ETA-задачи.** Общий цикл
+  процесса не должен уезжать в поток таймера. Варианты починки:
+  1. **вынести персистентную петлю в выделенный поток-владелец**: `run_coro`
+     из любого потока кладёт корутину в очередь владельца и ждёт результат.
+     Тогда «петля занята» невозможно по определению, а пул asyncpg остаётся
+     привязан к петле владельца. **Это правильная починка**;
+  2. на стенде — уйти от `--pool=solo` к prefork: там ETA-задачу исполняет
+     **дочерний процесс**, а таймер только диспетчеризирует. Отдельное
+     операционное решение (память, конфигурация юнитов);
+  3. убрать `countdown=` из публикации волн/сводки — **не рекомендуем**: срок
+     нужен для раскладки по времени и для `expires`.
+- **Попутно:** синхронный Redis внутри корутины (перечислен выше) надо
+  переводить на async-клиент либо выносить из петли — иначе коллизия
+  растягивается на секунды connect'а с ретраями.
+
+**п.4 (сценарий «прервать задачу во время работы») — закрыт:** он и есть
+живой случай 06:47 (задача в работе, следующая приходит и падает), плюс
+регресс-тест PR #1306 `test_run_coro_refuses_when_loop_busy_in_another_thread`
+(сценарий «петля занята другим потоком») — зелёный.
+
 ## Связанное
 
 - [P233](P233-volna-zabiraet-vorker-periodika-zhdet-za-nej.md) — волна забирает

@@ -119,3 +119,37 @@ def test_refresh_deadline_moves_eta_forward() -> None:
     }
     restore_unacked.refresh_deadline(headers, now=now, ttl_sec=3600, eta_in=900)
     assert restore_unacked.parse_moment(headers["eta"]) >= now + 800
+
+
+class _FakeRedis:
+    """Минимальный клиент: помнит, что записали в хеш."""
+
+    def __init__(self) -> None:
+        self.written: dict = {}
+
+    def hset(self, key, field, value):  # noqa: ANN001, ANN201
+        self.written[field] = value
+        return 1
+
+
+def test_write_back_puts_refreshed_headers_into_the_hash() -> None:
+    """Правка срока обязана лежать в хеше: брокер читает тело оттуда.
+
+    Иначе `restore_by_tag` вернёт протухшую задачу — и воркер отбросит её
+    как просроченную (так потерялся хвост веера 27.11).
+    """
+    from kombu.utils.json import loads
+
+    payload = _payload("tasks.digest_tasks.publish_daily_digest_region", ["vp"])
+    message, exchange, routing_key = loads(payload)
+    headers = message["headers"]
+    headers["expires"] = datetime.fromtimestamp(time.time() + 7200).isoformat()
+
+    client = _FakeRedis()
+    restore_unacked.write_back(client, "unacked", b"tag1", message, exchange, routing_key)
+
+    assert b"tag1" in client.written
+    stored_message, stored_exchange, stored_rk = loads(client.written[b"tag1"])
+    assert stored_message["headers"]["expires"] == headers["expires"]
+    assert stored_exchange == exchange
+    assert stored_rk == routing_key

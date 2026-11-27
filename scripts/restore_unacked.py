@@ -161,12 +161,33 @@ def refresh_deadline(headers: Dict[str, object], *, now: float, ttl_sec: int, et
     return changed
 
 
+def write_back(
+    client: object,
+    unacked_key: str,
+    tag: bytes,
+    message: Dict[str, object],
+    exchange: str,
+    routing_key: str,
+) -> None:
+    """Записать обновлённое тело сообщения **обратно в хеш** ``unacked``.
+
+    Отдельная функция не для красоты: `restore_by_tag` читает тело из хеша
+    заново, поэтому правка срока, сделанная в памяти, до брокера не дойдёт —
+    и вернётся протухшая задача, которую воркер отбросит. Именно так потерялся
+    хвост веера 27.11: возврат прошёл, а задачи отбросились как просроченные.
+    """
+    from kombu.utils.json import dumps
+
+    client.hset(unacked_key, tag, dumps([message, exchange, routing_key]))
+
+
 def restore(
     raw: Dict[bytes, bytes],
     only_queue: str = "",
     *,
     refresh_ttl_sec: int = 0,
     eta_in: int = 0,
+    only_expired: bool = False,
 ) -> List[str]:
     """Вернуть сообщения в их очереди. Возвращает список возвращённых задач."""
     from kombu import Connection
@@ -178,10 +199,14 @@ def restore(
     restored: List[str] = []
     now = time.time()
     with Connection(broker_url) as conn:
+        channel = conn.default_channel
         # `channel.qos` — свойство, которое лениво создаёт QoS нужного класса
         # (у транспорта redis это QoS с restore_by_tag); `channel._qos` до
         # первого потребителя остаётся None.
-        qos = conn.default_channel.qos
+        qos = channel.qos
+        client = channel.client
+        from kombu.utils.json import loads
+
         for tag, payload in raw.items():
             try:
                 task, queue, _args, headers = describe(payload)
@@ -190,8 +215,18 @@ def restore(
                 continue
             if only_queue and queue != only_queue:
                 continue
+            if only_expired and expiry_state(headers, now) != "протухла":
+                continue
             if refresh_ttl_sec or eta_in:
                 refresh_deadline(headers, now=now, ttl_sec=refresh_ttl_sec, eta_in=eta_in)
+                # ⚠️ **Заголовки надо записать обратно в хеш.** `restore_by_tag`
+                # читает тело сообщения из хеша `unacked` заново (не из того
+                # объекта, который разобрали мы) — поэтому правка срока в
+                # памяти ушла бы в никуда, и вернулась бы протухшая задача,
+                # которую воркер отбросит как просроченную.
+                message, exchange, routing_key = loads(payload)
+                message["headers"] = headers
+                write_back(client, qos.unacked_key, tag, message, exchange, routing_key)
             try:
                 qos.restore_by_tag(tag)
                 restored.append(task)
@@ -227,6 +262,11 @@ def main(argv: Iterable[str] | None = None) -> int:
         type=int,
         default=4 * 3600,
         help="на сколько секунд продлевать срок (по умолчанию 4 ч — как DIGEST_TASK_EXPIRES_SEC)",
+    )
+    parser.add_argument(
+        "--only-expired",
+        action="store_true",
+        help="вернуть только протухшие задачи (живые не трогать — их и так ждёт брокер)",
     )
     parser.add_argument(
         "--eta-in",
@@ -288,6 +328,7 @@ def main(argv: Iterable[str] | None = None) -> int:
         only_queue=args.queue,
         refresh_ttl_sec=args.expiry_ttl if args.refresh_expiry else 0,
         eta_in=args.eta_in,
+        only_expired=args.only_expired,
     )
     print("--- возвращено ---")
     for task, count in Counter(restored).most_common():
