@@ -58,21 +58,29 @@ $ErrorActionPreference = "Stop"
 # процесса. Порядок в регулярке важен: у воркеров очереди различаются
 # значением --queues, и «celery» матчится и в «wave,digest» не должен.
 $UnitPatterns = [ordered]@{
-    "setka"                  = "uvicorn\s+main:app"
-    "setka-celery-worker"    = "celery_app\s+worker.*--queues=celery(\s|$)"
-    "setka-celery-worker-wave" = "celery_app\s+worker.*--queues=wave,digest(\s|$)"
-    "setka-celery-beat"      = "celery_app\s+beat(\s|$)"
-    "setka-vk-bot"           = "vk_bot_daemon\.py"
-    "setka-radar-intake"     = "radar_intake_daemon\.py"
+    "setka"                  = "uvicorn\s+main:app|start-web\.ps1"
+    "setka-celery-worker"    = "celery_app\s+worker.*--queues=celery(\s|$)|start-worker\.ps1"
+    "setka-celery-worker-wave" = "celery_app\s+worker.*--queues=wave,digest(\s|$)|start-wave-worker\.ps1"
+    "setka-celery-beat"      = "celery_app\s+beat(\s|$)|start-beat\.ps1"
+    "setka-vk-bot"           = "vk_bot_daemon\.py|start-vk-bot\.ps1"
+    "setka-radar-intake"     = "radar_intake_daemon\.py|start-radar-intake\.ps1"
     # Обратный SSH-туннель на VPS (публичная витрина). Это не python, а ssh —
-    # поэтому в выборку процессов добавлен ssh.exe (см. Get-UnitProcess).
-    "setka-public-tunnel"    = "ssh.*-R\s+127\.0\.0\.1:\d+:127\.0\.0\.1:\d+"
+    # поэтому в выборку процессов добавлены ssh.exe и powershell.exe.
+    "setka-public-tunnel"    = "ssh.*-R\s+127\.0\.0\.1:\d+:127\.0\.0\.1:\d+|start-tunnel\.ps1"
+    # Redis локального стенда (брокер celery и общий кеш).
+    "setka-redis"            = "redis-server\.exe|RedisService\.exe|start-redis\.ps1"
 }
 
 function Get-UnitProcess {
     param([string]$Pattern)
-    # python.exe — юниты приложения; ssh.exe — обратный туннель на VPS.
-    Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='ssh.exe'" -ErrorAction SilentlyContinue |
+    # python.exe — юниты приложения; ssh.exe — обратный туннель;
+    # redis-server/RedisService — Redis; powershell.exe — СУПЕРВИЗОРЫ юнитов.
+    #
+    # ⚠️ Супервизор (powershell.exe со скриптом запуска) обязан попадать в
+    # выборку: остановка задачи планировщика его НЕ убивает, и он продолжает
+    # поднимать новые экземпляры поверх остановленного — ровно тот шторм
+    # экземпляров, который дал P255 (11 веб-инстансов за вечер).
+    Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='ssh.exe' OR Name='redis-server.exe' OR Name='RedisService.exe' OR Name='powershell.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -and $_.CommandLine -match $Pattern }
 }
 
