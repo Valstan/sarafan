@@ -3,8 +3,8 @@
 > Sticky-note для непрерывности между сессиями разработки SETKA. Перезаписывается через [`/close_session`](../.claude/commands/close_session.md) — историю смотри через `git log --follow -- docs/SESSION_HANDOFF.md`.
 
 **Status:** ACTIVE
-**Updated:** 2026-11-27 (17:20)
-**Branch:** `feat/stand-autostart-and-showcase-page` (PR #1325, ждёт CI)
+**Updated:** 2026-11-27 (18:05)
+**Branch:** `main` (PR #1325 смержен 27.11, `80ab716`)
 **Last release in prod:** боевой контур — **локальная машина владельца** (веб `127.0.0.1:8000`, воркеры `celery` и `wave/digest`, beat, VK-бот, приём радара, Redis, бэкап 03:00). VPS (`sarafan`) — **публичный edge**: его nginx держит сайт `валентин.вмалмыже.рф` (визитка владельца) и витрину САРАФАНА по пути `/sarafan/`, забирая её с локальной машины через обратный SSH-туннель (PR #1323, выкатка руками 27.11).
 
 ---
@@ -58,7 +58,7 @@ P-номера. Красный = читать лог воркера в моме�
 - **Связанные коммиты сессии:** `93a1c05`+`4ef6dc6` (PR #1323 — витрина с заявкой: таблица `landing_orders`, `POST /api/landing/orders`, форма, вкладка в `/ad`), `8b456b1` (мерж #1323), `3e70a2d` (мерж #1324 — правка handoff).
 - **Прод (локальная машина, замер 27.11 17:00):** веб живой (один экземпляр, **session 0** — то есть без интерактивной сессии), Redis — задача `setka-redis` (Running, ping ok), туннель `setka-public-tunnel` (Running, ssh в session 0), воркеры `celery` (1 слот) и `wave/digest` (2 слота), beat — с 26.11; `/api/health/` — 200; воркеры публикуют (`parse_and_publish_theme` — успех в 14:41). Очереди после рестарта Redis пусты, beat пересоздаст.
 - **Юниты стенда (после 27.11):** без входа в систему (S4U, триггер «при старте системы», пауза 1 мин) поднимаются **веб, туннель и Redis**; воркеры, beat и даемоны — по входу в систему (им нужна интерактивная сессия для CLI-движка). PostgreSQL — служба Windows (Automatic).
-- **Открытых PR:** [#1325](https://github.com/Valstan/sarafan/pull/1325) — автозапуск без входа + витрина отдельной страницей `/sarafan/`.
+- **Открытых PR:** нет — [#1325](https://github.com/Valstan/sarafan/pull/1325) смержен 27.11 (`80ab716`), обязательная проверка `test (3.12)` зелёная.
 - **Письмо в мозг:** `mailbox/to-brain/2026-11-27-publiknaya-vitrina-posle-pereezda-obratnyy-ssh-tunnel.md` — восемь переносимых находок: обратный SSH-туннель; граница безопасности — allowlist в nginx; `$proxy_add_x_forwarded_for` склеивает посетителей; статический сайт под подпутём (`sub_filter`, удвоенные слеши); публичная форма без сессии; S4U вместо пароля в задаче; три ловушки Windows-автозапуска; LocalSystem против ACL.
 
 ## Failed approaches (этой нитки)
