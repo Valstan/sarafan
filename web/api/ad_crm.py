@@ -3008,3 +3008,61 @@ async def chat_reply(
     await db.commit()
     await db.refresh(row)
     return row.to_dict()
+
+
+# ---------------------------------------------------------------- заявки с сайта
+#
+# Заказ владельца 2026-11-27: витрина сети дублируется на публичный домен
+# (валентин.вмалмыже.рф), где клиент жмёт кнопку и создаёт заявку. Заявки
+# лежат в своей таблице ``landing_orders`` (миграция 119) — у них нет ни
+# группы, ни поста ВК, как у ad_requests, и в общей таблице им не место.
+#
+# Зона оператора: путь НЕ публичный, гейт требует сессию владельца.
+
+
+class LandingOrderStatusIn(BaseModel):
+    """Смена статуса заявки с сайта."""
+
+    status: Optional[str] = Field(default=None, description="new|contacted|done|rejected")
+    owner_note: Optional[str] = Field(default=None, description="Заметка владельца")
+
+
+@router.get("/landing-orders")
+async def list_landing_orders(
+    status: Optional[str] = None,
+    limit: int = 200,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Список заявок с лендинга — новые сверху."""
+    from database.models import LandingOrder
+
+    stmt = select(LandingOrder)
+    if status:
+        stmt = stmt.where(LandingOrder.status == status)
+    stmt = stmt.order_by(LandingOrder.created_at.desc(), LandingOrder.id.desc()).limit(limit)
+    rows = (await db.execute(stmt)).scalars().all()
+    return {"orders": [r.to_dict() for r in rows]}
+
+
+@router.patch("/landing-orders/{order_id}")
+async def update_landing_order(
+    order_id: int,
+    payload: LandingOrderStatusIn,
+    db: AsyncSession = Depends(get_db_session),
+):
+    """Пометить заявку взятой в работу / закрытой и записать заметку."""
+    from database.models import LandingOrder
+
+    row = await db.get(LandingOrder, order_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Заявка не найдена")
+    if payload.status is not None:
+        if payload.status not in ("new", "contacted", "done", "rejected"):
+            raise HTTPException(status_code=400, detail="Неизвестный статус заявки")
+        row.status = payload.status
+    if payload.owner_note is not None:
+        row.owner_note = payload.owner_note.strip() or None
+    db.add(row)
+    await db.commit()
+    await db.refresh(row)
+    return row.to_dict()

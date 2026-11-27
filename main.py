@@ -57,6 +57,7 @@ from web.api import (  # noqa: E402
     gateway_stats,
     health,
     ingest_contract,
+    landing,
     local_engine,
     max_webhook,
     notifications,
@@ -259,6 +260,10 @@ app.include_router(
 # Карта ingest-контракта источника (пилот варианта B, pool #367): публичный
 # read-only ответ для приёмников конвейера, своя дверь в PUBLIC_EXACT.
 app.include_router(ingest_contract.router, prefix="/api/ingest", tags=["Ingest Contract"])
+# Приём заявок с публичной витрины (заказ владельца 2026-11-27). Приём —
+# публичный (точный путь в PUBLIC_EXACT), список — операторский (под
+# сессией владельца, как весь /api/ad-crm).
+app.include_router(landing.router, prefix="/api/landing", tags=["Landing Orders"])
 # Слой условий услуг (пилот #386, шаг 1): карточка услуги отдаёт условия,
 # документы, владельца и ссылку на источник. Публичный read-only — читают
 # серверы соседних проектов, у которых сессионной cookie нет.
@@ -374,8 +379,10 @@ async def root(request: Request):
     """Main dashboard page.
 
     На каноническом хосте Радара (радар.вмалмыже.рф) корень — это сам Радар
-    (заказ владельца 2026-07-26: без лишнего «/radar» в адресе). На остальных
-    хостах — операторский дашборд, как раньше.
+    (заказ владельца 2026-07-26: без лишнего «/radar» в адресе). На хосте
+    публичной витрины (валентин.вмалмыже.рф, заказ 2026-11-27) корень — это
+    витрина сети с рекламой: клиент приходит по короткому адресу, жмёт
+    кнопку и создаёт заявку. На остальных хостах — операторский дашборд.
     """
     from modules.radar_id import vk_upstream
 
@@ -385,6 +392,8 @@ async def root(request: Request):
         # Прежний выделенный поддомен кабинета: уводим на канонический адрес
         # сарафан…/cabinet (решение владельца 2026-08-26 — бренд САРАФАН).
         return RedirectResponse(vk_upstream.ad_cabinet_canonical_url(), status_code=302)
+    if vk_upstream.is_public_landing_host(request.url.hostname):
+        return await _landing_response(request)
     return templates.TemplateResponse("index.html", {"request": request})
 
 
@@ -577,7 +586,16 @@ async def region_links_page(request: Request):
     расценки на рекламу с контактами. Цены/контакты — ``config/ad_landing.py``.
     Данные списка — ``GET /api/regions/vk-links``, подписчики и красивые адреса
     групп обновляются ночной таской ``collect_member_snapshots``.
+
+    С 2026-11-27 та же витрина отдаётся с КОРНЯ на публичном домене
+    (валентин.вмалмыже.рф) — там же работает форма заявки.
     """
+    return await _landing_response(request)
+
+
+async def _landing_response(request: Request):
+    """Собрать ответ витрины (общий код для ``/regions/links`` и корня
+    публичного домена)."""
     import json
 
     from config.ad_landing import get_ad_landing_context

@@ -60,6 +60,23 @@ const apiClient = {
         return this.request(`/ad-cabinet/requests/${id}/thread?count=${count}`);
     },
 
+    // Заявки с публичного лендинга (валентин.вмалмыже.рф, заказ 2026-11-27).
+    // Живут в своей таблице landing_orders — у ad_requests нет ни группы, ни
+    // поста ВК, а заявка с сайта приходит именно от живого человека.
+    async getSiteRequests(params = {}) {
+        const q = new URLSearchParams();
+        if (params.status) q.set('status', params.status);
+        const qs = q.toString();
+        return this.request(`/ad-crm/landing-orders${qs ? '?' + qs : ''}`);
+    },
+
+    async setSiteRequestStatus(id, payload) {
+        return this.request(`/ad-crm/landing-orders/${id}`, {
+            method: 'PATCH',
+            body: JSON.stringify(payload)
+        });
+    },
+
     async prepareAdReply(id, templateId) {
         return this.request(`/ad-cabinet/requests/${id}/prepare`, {
             method: 'POST',

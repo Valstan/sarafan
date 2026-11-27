@@ -420,6 +420,7 @@ function updateSelbar() {
     const items = pickedItems();
     if (!items.length) {
         bar.hidden = true;
+        updateOrderSummary();
         return;
     }
     bar.hidden = false;
@@ -440,6 +441,7 @@ function updateSelbar() {
             : '') +
         `<span class="hint">(${escapeHtml(q.anchor || '')}; точную цену подтвердим при заказе)</span>` +
         nudgeHtml(nudge);
+    updateOrderSummary();
 }
 
 function nudgeHtml(nudge) {
@@ -537,10 +539,113 @@ function currentFullText() {
     return out.join('\n');
 }
 
+// ── Форма заявки (заказ владельца 2026-11-27) ─────────────────────────────
+//
+// Клиент жмёт «Отправить заявку» — и заявка падает в базу владельца (в /ad
+// видна как «Заявки с сайта», в Telegram и MAX приходит уведомление). До
+// этого кнопка «Заказать» только клала текст в буфер, и заявка доезжала
+// вручную через мессенджер.
+//
+// Токен отправки живёт на странице: двойной клик или F5 после отправки несут
+// тот же токен, и сервер не создаёт вторую заявку.
+
+let rlOrderToken = null;
+
+function newOrderToken() {
+    if (window.crypto && window.crypto.randomUUID) return window.crypto.randomUUID();
+    return 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
+function updateOrderSummary() {
+    const box = document.getElementById('order-summary');
+    if (!box) return;
+    const items = pickedItems();
+    if (!items.length) {
+        box.textContent = 'Можно отправить и без выбора сообществ — подберём охват под задачу.';
+        return;
+    }
+    const reach = items.reduce((s, i) => s + (i.members || 0), 0);
+    const q = quote(items.length);
+    box.innerHTML =
+        'В заявке: <b>' + items.length + '</b> ' +
+        plural(items.length, 'сообщество', 'сообщества', 'сообществ') +
+        ' · охват <b>' + fmt(reach) + '</b>' +
+        (q ? ' · ориентир <b>' + fmt(q.price) + ' ₽</b>' : '');
+}
+
+function initOrderForm() {
+    const form = document.getElementById('order-form-el');
+    if (!form) return;
+    rlOrderToken = newOrderToken();
+    const status = document.getElementById('order-status');
+    const submit = document.getElementById('order-submit');
+
+    form.addEventListener('submit', async (e) => {
+        e.preventDefault();
+        const nameEl = document.getElementById('order-name');
+        const contactEl = document.getElementById('order-contact');
+        const commentEl = document.getElementById('order-comment');
+        const name = nameEl.value.trim();
+        const contact = contactEl.value.trim();
+        if (!name || !contact) {
+            status.className = 'order-status err';
+            status.textContent = 'Заполните имя и контакт — без них мы не сможем вам ответить.';
+            return;
+        }
+        submit.disabled = true;
+        status.className = 'order-status';
+        status.textContent = 'Отправляем…';
+        try {
+            const items = pickedItems();
+            const resp = await fetch('/api/landing/orders', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    name: name,
+                    contact: contact,
+                    comment: commentEl.value.trim() || null,
+                    regions: items.map(i => ({ code: i.code })),
+                    website: document.getElementById('order-website').value,
+                    request_token: rlOrderToken,
+                    page: window.location.href
+                })
+            });
+            if (!resp.ok) {
+                let detail = 'HTTP ' + resp.status;
+                try {
+                    const j = await resp.json();
+                    if (j && j.detail) detail = j.detail;
+                } catch (parseErr) { /* тело не JSON — оставляем HTTP-код */ }
+                throw new Error(detail);
+            }
+            const data = await resp.json();
+            status.className = 'order-status ok';
+            status.textContent = '✅ Заявка принята, номер ' + (data.ref || '—') +
+                '. Мы ответим в тот же день.';
+            nameEl.value = '';
+            contactEl.value = '';
+            commentEl.value = '';
+            // Следующая отправка — новая заявка, а не повтор текущей.
+            rlOrderToken = newOrderToken();
+            rlPicked.clear();
+            render();
+        } catch (err) {
+            status.className = 'order-status err';
+            status.textContent = 'Не удалось отправить: ' + err.message +
+                '. Попробуйте ещё раз или напишите нам в мессенджер.';
+        } finally {
+            submit.disabled = false;
+        }
+    });
+
+    updateOrderSummary();
+}
+
 // ── Инициализация ──────────────────────────────────────────────────────────
 
 document.addEventListener('DOMContentLoaded', () => {
     initTabs();
+    initOrderForm();
     loadRegionLinks();
 
     document.getElementById('rl-refresh').addEventListener('click', loadRegionLinks);
@@ -571,14 +676,22 @@ document.addEventListener('DOMContentLoaded', () => {
         copyToClipboard(orderText(), e.currentTarget, '⎘ Скопировать заказ');
     });
 
-    // Кнопка «Заказать» на тарифе кладёт выбранный пакет в буфер.
+    // Кнопка «Заказать» на тарифе ведёт к форме заявки: тариф подставляется в
+    // комментарий, клиенту остаётся вписать имя и контакт и нажать «Отправить».
+    // Заявка сразу попадает к владельцу (заказ 2026-11-27) — раньше кнопка
+    // только копировала текст, и заявка доезжала вручную.
     document.querySelectorAll('.pkg-order').forEach(btn => {
         btn.addEventListener('click', () => {
-            copyToClipboard(
-                'Хочу заказать рекламу в САРАФАНЕ: ' + btn.dataset.pkg,
-                btn,
-                'Заказать'
-            );
+            const comment = document.getElementById('order-comment');
+            if (comment && !comment.value.trim()) {
+                comment.value = 'Интересует тариф: ' + btn.dataset.pkg;
+            }
+            const form = document.getElementById('order-form');
+            if (form) {
+                form.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                const name = document.getElementById('order-name');
+                if (name) setTimeout(() => name.focus(), 400);
+            }
         });
     });
 });

@@ -2062,3 +2062,66 @@ class PromoOutreachCandidate(Base):
             "owner_note": self.owner_note,
             "found_at": self.found_at.isoformat() if self.found_at else None,
         }
+
+
+class LandingOrder(Base):
+    """Заявка на рекламу, оставленная с публичного лендинга /regions/links.
+
+    Отдельная таблица, а не запись в ``ad_requests``: там ``community_vk_id``
+    NOT NULL и вся строка описывает рекламу, пойманную в предложке сообщества
+    или во входящем ЛС. У заявки с сайта нет ни группы, ни поста — только
+    «кто, куда пишет, какие сообщества выбрал». Миграция 119.
+    """
+
+    __tablename__ = "landing_orders"
+
+    # with_variant: тесты гоняют SQLite, где чистый BigInteger не
+    # autoincrement'ится (прецедент — AdClient).
+    id = Column(BigInteger().with_variant(Integer, "sqlite"), primary_key=True, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # Кто оставил заявку: имя и контакт (телефон/telegram/vk/почта).
+    name = Column(String(300), nullable=False)
+    contact = Column(String(300), nullable=False)
+
+    # Снимок выбранных сообществ: [{code, name, members, url}].
+    regions_json = Column(JSON, nullable=False, default=list)
+    regions_count = Column(Integer, nullable=False, default=0)
+    reach = Column(Integer, nullable=True)
+    price_estimate = Column(Integer, nullable=True)
+
+    comment = Column(Text, nullable=True)
+
+    # Токен одной отправки (дедуп двойного клика/обновления страницы).
+    request_token = Column(String(64), nullable=True, index=True)
+
+    # Откуда пришла заявка.
+    source_host = Column(String(300), nullable=True)
+    source_page = Column(String(500), nullable=True)
+
+    # new | contacted | done | rejected
+    status = Column(String(20), nullable=False, default="new", index=True)
+    owner_note = Column(Text, nullable=True)
+    notified_at = Column(DateTime, nullable=True)
+
+    def __repr__(self):
+        return f"<LandingOrder {self.id} {self.status} regions={self.regions_count}>"
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "name": self.name,
+            "contact": self.contact,
+            "regions": self.regions_json or [],
+            "regions_count": self.regions_count,
+            "reach": self.reach,
+            "price_estimate": self.price_estimate,
+            "comment": self.comment,
+            "request_token": self.request_token,
+            "source_host": self.source_host,
+            "source_page": self.source_page,
+            "status": self.status,
+            "owner_note": self.owner_note,
+            "notified_at": self.notified_at.isoformat() if self.notified_at else None,
+        }
