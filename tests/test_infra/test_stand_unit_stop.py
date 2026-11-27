@@ -23,6 +23,13 @@ wscript → cmd → powershell → python, и ``Stop-ScheduledTask`` снима�
 3. **Проба супервизора не вернулась к 5 секундам.** Именно таймаут 5 с при
    ответе веба в 229 с породил шторм из 11 экземпляров (P255): супервизор
    считал живой веб мёртвым и поднимал новый каждые 30 секунд.
+4. **Воркеры не вернулись к пулу `solo`.** При `solo` ETA-задачу исполняет
+   поток таймера celery, а обычные — главный поток; оба зовут общий
+   персистентный event-loop, и он оказывается занят другим потоком (P253).
+   Пул `threads` это убирает: тела задач исполняют потоки пула.
+5. **У волнового юнита два слота.** На проде очередь `wave` обслуживают оба
+   воркера (ADR-0022); на стенде очередь забирает один юнит, и один слот
+   означает «сводка съела вечер, волны протухли» (P233, P234).
 
 Канон — ``infra/windows/stop-unit.ps1``, ``infra/windows/common.ps1``,
 ``infra/windows/register-scheduled-tasks.ps1``.
@@ -39,6 +46,8 @@ REGISTER = REPO_ROOT / "infra" / "windows" / "register-scheduled-tasks.ps1"
 STOP_SCRIPT = REPO_ROOT / "infra" / "windows" / "stop-unit.ps1"
 COMMON = REPO_ROOT / "infra" / "windows" / "common.ps1"
 START_WEB = REPO_ROOT / "infra" / "windows" / "start-web.ps1"
+START_WORKER = REPO_ROOT / "infra" / "windows" / "start-worker.ps1"
+START_WAVE_WORKER = REPO_ROOT / "infra" / "windows" / "start-wave-worker.ps1"
 
 #: Юнит в реестре задач: @{ Name = "setka"; Script = "start-web.ps1"; ... }
 UNIT_ENTRY = re.compile(r'@\{\s*Name\s*=\s*"(?P<name>[^"]+)"')
@@ -57,11 +66,11 @@ SAMPLE_COMMAND_LINES: Dict[str, str] = {
     ),
     "setka-celery-worker": (
         '"D:\\valstan\\REPO\\sarafan\\venv\\Scripts\\python.exe" -m celery -A celery_app worker '
-        "--loglevel=info --queues=celery --concurrency=1 --pool=solo --hostname=celery@PC79"
+        "--loglevel=info --queues=celery --concurrency=1 --pool=threads --hostname=celery@PC79"
     ),
     "setka-celery-worker-wave": (
         '"D:\\valstan\\REPO\\sarafan\\venv\\Scripts\\python.exe" -m celery -A celery_app worker '
-        "--loglevel=info --queues=wave,digest --concurrency=1 --pool=solo --hostname=wave@PC79"
+        "--loglevel=info --queues=wave,digest --concurrency=2 --pool=threads --hostname=wave@PC79"
     ),
     "setka-celery-beat": (
         '"D:\\valstan\\REPO\\sarafan\\venv\\Scripts\\python.exe" -m celery -A celery_app beat '
@@ -141,3 +150,41 @@ def test_supervisor_decides_by_port_not_only_by_health() -> None:
     assert (
         "Test-StandPortListening" in web
     ), "супервизор веба не смотрит на порт — шторм экземпляров вернётся (P255)"
+
+
+def test_workers_do_not_use_solo_pool() -> None:
+    """Пул `solo` на Windows = ETA-задачи в потоке таймера = P253.
+
+    Живой замер 27.11 06:47: держателем общего event-loop был поток ETA-таймера
+    celery (`Timer-1`), и из-за отказа падали лента хаба и мама волны. При
+    пуле `threads` тела задач исполняют потоки пула, а таймер только раздаёт
+    ETA-задачи. A/B-проба: `solo` — 16 коллизий и 24 отказа из 246 задач,
+    `threads` — 0 и 0.
+    """
+    for script in (START_WORKER, START_WAVE_WORKER):
+        text = script.read_text(encoding="utf-8")
+        assert (
+            '$Pool = "solo"' not in text
+        ), f"{script.name}: пул solo вернулся — коллизии общего event-loop (P253) вернутся"
+        assert (
+            '$Pool = "threads"' in text
+        ), f"{script.name}: пул воркера не threads — ETA-задачи снова у таймера"
+
+
+def test_wave_worker_has_two_publication_slots() -> None:
+    """У публикационного слота на стенде должно быть ДВА места.
+
+    На проде очередь `wave` обслуживают оба воркера
+    (`--queues=celery,wave,digest` и `--queues=wave,digest`) — ADR-0022. На
+    стенде очередь `wave` забирает один юнит, поэтому два слота берутся
+    concurrency'ем пула. Замер 27.11: задача региона — 24.7 с, веер сводки —
+    1–3 мин на регион; с одним слотом сводка забирает слот на часы и волны
+    уходят в «кладбище» по сроку (26.11: волны 22:00 / 22:20 / 22:50 утрачены).
+    """
+    text = START_WAVE_WORKER.read_text(encoding="utf-8")
+    assert (
+        "[int]$Concurrency = 2" in text
+    ), "у волнового воркера один слот — сводка съест вечер, волны протухнут (P233, P234)"
+    assert (
+        '"--concurrency=$Concurrency"' in text
+    ), "параметр concurrency не проброшен в командную строку воркера"

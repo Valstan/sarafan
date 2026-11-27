@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import threading
+import time
 
 import pytest
 
@@ -135,3 +136,79 @@ def test_run_coro_refuses_when_loop_busy_in_another_thread() -> None:
         celery_asyncio._loop = original
         release.set()
         thread.join(timeout=5)
+
+
+def test_run_coro_waits_for_busy_loop_instead_of_failing() -> None:
+    """Петля занята ДРУГИМ вызовом ``run_coro`` — второй ЖДЁТ и получает результат.
+
+    Живой дефект боевого контура (P253, замер 27.11 06:47): держателем петли был
+    поток ETA-таймера celery (``Timer-1``), а звал из главного потока. Раньше
+    второй получал отказ, и задача падала целиком — а для мамы волны это «волна
+    не пошла вообще» (26.11 так умерли 5 мам-задач).
+
+    Теперь петля — ресурс на процесс: её крутят по очереди, второй ждёт.
+    """
+    import utils.celery_asyncio as celery_asyncio
+
+    async def _slow() -> str:
+        await asyncio.sleep(1.0)
+        return "первый"
+
+    async def _quick() -> str:
+        return "второй"
+
+    holder_done = threading.Event()
+    results: list[str] = []
+
+    def _holder() -> None:
+        results.append(run_coro(_slow()))
+        holder_done.set()
+
+    thread = threading.Thread(target=_holder, daemon=True)
+    thread.start()
+    # Даём держателю взять петлю: он держит её ~1 с.
+    time.sleep(0.2)
+
+    waited = run_coro(_quick())
+    results.append(waited)
+    thread.join(timeout=10)
+
+    assert holder_done.is_set(), "держатель петли не закончил"
+    assert set(results) == {"первый", "второй"}, f"результаты: {results}"
+    # Петля та же самая — пул asyncpg не должен рваться.
+    assert celery_asyncio._loop is not None
+
+
+def test_run_coro_two_threads_share_one_loop_without_errors() -> None:
+    """Два потока зовут ``run_coro`` одновременно — оба получают результат.
+
+    Это и есть режим пула ``threads`` с двумя слотами: тела задач исполняют
+    два потока пула, а петля у процесса одна. Раньше второй из них получал
+    «This event loop is already running» и задача падала.
+    """
+    import utils.celery_asyncio as celery_asyncio
+
+    async def _answer(value: int) -> int:
+        await asyncio.sleep(0.05)
+        return value
+
+    results: list[int] = []
+    errors: list[BaseException] = []
+    barrier = threading.Barrier(2)
+
+    def _worker(value: int) -> None:
+        try:
+            barrier.wait(timeout=10)
+            results.append(run_coro(_answer(value)))
+        except BaseException as exc:  # noqa: BLE001 — тест ловит отказ
+            errors.append(exc)
+
+    threads = [threading.Thread(target=_worker, args=(i,), daemon=True) for i in (1, 2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=15)
+
+    assert not errors, f"отказы недопустимы: {errors}"
+    assert sorted(results) == [1, 2], f"результаты: {results}"
+    assert celery_asyncio._loop is not None
