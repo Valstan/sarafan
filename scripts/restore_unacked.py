@@ -181,6 +181,37 @@ def write_back(
     client.hset(unacked_key, tag, dumps([message, exchange, routing_key]))
 
 
+def select_messages(
+    raw: Dict[bytes, bytes],
+    *,
+    only_queue: str = "",
+    only_expired: bool = False,
+    now: float = 0.0,
+) -> Dict[bytes, bytes]:
+    """Отобрать сообщения по очереди и состоянию срока.
+
+    Общий фильтр для сухого прогона и для самого возврата: иначе отчёт и
+    результат расходились (27.11: `--queue wave` в отчёте показывал все
+    сообщения, а вернулась бы только часть).
+    """
+    if not only_queue and not only_expired:
+        return dict(raw)
+    moment = now or time.time()
+    selected: Dict[bytes, bytes] = {}
+    for tag, payload in raw.items():
+        try:
+            _task, queue, _args, headers = describe(payload)
+        except Exception:  # noqa: BLE001 — неразобранное вернём как есть
+            selected[tag] = payload
+            continue
+        if only_queue and queue != only_queue:
+            continue
+        if only_expired and expiry_state(headers, moment) != "протухла":
+            continue
+        selected[tag] = payload
+    return selected
+
+
 def restore(
     raw: Dict[bytes, bytes],
     only_queue: str = "",
@@ -198,6 +229,12 @@ def restore(
 
     restored: List[str] = []
     now = time.time()
+    raw = select_messages(
+        raw,
+        only_queue=only_queue,
+        only_expired=only_expired,
+        now=now,
+    )
     with Connection(broker_url) as conn:
         channel = conn.default_channel
         # `channel.qos` — свойство, которое лениво создаёт QoS нужного класса
@@ -212,10 +249,6 @@ def restore(
                 task, queue, _args, headers = describe(payload)
             except Exception as exc:  # noqa: BLE001
                 print("  не разобрано, пропускаю:", type(exc).__name__, str(exc)[:80])
-                continue
-            if only_queue and queue != only_queue:
-                continue
-            if only_expired and expiry_state(headers, now) != "протухла":
                 continue
             if refresh_ttl_sec or eta_in:
                 refresh_deadline(headers, now=now, ttl_sec=refresh_ttl_sec, eta_in=eta_in)
@@ -299,13 +332,29 @@ def main(argv: Iterable[str] | None = None) -> int:
 
     now = time.time()
     print("сообщений в unacked:", len(raw))
+
+    # Сухой прогон должен показывать ровно то, что вернётся: очередь и
+    # «только протухшие» отсекают часть сообщений, и без этого отчёт врёт
+    # (27.11: `--queue wave` показывал все 10, хотя вернулось бы 6).
+    selected = select_messages(
+        raw,
+        only_queue=args.queue,
+        only_expired=args.only_expired,
+        now=now,
+    )
+    if len(selected) != len(raw):
+        print(f"после фильтров (--queue {args.queue!r}): {len(selected)}")
+    if not selected:
+        print("после фильтров не осталось ничего — возвращать нечего")
+        return 0
+
     print("--- по задачам ---")
-    for task, count in summarize(raw).most_common():
+    for task, count in summarize(selected).most_common():
         print(f"  {task}: {count}")
 
     print("--- по сроку ---")
     states: Counter = Counter()
-    for payload in raw.values():
+    for payload in selected.values():
         try:
             _task, _queue, _args, headers = describe(payload)
             states[expiry_state(headers, now)] += 1
