@@ -543,6 +543,35 @@
             .gm-note { font-size: .68rem; }
             .gm-card { padding: 12px 14px 14px; }
         }
+
+        /* ── Форма заявки (заказ владельца 2026-11-27) ───────────────────
+           Клиент жмёт «Заказать» и оставляет заявку прямо на странице: без
+           входа и без переписки. Переменные — те же, что у всей страницы. */
+        .order-form {
+            margin: 26px 0 8px; padding: 18px 20px 20px;
+            border: 1px solid var(--line); border-radius: 14px; background: var(--paper);
+        }
+        .order-form h3 { margin: 0 0 6px; font-size: 1.15rem; }
+        .order-form-hint { margin: 0 0 14px; color: var(--ink-soft); font-size: .92rem; }
+        .order-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+        .order-row label { font-size: .86rem; color: var(--ink-soft); }
+        .order-row input, .order-row textarea {
+            font: inherit; padding: 9px 12px; color: var(--ink);
+            border: 1px solid var(--line); border-radius: 9px; background: var(--card);
+        }
+        .order-row input:focus, .order-row textarea:focus {
+            outline: 2px solid var(--accent); outline-offset: 1px;
+        }
+        .order-summary { margin: 0 0 12px; font-size: .9rem; color: var(--ink-soft); }
+        .order-summary b { color: var(--ink); }
+        .order-actions { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+        .order-status { font-size: .9rem; }
+        .order-status.ok { color: var(--green); }
+        .order-status.err { color: var(--accent-dark); }
+        /* Honeypot: от глаз скрыт, от бота — нет. */
+        .hp-field {
+            position: absolute; left: -9999px; width: 1px; height: 1px; overflow: hidden;
+        }
     </style>
 </head>
 <body>
@@ -695,6 +724,49 @@
                 </button>
             </div>
             {% endfor %}
+        </div>
+
+        {# ── Форма заявки (заказ владельца 2026-11-27) ──────────────────────
+           До этого кнопка «Заказать» только клала текст в буфер, и заявка
+           доезжала до владельца вручную через мессенджер. Теперь клиент
+           оставляет заявку прямо здесь: два поля, одна кнопка. Владелец видит
+           её в /ad → «Заявки с сайта» и получает уведомление в Telegram и MAX. #}
+        <div class="order-form" id="order-form">
+            <h3>📨 Оставить заявку прямо здесь</h3>
+            <p class="order-form-hint">
+                Нажмите «Заказать» у тарифа или отметьте сообщества галочками на
+                вкладке «Сообщества сети» — потом заполните два поля и отправьте.
+                Заявка приходит нам сразу, отвечаем в тот же день.
+            </p>
+            <form id="order-form-el" autocomplete="off" novalidate>
+                <div class="order-row">
+                    <label for="order-name">Как вас зовут</label>
+                    <input type="text" id="order-name" maxlength="300"
+                           placeholder="Иван Петров" required>
+                </div>
+                <div class="order-row">
+                    <label for="order-contact">Как с вами связаться</label>
+                    <input type="text" id="order-contact" maxlength="300"
+                           placeholder="телефон, Telegram или VK" required>
+                </div>
+                <div class="order-row">
+                    <label for="order-comment">Что рекламируем — необязательно</label>
+                    <textarea id="order-comment" rows="3" maxlength="2000"
+                              placeholder="например: ремонт квартир, Малоярославец"></textarea>
+                </div>
+                {# Honeypot: человек его не видит и не заполняет, бот — заполняет. #}
+                <div class="hp-field" aria-hidden="true">
+                    <label for="order-website">Не заполняйте это поле</label>
+                    <input type="text" id="order-website" tabindex="-1" autocomplete="off">
+                </div>
+                <div class="order-summary" id="order-summary"></div>
+                <div class="order-actions">
+                    <button type="submit" class="btn btn-primary" id="order-submit">
+                        Отправить заявку
+                    </button>
+                    <span class="order-status" id="order-status"></span>
+                </div>
+            </form>
         </div>
 
         <div class="ladder">

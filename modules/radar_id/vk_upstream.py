@@ -206,6 +206,36 @@ def is_radar_host(current_host: Optional[str]) -> bool:
         return False
 
 
+# Публичный домен витрины САРАФАНА (валентин.вмалмыже.рф, punycode).
+#
+# Заказ владельца 2026-11-27: витрина сети дублируется на этот домен — там
+# клиент жмёт кнопку и создаёт заявку. Приложение отдаёт на этом хосте
+# витрину с КОРНЯ (``/``), а не операторский дашборд.
+#
+# ⚠️ Домен принадлежит владельцу (на нём же живёт его личная визитка), и
+# транспорт — nginx на боевом VPS, который проксирует только разрешённые
+# пути в локальную машину (config/nginx_valentin.conf). Поэтому витрина на
+# этом хосте — единственная страница приложения, доступная из интернета.
+PUBLIC_LANDING_HOST_DEFAULT = "xn--80adkmnnb2b.xn--80adkdyec4j.xn--p1ai"
+
+
+def is_public_landing_host(current_host: Optional[str]) -> bool:
+    """True, если запрос пришёл на хост публичной витрины САРАФАНА.
+
+    Сравнение — в punycode (кириллица == punycode), как у остальных хостов.
+    Хост переопределяется env ``PUBLIC_LANDING_HOST`` (пустое значение
+    выключает правило).
+    """
+    canonical = os.getenv("PUBLIC_LANDING_HOST", PUBLIC_LANDING_HOST_DEFAULT).strip().lower()
+    host = (current_host or "").strip().lower().rstrip(".")
+    if not canonical or not host:
+        return False
+    try:
+        return host.encode("idna").decode("ascii") == canonical.encode("idna").decode("ascii")
+    except (UnicodeError, UnicodeDecodeError):
+        return False
+
+
 # Канонический адрес кабинета рекламодателя (решение владельца 2026-08-26):
 # ПУТЬ на домене сети — сарафан.вмалмыже.рф/cabinet. Бренд САРАФАН знаком
 # клиентам всех районов, TLS у домена уже есть — отдельный поддомен не нужен.

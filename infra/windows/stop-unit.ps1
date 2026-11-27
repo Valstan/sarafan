@@ -39,7 +39,7 @@
 param(
     # Имя задачи планировщика: setka, setka-celery-worker,
     # setka-celery-worker-wave, setka-celery-beat, setka-vk-bot,
-    # setka-radar-intake. Пусто — все юниты стенда.
+    # setka-radar-intake, setka-public-tunnel. Пусто — все юниты стенда.
     [string]$TaskName = "",
     # Поднять задачу заново после остановки.
     [switch]$Start,
@@ -64,11 +64,15 @@ $UnitPatterns = [ordered]@{
     "setka-celery-beat"      = "celery_app\s+beat(\s|$)"
     "setka-vk-bot"           = "vk_bot_daemon\.py"
     "setka-radar-intake"     = "radar_intake_daemon\.py"
+    # Обратный SSH-туннель на VPS (публичная витрина). Это не python, а ssh —
+    # поэтому в выборку процессов добавлен ssh.exe (см. Get-UnitProcess).
+    "setka-public-tunnel"    = "ssh.*-R\s+127\.0\.0\.1:\d+:127\.0\.0\.1:\d+"
 }
 
 function Get-UnitProcess {
     param([string]$Pattern)
-    Get-CimInstance Win32_Process -Filter "Name='python.exe'" -ErrorAction SilentlyContinue |
+    # python.exe — юниты приложения; ssh.exe — обратный туннель на VPS.
+    Get-CimInstance Win32_Process -Filter "Name='python.exe' OR Name='ssh.exe'" -ErrorAction SilentlyContinue |
         Where-Object { $_.CommandLine -and $_.CommandLine -match $Pattern }
 }
 

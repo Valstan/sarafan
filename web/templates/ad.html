@@ -53,6 +53,16 @@
                 <span class="badge text-bg-danger d-none" id="cabinets-badge"></span>
             </button>
         </li>
+        {# Заявки с публичного лендинга (валентин.вмалмыже.рф) — заказ
+           владельца 2026-11-27. Клиент жмёт кнопку на витрине и заявка падает
+           сюда; в Telegram и MAX приходит уведомление. #}
+        <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tab-site-requests-btn" data-bs-toggle="tab"
+                    data-bs-target="#tab-site-requests" type="button" role="tab">
+                <i class="bi bi-envelope-paper"></i> Заявки с сайта
+                <span class="badge text-bg-danger d-none" id="site-requests-badge"></span>
+            </button>
+        </li>
     </ul>
 
     <div class="tab-content">
@@ -522,6 +532,18 @@
             </div>
         </div>
 
+        <!-- ============== Вкладка: Заявки с публичного лендинга ============== -->
+        <div class="tab-pane fade" id="tab-site-requests" role="tabpanel" aria-labelledby="tab-site-requests-btn">
+            <div class="d-flex justify-content-end mb-2">
+                <button class="btn btn-outline-secondary btn-sm" onclick="loadSiteRequests()">
+                    <i class="bi bi-arrow-clockwise"></i> Обновить
+                </button>
+            </div>
+            <div id="site-requests-body">
+                <p class="text-muted">Загрузка…</p>
+            </div>
+        </div>
+
     </div>
 </div>
 
@@ -731,6 +753,7 @@
 <script src="/static/vendor/chartjs/chart.umd.min.js?v={{ STATIC_VERSION }}"></script>
 <script src="/static/js/ad_cabinet.js?v={{ STATIC_VERSION }}"></script>
 <script src="/static/js/ad_crm.js?v={{ STATIC_VERSION }}"></script>
+<script src="/static/js/ad_site_requests.js?v={{ STATIC_VERSION }}"></script>
 <script>
 // Единый рекламный кабинет: логика вкладок (С1).
 const AD_HASH_TABS = {
@@ -739,6 +762,7 @@ const AD_HASH_TABS = {
     '#scheduler': 'tab-scheduler-btn',
     '#stats': 'tab-stats-btn',
     '#inbox': 'tab-inbox-btn',
+    '#site-requests': 'tab-site-requests-btn',
 };
 
 // Ленивая инициализация вкладки: событие `shown.bs.tab` — НЕ единственный путь.
@@ -749,6 +773,7 @@ const AD_HASH_TABS = {
 const AD_TAB_INIT = {
     'tab-scheduler-btn': () => (typeof initScheduler === 'function' ? initScheduler() : null),
     'tab-cabinets-btn': () => (typeof initCabinets === 'function' ? initCabinets() : null),
+    'tab-site-requests-btn': () => (typeof initSiteRequests === 'function' ? initSiteRequests() : null),
 };
 
 function adShowTabByHash() {

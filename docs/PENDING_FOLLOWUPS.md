@@ -51,7 +51,7 @@
 
 ## ⏳ В процессе
 
-- **P249** [⏳ Физические шаги после переезда: удалить VPS у хостера, решить DNS-записи доменов, предупредить соседей про отказ ЕСА и шлюза, перенести визитку «валентин»](pending/P249-fizicheskie-shagi-posle-pereezda-udalit-vps-dns-sosedi.md) · `⏱ 2026-11-26 · snooze 0 · parked`
+- **P249** [⏳ Физические шаги после переезда: удалить VPS (теперь на нём edge витрины), DNS-записи, соседи, визитка → `/portfolio/`](pending/P249-fizicheskie-shagi-posle-pereezda-udalit-vps-dns-sosedi.md) · `⏱ 2026-11-27 · snooze 0 · parked`
 - **P230** [🟡 MAX-канал рекламных заявок: карточка с фото и кнопкой ответа + нейросетевой судья](pending/P230-max-kanal-reklamnyh-zayavok.md) · `⏱ 2026-11-20 · snooze 0 · fresh`
 - **P225** [⏳ Пилот единого профиля жителя (#386): слой условий услуг + ассистент — шаг 1 выкачен 11.11, шаг 3 собран 19.11](pending/P225-pilot-386-usloviya-uslug-i-assistent.md) · `⏱ 2026-11-11 · snooze 0 · fresh`
 - **P227** [⏳ Контур MiniMax: пул и подбор — в Кармане, весь трафик на MiniMax; **продление входа сработало в бою 23.11 17:02** (тот же аккаунт #3, +12 ч, без 409); **решение 24.11: аккаунты, выданные 22.11, не нужны — renew для них не смягчаем**](pending/P227-minimax-kontur-pul-ak-kuntov-avtochekin.md) · `⏱ 2026-11-24 · snooze 0 · fresh`

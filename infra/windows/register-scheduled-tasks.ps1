@@ -45,7 +45,11 @@ $units = @(
     @{ Name = "setka-celery-worker-wave"; Script = "start-wave-worker.ps1"; Description = "SETKA Celery Worker (очереди wave,digest)" },
     @{ Name = "setka-celery-beat"; Script = "start-beat.ps1"; Description = "SETKA Celery Beat (расписание)" },
     @{ Name = "setka-vk-bot"; Script = "start-vk-bot.ps1"; Description = "SETKA VK bot (Bots Long Poll)" },
-    @{ Name = "setka-radar-intake"; Script = "start-radar-intake.ps1"; Description = "SETKA radar intake (VK Long Poll + Telegram getUpdates)" }
+    @{ Name = "setka-radar-intake"; Script = "start-radar-intake.ps1"; Description = "SETKA radar intake (VK Long Poll + Telegram getUpdates)" },
+    # Обратный SSH-туннель на боевой VPS: публичная витрина САРАФАНА
+    # (валентин.вмалмыже.рф) с данными с этой машины. Env-файл ему не нужен —
+    # он запускает ssh, а не приложение (NoEnv).
+    @{ Name = "setka-public-tunnel"; Script = "start-tunnel.ps1"; Description = "Обратный SSH-туннель на VPS: публичная витрина САРАФАНА"; NoEnv = $true }
 )
 
 if ($List) {
@@ -78,7 +82,7 @@ foreach ($unit in $units) {
     }
 
     $envArg = ""
-    if ($EnvFile) { $envArg = "-EnvFile `"$EnvFile`"" }
+    if ($EnvFile -and -not $unit.NoEnv) { $envArg = "-EnvFile `"$EnvFile`"" }
 
     # Тихий запуск. Задача выполняется в сессии владельца, поэтому любая
     # консольная программа создаёт на экране окно. Скрытие стиля окна его
