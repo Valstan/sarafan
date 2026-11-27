@@ -758,9 +758,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     neural_rows = journal_rows(logs_dir / "neural_usage.jsonl", since=since, until=until)
     report["paid"] = paid_calls(neural_rows)
 
-    minimax_rows = journal_rows(
-        logs_dir / "minimax_usage.jsonl", since=since, until=until
-    )
+    minimax_rows = journal_rows(logs_dir / "minimax_usage.jsonl", since=since, until=until)
     report["engine_discovery"] = engine_calls(minimax_rows, label="discovery")
     report["memory_free_mb"] = memory_free_mb()
 
