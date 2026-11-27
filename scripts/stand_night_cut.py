@@ -44,6 +44,7 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import re
@@ -52,7 +53,7 @@ import sys
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -63,6 +64,32 @@ WORKER_LOGS = ("setka-worker.err.log", "setka-wave-worker.err.log")
 
 #: Слот вечерней сводки — 21:40 по Москве.
 DIGEST_SLOT = (21, 40)
+
+#: Вечерние слоты волн — по beat-расписанию (`tasks/celery_app.py`): копир-волна
+#: 22:00 (пятиминутная, `parse_and_publish_theme`), admin 22:20 и sport 22:50
+#: (`run_all_regions_theme`). Отдельной волны «22:00» в расписании нет: соседский
+#: обмен снят 08.11, а комментарий про «22:00 — Ленты соседей» устарел.
+EVENING_WAVE_SLOTS = (
+    ("копир 22:00", (22, 0), "parse_and_publish_theme"),
+    ("admin 22:20", (22, 20), "run_all_regions_theme"),
+    ("sport 22:50", (22, 50), "run_all_regions_theme"),
+)
+
+#: В каком окне после слота слот считается выполненным.
+SLOT_WINDOW = timedelta(minutes=10)
+
+#: Разведение регионов по слотам (`CLASSIFIER_WAVE_REGION_SPREAD_SECONDS`,
+#: дефолт 3000 с) — столько занимает последняя волна ночи.
+REGION_SPREAD_SECONDS = 3000
+
+#: Запас после последнего слота, чтобы строка «succeeded» уже попала в лог.
+VERDICT_MARGIN = timedelta(minutes=10)
+
+#: Ночь закрывается в 05:00 — первый утренний слот (novost 06:40) в ночь не входит.
+NIGHT_END_SLOT = (5, 0)
+
+#: За сколько до слота сводки ещё можно снять базу хвоста перед ночью.
+PREPARE_LEAD = timedelta(hours=2)
 
 #: Задачи волн и сводки: их отбрасывание означает потерю публикации.
 WAVE_TASKS = frozenset({"run_all_regions_theme", "parse_and_publish_theme"})
@@ -135,12 +162,15 @@ def scan_lines(
         "lines_total": 0,
         "lines_in_window": 0,
         "lines_without_ts": 0,
+        "first_ts": None,
+        "last_ts": None,
         "p253_diagnostics": 0,
         "p253_samples": [],
         "revoked_by_class": {"wave": 0, "digest": 0, "other": 0},
         "revoked_other_tasks": Counter(),
         "revoked_samples": [],
         "succeeded_by_task": Counter(),
+        "succeeded_moments": [],
         "waves_succeeded": 0,
         "digest_published": 0,
         "digest_regions_seen": 0,
@@ -151,6 +181,11 @@ def scan_lines(
         ts = parse_ts(raw)
         if ts is None:
             out["lines_without_ts"] += 1
+        else:
+            if out["first_ts"] is None or ts < out["first_ts"]:
+                out["first_ts"] = ts
+            if out["last_ts"] is None or ts > out["last_ts"]:
+                out["last_ts"] = ts
         if not in_window(ts, since, until):
             continue
         out["lines_in_window"] += 1
@@ -173,8 +208,11 @@ def scan_lines(
         succeeded = _SUCCEEDED_RE.search(raw)
         if succeeded:
             task = succeeded.group("task")
+            leaf = task.rsplit(".", 1)[-1]
             out["succeeded_by_task"][task] += 1
-            if task.rsplit(".", 1)[-1] == "run_all_regions_theme":
+            if ts is not None:
+                out["succeeded_moments"].append((leaf, ts))
+            if leaf == "run_all_regions_theme":
                 out["waves_succeeded"] += 1
 
         if _PUBLISHED_RE.search(raw):
@@ -187,6 +225,85 @@ def scan_lines(
     return out
 
 
+def digest_publications_db(
+    since: Optional[datetime],
+    until: Optional[datetime],
+) -> Optional[Dict[str, Any]]:
+    """Сколько регионов получили сборник сводки — по журналу публикаций.
+
+    Логи воркеров обнуляются на рестарте юнита (P257), а журнал публикаций —
+    нет. Поэтому число сборников берём из базы: рестарт посреди ночи не должен
+    превращать зелёную ночь в красную только потому, что лог потерялся.
+
+    ``published_at`` в базе — UTC без зоны; окно приводим туда же.
+    """
+    try:
+        from sqlalchemy import text
+
+        from database.connection import get_db_session_context
+    except Exception:  # noqa: BLE001 — без базы отчёт не хуже, просто беднее
+        return None
+
+    def _utc(value: Optional[datetime]) -> Optional[datetime]:
+        if value is None:
+            return None
+        return value.astimezone(timezone.utc).replace(tzinfo=None)
+
+    start = _utc(since)
+    stop = _utc(until) or datetime.utcnow()
+
+    async def _query() -> Dict[str, Any]:
+        async with get_db_session_context() as session:
+            row = (
+                await session.execute(
+                    text(
+                        "SELECT count(DISTINCT region_code), count(*) "
+                        "FROM published_posts "
+                        "WHERE kind = 'digest' AND published_at >= :start "
+                        "AND published_at < :stop"
+                    ),
+                    {"start": start, "stop": stop},
+                )
+            ).first()
+        return {"regions": int(row[0] or 0), "publications": int(row[1] or 0)}
+
+    try:
+        return asyncio.run(_query())
+    except Exception:  # noqa: BLE001 — база недоступна, суд продолжим по логам
+        return None
+
+
+def wave_slot_status(
+    succeeded_moments: Iterable[Tuple[str, datetime]],
+    night_start: datetime,
+) -> List[Dict[str, Any]]:
+    """Выполнены ли вечерние слоты волн (22:00 / 22:20 / 22:50).
+
+    Слот считается выполненным, если задача слотa отработала успешно в
+    окне ``[слот, слот + 10 мин]``. Проверка по слотам, а не «сколько всего
+    волн успело»: счёт «3 волны» зависел от того, когда именно завершилась
+    волна новостей 20:40, и потому краснел на здоровой ночи.
+    """
+    statuses: List[Dict[str, Any]] = []
+    for name, (hour, minute), task in EVENING_WAVE_SLOTS:
+        slot = night_start.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        limit = slot + SLOT_WINDOW
+        ok = any(
+            leaf == task and slot <= moment < limit
+            for leaf, moment in succeeded_moments
+            if moment is not None
+        )
+        statuses.append(
+            {
+                "name": name,
+                "task": task,
+                "slot": slot.isoformat(),
+                "ok": ok,
+            }
+        )
+    return statuses
+
+
 def default_since(now: Optional[datetime] = None) -> datetime:
     """Начало окна: слот сводки последнего прошедшего дня (21:40 МСК)."""
     moment = now or datetime.now(MSK)
@@ -194,6 +311,56 @@ def default_since(now: Optional[datetime] = None) -> datetime:
     if moment < slot:
         slot -= timedelta(days=1)
     return slot
+
+
+def night_window(now: Optional[datetime] = None) -> Dict[str, Any]:
+    """Ночное окно и режим работы: слот сводки 21:40 → 05:00 следующего дня.
+
+    Ночь — это слот 21:40 и следующие семь часов двадцать минут. Режим:
+
+    * ``prepare`` — за два часа до слота: готовимся к ночи, снимаем базу
+      хвоста; суд не выносится, ноча ещё не было;
+    * ``active`` — ночь идёт (21:40…23:50): суд не выносится, последняя волна
+      ещё может идти;
+    * ``verdict`` — ночь закончилась, суд выносится;
+    * ``day`` — днём: суд выносится за прошлую ночь (её доказательства могли
+      обнулиться на рестарте — об этом отчёт скажет прямо).
+    """
+    moment = now or datetime.now(MSK)
+    slot = moment.replace(hour=DIGEST_SLOT[0], minute=DIGEST_SLOT[1], second=0, microsecond=0)
+    mode = "day"
+    if moment >= slot:
+        night = slot
+        mode = "active"
+    elif moment.hour < NIGHT_END_SLOT[0]:
+        # после полуночи и до 05:00 — вердикт за ночь, что кончилась
+        night = slot - timedelta(days=1)
+        mode = "verdict"
+    elif moment >= slot - PREPARE_LEAD:
+        # 19:40…21:40 — база хвоста для сегодняшней ночи
+        night = slot
+        mode = "prepare"
+    else:
+        night = slot - timedelta(days=1)
+    end = (night + timedelta(days=1)).replace(
+        hour=NIGHT_END_SLOT[0], minute=0, second=0, microsecond=0
+    )
+    last_slot = night.replace(
+        hour=EVENING_WAVE_SLOTS[-1][1][0],
+        minute=EVENING_WAVE_SLOTS[-1][1][1],
+        second=0,
+        microsecond=0,
+    )
+    ready_at = last_slot + timedelta(seconds=REGION_SPREAD_SECONDS) + VERDICT_MARGIN
+    if mode == "active" and moment >= ready_at:
+        mode = "verdict"
+    return {
+        "start": night,
+        "end": end,
+        "ready_at": ready_at,
+        "mode": mode,
+        "night": night.strftime("%Y-%m-%d"),
+    }
 
 
 def parse_iso_moment(value: str) -> datetime:
@@ -346,13 +513,19 @@ def memory_free_mb() -> Optional[int]:
         return None
 
 
-def load_baseline(path: Path, since: Optional[datetime]) -> Optional[Dict[str, Any]]:
-    """База хвоста ``unacked``, записанная в этом же окне.
+def load_baseline(
+    path: Path,
+    night: str,
+    since: Optional[datetime],
+) -> Optional[Dict[str, Any]]:
+    """База хвоста ``unacked``, записанная **для этой ночи**.
 
     База нужна, потому что «хвост пуст» как критерий приёмки не работает: хвост
     прошлой ночи лежит в ``unacked`` часами (задачи ждут возврата), и без базы
     гейт красный ещё до начала ночи. Сравнивать надо **не вырос ли** хвост.
-    База протухшая (записана в прошлую ночь) — не берётся.
+
+    База другой ночи не берётся: сравнивать хвост после волн с хвостом,
+    снятым вчерашним вечером, — бессмысленно. Протухшая тоже.
     """
     if not path.exists():
         return None
@@ -367,6 +540,8 @@ def load_baseline(path: Path, since: Optional[datetime]) -> Optional[Dict[str, A
         # База старого формата (без счёта волн/сводки) — она измеряла весь хвост,
         # а весь хвост колышется. Такая база не годится: считаем заново.
         return None
+    if data.get("night") and str(data["night"]) != night:
+        return None
     try:
         moment = datetime.fromisoformat(str(stamp))
     except ValueError:
@@ -378,12 +553,19 @@ def load_baseline(path: Path, since: Optional[datetime]) -> Optional[Dict[str, A
     return data
 
 
-def save_baseline(path: Path, unacked: int, publication: int, now: datetime) -> None:
+def save_baseline(
+    path: Path,
+    night: str,
+    unacked: int,
+    publication: int,
+    now: datetime,
+) -> None:
     """Записать базу хвоста ``unacked`` (файл в ``logs/`` переживает рестарт)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
+                "night": night,
                 "ts": now.isoformat(),
                 "unacked": int(unacked),
                 "publication": int(publication),
@@ -422,12 +604,18 @@ def build_gates(
     expect_waves: int,
     expect_regions: int,
     baseline: Optional[Dict[str, Any]] = None,
+    slots: Optional[List[Dict[str, Any]]] = None,
+    digest_regions: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Гейты приёмки — те, что в будильнике, но с разделением классов."""
     revoked = log_stats.get("revoked_by_class") or {"wave": 0, "digest": 0, "other": 0}
     diagnostics = int(log_stats.get("p253_diagnostics") or 0)
-    waves = int(log_stats.get("waves_succeeded") or 0)
-    published = int(log_stats.get("digest_published") or 0)
+    slots = slots or []
+    slots_done = sum(1 for slot in slots if slot.get("ok"))
+    published_log = int(log_stats.get("digest_published") or 0)
+    # Сборники сводки считаем по журналу публикаций: он переживает обнуление
+    # логов на рестарте (P257). Лог — только сверка.
+    published = published_log if digest_regions is None else int(digest_regions)
     publication = int(redis_stats.get("publication", 0))
     base_publication = (baseline or {}).get("publication")
     if base_publication is None:
@@ -478,11 +666,15 @@ def build_gates(
         {
             "id": "waves",
             "title": "вечерние волны выполнены",
-            "value": waves,
+            "value": slots_done,
             "expect": expect_waves,
-            "ok": waves >= expect_waves,
+            "ok": slots_done >= expect_waves,
             "judged": True,
-            "note": "run_all_regions_theme … succeeded",
+            "note": "слоты по расписанию: %s"
+            % ", ".join(
+                "%s%s" % (slot["name"], "" if slot.get("ok") else " — НЕ ВЫПОЛНЕН")
+                for slot in slots
+            ),
         },
         {
             "id": "digest",
@@ -491,7 +683,10 @@ def build_gates(
             "expect": expect_regions,
             "ok": published >= expect_regions,
             "judged": True,
-            "note": "daily digest: регион=… опубликовано=True",
+            "note": (
+                "регионов со сборником по журналу публикаций (в логе — %d); "
+                "журнал переживает обнуление логов" % published_log
+            ),
         },
         unacked_gate,
         {
@@ -512,6 +707,15 @@ def render(report: Dict[str, Any]) -> str:
     window = report["window"]
     lines.append("=== Срез боевой ночи стенда ===")
     lines.append("окно: %s … %s (МСК)" % (window["since"], window["until"] or "сейчас"))
+    if report.get("night"):
+        lines.append(
+            "ночь: %s, режим: %s, суд с %s"
+            % (
+                report.get("night"),
+                report.get("mode"),
+                (report.get("ready_at") or "")[11:16],
+            )
+        )
     lines.append("логи: %s" % ", ".join(window["logs"]))
     lines.append(
         "строк в окне: %d (всего %d, без времени %d)"
@@ -521,6 +725,13 @@ def render(report: Dict[str, Any]) -> str:
             report["logs"]["lines_without_ts"],
         )
     )
+    first_ts = report["logs"].get("first_ts")
+    if first_ts:
+        last_ts = report["logs"].get("last_ts") or first_ts
+        lines.append(
+            "покрытие логов: с %s по %s"
+            % (first_ts.strftime("%d.%m %H:%M"), last_ts.strftime("%d.%m %H:%M"))
+        )
     lines.append("")
     lines.append("--- гейты ---")
     for gate in report["gates"]:
@@ -540,6 +751,21 @@ def render(report: Dict[str, Any]) -> str:
         )
     lines.append("")
     lines.append("--- подробности ---")
+    slots = report.get("slots") or []
+    if slots:
+        lines.append(
+            "слоты волн: "
+            + ", ".join(
+                "%s %s" % (slot["name"], "ок" if slot.get("ok") else "НЕ ВЫПОЛНЕН")
+                for slot in slots
+            )
+        )
+    digest_db = report.get("digest_db") or {}
+    if digest_db:
+        lines.append(
+            "сборники сводки по журналу публикаций: регионов=%d, публикаций=%d"
+            % (digest_db.get("regions", 0), digest_db.get("publications", 0))
+        )
     lines.append(
         "отброшено: волна=%d сводка=%d прочее=%d"
         % (
@@ -632,10 +858,19 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     parser = argparse.ArgumentParser(
         description="Срез боевой ночи локального стенда по критериям приёмки P253."
     )
-    parser.add_argument("--since", default="", help="начало окна (МСК), по умолчанию — слот 21:40")
+    parser.add_argument(
+        "--since",
+        default="",
+        help="начало окна (МСК); по умолчанию — слот сводки 21:40 текущей ночи",
+    )
     parser.add_argument("--until", default="", help="конец окна (МСК), по умолчанию — сейчас")
     parser.add_argument("--logs", default=str(REPO_ROOT / "logs"), help="каталог логов")
-    parser.add_argument("--expect-waves", type=int, default=3, help="сколько вечерних волн ждём")
+    parser.add_argument(
+        "--expect-waves",
+        type=int,
+        default=len(EVENING_WAVE_SLOTS),
+        help="сколько вечерних слотов волн ждём (по умолчанию — все по расписанию)",
+    )
     parser.add_argument(
         "--expect-regions", type=int, default=84, help="сколько сборников сводки ждём"
     )
@@ -644,6 +879,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     )
     parser.add_argument("--no-redis", action="store_true", help="не опрашивать Redis")
     parser.add_argument("--no-snapshot", action="store_true", help="не снимать снимок логов")
+    parser.add_argument("--no-db", action="store_true", help="не спрашивать журнал публикаций")
     parser.add_argument(
         "--baseline",
         default="",
@@ -657,12 +893,20 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     load_env_files()
 
     now = datetime.now(MSK)
-    since = parse_iso_moment(args.since) if args.since else default_since(now)
-    until = parse_iso_moment(args.until) if args.until else None
+    window = night_window(now)
+    if args.since:
+        since = parse_iso_moment(args.since)
+        night = since.strftime("%Y-%m-%d")
+        mode = "verdict" if now >= window["ready_at"] else "active"
+    else:
+        since = window["start"]
+        night = window["night"]
+        mode = window["mode"]
+    until = parse_iso_moment(args.until) if args.until else min(now, window["end"])
 
     logs_dir = Path(args.logs)
     baseline_path = Path(args.baseline) if args.baseline else logs_dir / "night_cut_baseline.json"
-    baseline = load_baseline(baseline_path, since)
+    baseline = load_baseline(baseline_path, night, since)
     found: List[Path] = []
     for name in WORKER_LOGS:
         candidate = logs_dir / name
@@ -671,6 +915,9 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
 
     report: Dict[str, Any] = {
         "generated_at": now.isoformat(),
+        "night": night,
+        "mode": mode,
+        "ready_at": window["ready_at"].isoformat(),
         "window": {
             "since": since.isoformat(),
             "until": until.isoformat() if until else None,
@@ -689,6 +936,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         report["paid"] = {"by_engine": {}, "deepseek_by_label": {}, "paid_total": 0, "failures": {}}
         report["engine_discovery"] = {}
         report["memory_free_mb"] = memory_free_mb()
+        report["slots"] = []
         report["gates"] = build_gates(
             report["logs"],
             report["redis"],
@@ -717,6 +965,7 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     for path in found:
         lines.extend(path.read_text(encoding="utf-8", errors="replace").splitlines())
     report["logs"] = scan_lines(lines, since=since, until=until)
+    report["slots"] = wave_slot_status(report["logs"]["succeeded_moments"], since)
 
     redis_stats: Dict[str, Any] = {}
     if not args.no_redis:
@@ -731,24 +980,28 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         )
 
     # База хвоста: без неё гейт «в хвосте нет волн/сводки» не судим (хвост
-    # прошлой ночи лежит часами). База пишется один раз — до волн; суд — по
-    # второму прогону.
+    # прошлой ночи лежит часами). База пишется один раз — в окне подготовки,
+    # до слота сводки; переписывать её позже нельзя, иначе сравнение теряет
+    # смысл: в хвосте уже будут задачи этой ночи.
     baseline_created = False
-    if baseline is None and "unacked" in redis_stats:
+    if baseline is None and mode == "prepare" and "unacked" in redis_stats:
         save_baseline(
             baseline_path,
+            night,
             int(redis_stats["unacked"]),
             int(redis_stats.get("publication", 0)),
             now,
         )
         baseline_created = True
         baseline = {
+            "night": night,
             "ts": now.isoformat(),
             "unacked": int(redis_stats["unacked"]),
             "publication": int(redis_stats.get("publication", 0)),
         }
     report["baseline"] = {
         "path": str(baseline_path),
+        "night": night,
         "created": baseline_created,
         "value": (baseline or {}).get("publication"),
         "unacked_total": (baseline or {}).get("unacked"),
@@ -762,6 +1015,11 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     report["engine_discovery"] = engine_calls(minimax_rows, label="discovery")
     report["memory_free_mb"] = memory_free_mb()
 
+    digest_db: Optional[Dict[str, Any]] = None
+    if not args.no_db:
+        digest_db = digest_publications_db(since, until)
+    report["digest_db"] = digest_db or {}
+
     report["gates"] = build_gates(
         report["logs"],
         report["redis"],
@@ -769,11 +1027,29 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         expect_waves=args.expect_waves,
         expect_regions=args.expect_regions,
         baseline=baseline if not baseline_created else None,
+        slots=report["slots"],
+        digest_regions=(digest_db or {}).get("regions"),
     )
     failed = [gate for gate in report["gates"] if not gate["ok"]]
     unjudged = [gate for gate in report["gates"] if not gate.get("judged", True)]
-    if report["logs"]["lines_in_window"] == 0:
-        report["verdict"] = "нет данных (в окне нет строк логов)"
+    if mode == "prepare":
+        report["verdict"] = "базовый прогон: ночь %s начнётся в 21:40 — суд после %s" % (
+            night,
+            window["ready_at"].strftime("%H:%M"),
+        )
+    elif mode == "active":
+        report["verdict"] = (
+            "ночь не закончена: последняя волна разводит регионы до %s — суд позже"
+            % window["ready_at"].strftime("%H:%M")
+        )
+    elif report["logs"]["lines_in_window"] == 0:
+        first = report["logs"].get("first_ts")
+        coverage = (
+            "логи с %s — ночь не покрыта (рестарт обнулил их, P257)" % first.strftime("%d.%m %H:%M")
+            if first
+            else "логи воркеров пусты"
+        )
+        report["verdict"] = "нет данных: %s" % coverage
     elif unjudged:
         report["verdict"] = (
             "база хвоста записана (волн/сводки: %d, всего сообщений: %d) — суд по "
@@ -803,6 +1079,8 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
     if report["verdict"] == "pass":
         return 0
     if report["verdict"].startswith("нет данных"):
+        return 2
+    if report["verdict"].startswith(("базовый прогон", "ночь не закончена")):
         return 2
     return 1
 
