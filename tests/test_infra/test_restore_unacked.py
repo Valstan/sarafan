@@ -132,6 +132,53 @@ class _FakeRedis:
         return 1
 
 
+def test_select_messages_applies_queue_filter() -> None:
+    """Сухой прогон должен показывать ровно то, что вернётся.
+
+    Живой стенд 27.11 07:45: в `unacked` лежали 10 сообщений (6 волновых и 4
+    сводки), а `--queue wave` отбирал 6 — но отчёт показывал все десять, и
+    выглядело это как «инструмент возвращает не то, что обещает».
+    """
+    raw = {
+        b"tag1": _payload(
+            "tasks.parsing_scheduler_tasks.parse_and_publish_theme",
+            ["copy", "setka"],
+            routing_key="wave",
+        ),
+        b"tag2": _payload(
+            "tasks.digest_tasks.publish_daily_digest_region",
+            ["vp"],
+            routing_key="digest",
+        ),
+    }
+    selected = restore_unacked.select_messages(raw, only_queue="wave")
+    assert list(selected) == [b"tag1"], f"отбор по очереди неверный: {list(selected)}"
+
+    everything = restore_unacked.select_messages(raw)
+    assert set(everything) == {b"tag1", b"tag2"}
+
+
+def test_select_messages_applies_expired_filter() -> None:
+    """`--only-expired` отбирает протухшие; живые остаются нетронутыми."""
+    now = time.time()
+    alive = _payload(
+        "tasks.parsing_scheduler_tasks.parse_and_publish_theme",
+        ["copy", "setka"],
+        routing_key="wave",
+        expires_in=3600,
+    )
+    dead = _payload(
+        "tasks.parsing_scheduler_tasks.parse_and_publish_theme",
+        ["laishevo", "novost"],
+        routing_key="wave",
+        expires_in=-3600,
+    )
+    selected = restore_unacked.select_messages(
+        {b"alive": alive, b"dead": dead}, only_expired=True, now=now
+    )
+    assert list(selected) == [b"dead"], f"отбор по сроку неверный: {list(selected)}"
+
+
 def test_write_back_puts_refreshed_headers_into_the_hash() -> None:
     """Правка срока обязана лежать в хеше: брокер читает тело оттуда.
 
