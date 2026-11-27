@@ -13,6 +13,8 @@ from __future__ import annotations
 import base64
 import json
 import sys
+import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -22,12 +24,21 @@ import restore_unacked  # noqa: E402
 from kombu.utils.json import dumps  # noqa: E402
 
 
-def _payload(task: str, args: list, routing_key: str = "digest") -> bytes:
+def _payload(
+    task: str,
+    args: list,
+    routing_key: str = "digest",
+    expires_in: int = 3600,
+) -> bytes:
     """Сообщение в том виде, в каком kombu кладёт его в хеш `unacked`."""
     body = base64.b64encode(json.dumps([task, args, {}]).encode("utf-8")).decode("ascii")
+    eta = datetime.now(timezone.utc) + timedelta(seconds=60)
+    headers = {"task": task, "eta": eta.isoformat()}
+    if expires_in is not None:
+        headers["expires"] = (eta + timedelta(seconds=expires_in)).isoformat()
     message = {
         "body": body,
-        "headers": {"task": task},
+        "headers": headers,
         "properties": {"delivery_info": {"routing_key": routing_key}},
         "content-type": "application/json",
         "content-encoding": "utf-8",
@@ -39,7 +50,7 @@ def test_describe_reads_task_and_queue() -> None:
     payload = _payload(
         "tasks.digest_tasks.publish_daily_digest_region", ["vp", "2026-11-25T21:00:00"]
     )
-    task, queue, args = restore_unacked.describe(payload)
+    task, queue, args, _headers = restore_unacked.describe(payload)
     assert task == "tasks.digest_tasks.publish_daily_digest_region"
     assert queue == "digest"
     assert "vp" in args
@@ -53,7 +64,7 @@ def test_describe_survives_broken_body() -> None:
         "properties": {},
     }
     payload = dumps([message, "", "celery"])
-    task, queue, _args = restore_unacked.describe(payload)
+    task, queue, _args, _headers = restore_unacked.describe(payload)
     assert task == "tasks.broken"
     assert queue == "celery"
 
@@ -75,3 +86,36 @@ def test_summarize_marks_unparsable_messages() -> None:
     raw = {b"tag1": b"{not json at all"}
     counter = restore_unacked.summarize(raw)
     assert counter["<не разобрано>"] == 1
+
+
+def test_expiry_state_sees_dead_and_alive() -> None:
+    """Протухшая задача должна быть видна в отчёте — иначе возврат бессмыслен."""
+    now = time.time()
+    alive_headers = {"expires": datetime.fromtimestamp(now + 600).isoformat()}
+    dead_headers = {"expires": datetime.fromtimestamp(now - 600).isoformat()}
+    assert restore_unacked.expiry_state(alive_headers, now) == "жива"
+    assert restore_unacked.expiry_state(dead_headers, now) == "протухла"
+    assert restore_unacked.expiry_state({}, now) == "срока нет"
+
+
+def test_refresh_deadline_extends_only_dead_tasks() -> None:
+    """Живую задачу не трогаем, протухшую — продлеваем."""
+    now = time.time()
+    dead = {"expires": datetime.fromtimestamp(now - 600).isoformat()}
+    alive = {"expires": datetime.fromtimestamp(now + 600).isoformat()}
+
+    assert restore_unacked.refresh_deadline(dead, now=now, ttl_sec=3600, eta_in=0) is True
+    assert restore_unacked.parse_moment(dead["expires"]) > now + 3000
+
+    assert restore_unacked.refresh_deadline(alive, now=now, ttl_sec=3600, eta_in=0) is False
+
+
+def test_refresh_deadline_moves_eta_forward() -> None:
+    """Сдвиг eta — чтобы возвращённые задачи не начали бить все разом."""
+    now = time.time()
+    headers = {
+        "expires": datetime.fromtimestamp(now - 600).isoformat(),
+        "eta": datetime.fromtimestamp(now - 60).isoformat(),
+    }
+    restore_unacked.refresh_deadline(headers, now=now, ttl_sec=3600, eta_in=900)
+    assert restore_unacked.parse_moment(headers["eta"]) >= now + 800
