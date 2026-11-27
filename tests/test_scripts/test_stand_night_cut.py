@@ -174,7 +174,7 @@ def test_build_gates_split_revocation_classes() -> None:
         "p253_diagnostics": 0,
         "revoked_by_class": {"wave": 0, "digest": 0, "other": 2},
     }
-    redis_stats = {"unacked": 0}
+    redis_stats = {"unacked": 13, "publication": 10}
     paid = {"paid_total": 0}
     gates = snc.build_gates(
         log_stats,
@@ -182,7 +182,11 @@ def test_build_gates_split_revocation_classes() -> None:
         paid,
         expect_waves=3,
         expect_regions=84,
-        baseline={"ts": "2026-11-27T21:30:00+03:00", "unacked": 13},
+        baseline={
+            "ts": "2026-11-27T21:30:00+03:00",
+            "unacked": 13,
+            "publication": 10,
+        },
     )
     by_id = {gate["id"]: gate for gate in gates}
     assert by_id["revoked_publication"]["ok"] is True
@@ -195,7 +199,7 @@ def test_build_gates_unacked_without_base_is_not_judged() -> None:
     """Без базы гейт по хвосту не судится: хвост прошлой ночи лежит часами."""
     gates = snc.build_gates(
         {"revoked_by_class": {}},
-        {"unacked": 13},
+        {"unacked": 13, "publication": 10},
         {"paid_total": 0},
         expect_waves=3,
         expect_regions=84,
@@ -208,16 +212,37 @@ def test_build_gates_unacked_without_base_is_not_judged() -> None:
 def test_build_gates_unacked_growth_fails_against_base() -> None:
     gates = snc.build_gates(
         {"revoked_by_class": {}},
-        {"unacked": 16},
+        {"unacked": 16, "publication": 4},
         {"paid_total": 0},
         expect_waves=3,
         expect_regions=84,
-        baseline={"ts": "2026-11-27T21:30:00+03:00", "unacked": 13},
+        baseline={
+            "ts": "2026-11-27T21:30:00+03:00",
+            "unacked": 13,
+            "publication": 3,
+        },
     )
     unacked = {gate["id"]: gate for gate in gates}["unacked"]
     assert unacked["judged"] is True
     assert unacked["ok"] is False
-    assert unacked["expect"] == 13
+    assert unacked["expect"] == 3
+
+
+def test_publication_tasks_count_ignores_periodic_tail() -> None:
+    """Гейт по хвосту считает только волны и сводку.
+
+    Периодика в `unacked` живёт минутами (задача в работе) и колышет весь
+    хвост: 27.11 он гулял 10 → 13 → 10 → 14 за час. Считать гейтом весь хвост —
+    ловить чехарду.
+    """
+    composition = {
+        "tasks.parsing_scheduler_tasks.parse_and_publish_theme": 6,
+        "tasks.digest_tasks.publish_daily_digest_region": 4,
+        "tasks.celery_app.dispatch_ad_reposts": 3,
+        "tasks.broadcast_tasks.dispatch_broadcasts": 2,
+        "tasks.celery_app.scan_suggested_ads": 1,
+    }
+    assert snc.publication_tasks_count(composition) == 10
 
 
 def test_load_baseline_ignores_stale_file(tmp_path) -> None:
@@ -229,11 +254,23 @@ def test_load_baseline_ignores_stale_file(tmp_path) -> None:
 
 def test_load_baseline_reads_fresh_file(tmp_path) -> None:
     path = tmp_path / "baseline.json"
-    path.write_text('{"ts": "2026-11-27T21:30:00+03:00", "unacked": 13}', encoding="utf-8")
+    path.write_text(
+        '{"ts": "2026-11-27T21:30:00+03:00", "unacked": 13, "publication": 10}',
+        encoding="utf-8",
+    )
     since = datetime(2026, 11, 27, 21, 40, tzinfo=MSK)
     data = snc.load_baseline(path, since)
     assert data is not None
     assert data["unacked"] == 13
+    assert data["publication"] == 10
+
+
+def test_load_baseline_ignores_old_format(tmp_path) -> None:
+    """База без счёта волн/сводки измеряла весь хвост — а он колышется."""
+    path = tmp_path / "baseline.json"
+    path.write_text('{"ts": "2026-11-27T21:30:00+03:00", "unacked": 13}', encoding="utf-8")
+    since = datetime(2026, 11, 27, 21, 40, tzinfo=MSK)
+    assert snc.load_baseline(path, since) is None
 
 
 @pytest.mark.parametrize(

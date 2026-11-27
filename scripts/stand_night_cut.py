@@ -319,6 +319,23 @@ def redis_snapshot(broker_url: str) -> Dict[str, Any]:
     }
 
 
+def publication_tasks_count(composition: Dict[str, int]) -> int:
+    """Сколько в хвосте `unacked` сообщений **волн и сводки**.
+
+    Хвост колышется: периодические задачи (`dispatch_ad_reposts`,
+    `dispatch_broadcasts`, `scan_suggested_ads`) в нём **живут минутами** — они
+    в работе, и через минуту будут подтверждены. 27.11 хвост гулял 10 → 13 →
+    10 → 14 за час. Считать гейтом весь хвост — значит ловить эту чехарду и
+    получать ложную тревогу; ловить надо **только то, что означает потерю
+    публикации**, — задачи волн и сводки (как и с отбрасываниями).
+    """
+    total = 0
+    for task, count in (composition or {}).items():
+        if classify_task(task) in ("wave", "digest"):
+            total += int(count)
+    return total
+
+
 def memory_free_mb() -> Optional[int]:
     """Сколько памяти свободно (МБ). ``None`` — не смогли измерить."""
     try:
@@ -346,6 +363,10 @@ def load_baseline(path: Path, since: Optional[datetime]) -> Optional[Dict[str, A
     stamp = data.get("ts")
     if not stamp:
         return None
+    if data.get("publication") is None:
+        # База старого формата (без счёта волн/сводки) — она измеряла весь хвост,
+        # а весь хвост колышется. Такая база не годится: считаем заново.
+        return None
     try:
         moment = datetime.fromisoformat(str(stamp))
     except ValueError:
@@ -357,11 +378,18 @@ def load_baseline(path: Path, since: Optional[datetime]) -> Optional[Dict[str, A
     return data
 
 
-def save_baseline(path: Path, unacked: int, now: datetime) -> None:
+def save_baseline(path: Path, unacked: int, publication: int, now: datetime) -> None:
     """Записать базу хвоста ``unacked`` (файл в ``logs/`` переживает рестарт)."""
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
-        json.dumps({"ts": now.isoformat(), "unacked": int(unacked)}, ensure_ascii=False),
+        json.dumps(
+            {
+                "ts": now.isoformat(),
+                "unacked": int(unacked),
+                "publication": int(publication),
+            },
+            ensure_ascii=False,
+        ),
         encoding="utf-8",
     )
 
@@ -400,13 +428,13 @@ def build_gates(
     diagnostics = int(log_stats.get("p253_diagnostics") or 0)
     waves = int(log_stats.get("waves_succeeded") or 0)
     published = int(log_stats.get("digest_published") or 0)
-    unacked = int(redis_stats.get("unacked", -1))
-    base_unacked = (baseline or {}).get("unacked")
-    if base_unacked is None:
+    publication = int(redis_stats.get("publication", 0))
+    base_publication = (baseline or {}).get("publication")
+    if base_publication is None:
         unacked_gate = {
             "id": "unacked",
-            "title": "хвост unacked не вырос",
-            "value": unacked,
+            "title": "в хвосте нет волн/сводки",
+            "value": publication,
             "expect": 0,
             "ok": False,
             "judged": False,
@@ -418,10 +446,10 @@ def build_gates(
     else:
         unacked_gate = {
             "id": "unacked",
-            "title": "хвост unacked не вырос",
-            "value": unacked,
-            "expect": int(base_unacked),
-            "ok": unacked <= int(base_unacked),
+            "title": "в хвосте нет волн/сводки",
+            "value": publication,
+            "expect": int(base_publication),
+            "ok": publication <= int(base_publication),
             "judged": True,
             "note": "не вырос относительно базы, записанной до волн",
         }
@@ -501,6 +529,15 @@ def render(report: Dict[str, Any]) -> str:
             "  [%s] %-38s %s (ожидалось %s) — %s"
             % (mark, gate["title"], gate["value"], gate["expect"], gate["note"])
         )
+    if (report.get("baseline") or {}).get("created"):
+        lines.append("")
+        lines.append(
+            ">>> БАЗОВЫЙ ПРОГОН: снята база хвоста (%s) и снимок логов."
+            % report["baseline"].get("value")
+        )
+        lines.append(
+            ">>> Окно широкое (с прошлого слота 21:40) — суд по второму прогону, " "после волн."
+        )
     lines.append("")
     lines.append("--- подробности ---")
     lines.append(
@@ -531,9 +568,10 @@ def render(report: Dict[str, Any]) -> str:
     redis_stats = report.get("redis") or {}
     if redis_stats:
         lines.append(
-            "unacked: %d | очереди: %s"
+            "unacked: %d (волн/сводки: %d) | очереди: %s"
             % (
                 redis_stats.get("unacked", -1),
+                redis_stats.get("publication", 0),
                 ", ".join(
                     "%s=%d" % (name, count)
                     for name, count in sorted((redis_stats.get("queues") or {}).items())
@@ -687,18 +725,33 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         except Exception as exc:  # noqa: BLE001 — отчёт без redis хуже, но не пустой
             redis_stats = {"error": "%s: %s" % (type(exc).__name__, exc)}
     report["redis"] = redis_stats
+    if "unacked_by_task" in redis_stats:
+        redis_stats["publication"] = publication_tasks_count(
+            redis_stats.get("unacked_by_task") or {}
+        )
 
-    # База хвоста: без неё гейт «unacked не вырос» не судим (хвост прошлой ночи
-    # лежит часами). База пишется один раз — до волн; суд — по второму прогону.
+    # База хвоста: без неё гейт «в хвосте нет волн/сводки» не судим (хвост
+    # прошлой ночи лежит часами). База пишется один раз — до волн; суд — по
+    # второму прогону.
     baseline_created = False
     if baseline is None and "unacked" in redis_stats:
-        save_baseline(baseline_path, int(redis_stats["unacked"]), now)
+        save_baseline(
+            baseline_path,
+            int(redis_stats["unacked"]),
+            int(redis_stats.get("publication", 0)),
+            now,
+        )
         baseline_created = True
-        baseline = {"ts": now.isoformat(), "unacked": int(redis_stats["unacked"])}
+        baseline = {
+            "ts": now.isoformat(),
+            "unacked": int(redis_stats["unacked"]),
+            "publication": int(redis_stats.get("publication", 0)),
+        }
     report["baseline"] = {
         "path": str(baseline_path),
         "created": baseline_created,
-        "value": (baseline or {}).get("unacked"),
+        "value": (baseline or {}).get("publication"),
+        "unacked_total": (baseline or {}).get("unacked"),
         "ts": (baseline or {}).get("ts"),
     }
 
@@ -725,8 +778,12 @@ def main(argv: Optional[Iterable[str]] = None) -> int:
         report["verdict"] = "нет данных (в окне нет строк логов)"
     elif unjudged:
         report["verdict"] = (
-            "база хвоста записана (%d) — суд по второму прогону, после волн"
-            % report["baseline"]["value"]
+            "база хвоста записана (волн/сводки: %d, всего сообщений: %d) — суд по "
+            "второму прогону, после волн"
+            % (
+                report["baseline"].get("value") or 0,
+                report["baseline"].get("unacked_total") or 0,
+            )
         )
     elif failed:
         report["verdict"] = "провалы: " + ", ".join(gate["id"] for gate in failed)
