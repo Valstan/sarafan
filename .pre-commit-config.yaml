@@ -75,3 +75,15 @@ repos:
         pass_filenames: false
         files: ^docs/(PENDING_FOLLOWUPS\.md|pending/)
         stages: [pre-commit]
+
+      # Гейт системы мозга проекта: линза не должна разойтись с кодом, реестр
+      # экспертов — с ролями. Ловит молчаливый отказ класса «документ выглядит
+      # живым, пока в нём написано "как было"»: переименованный каталог в линзе,
+      # выпавшая роль, выкинутое правило обновления из правил проекта.
+      - id: brain-consistency
+        name: brain consistency (lens == code, roles == registry)
+        entry: python scripts/brain_gate.py
+        language: system
+        pass_filenames: false
+        files: ^(AGENTS\.md|docs/(PROJECT_LENS|EXPERTS|INTAKE)\.md|scripts/brain_gate\.py)$
+        stages: [pre-commit]
